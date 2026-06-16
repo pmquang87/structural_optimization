@@ -1,0 +1,159 @@
+"""Launch OpenRadioss (starter + engine) as a subprocess, np=1.
+
+Ports the working ``run_or.ps1`` recipe to Python: the pure-OpenMP engine
+(``engine_win64.exe``, no mpiexec) is used because the model must run with a
+single MPI domain (SPMD implicit + solid contact segfaults). Environment mirrors
+the PowerShell launcher plus the i9-13900H livelock mitigation
+(``KMP_BLOCKTIME=0`` / ``OMP_WAIT_POLICY=PASSIVE`` / 6 threads).
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from .config import Config
+
+# PATH entries the win64 binaries need (hm_reader DLL for the starter,
+# libiomp5md.dll for the OpenMP engine, h3d libs for animation output).
+_PATH_SUBDIRS = (
+    "exec",
+    r"extlib\hm_reader\win64",
+    r"extlib\h3d\lib\win64",
+    r"extlib\intelOneAPI_runtime\win64",
+)
+
+
+@dataclass
+class RunResult:
+    ok: bool
+    stage: str                 # "starter" | "engine" | "ok"
+    message: str
+    returncode: Optional[int] = None
+    cycles: Optional[int] = None
+    elapsed_s: Optional[float] = None
+
+
+def build_env(cfg: Config) -> dict:
+    """Environment for the OpenRadioss subprocess (a copy of os.environ + OR vars)."""
+    p = cfg.or_paths
+    env = dict(os.environ)
+    env["OPENRADIOSS_PATH"] = str(Path(p.root))
+    env["RAD_CFG_PATH"] = str(p.abs("cfg_path"))
+    env["RAD_H3D_PATH"] = str(p.abs("h3d_path"))
+    env["KMP_STACKSIZE"] = cfg.run.kmp_stacksize
+    env["OMP_NUM_THREADS"] = str(cfg.run.nt)
+    env["KMP_AFFINITY"] = "disabled"
+    env["KMP_BLOCKTIME"] = "0"            # livelock mitigation
+    env["OMP_WAIT_POLICY"] = "PASSIVE"    # livelock mitigation
+    prepend = [str(Path(p.root) / sub) for sub in _PATH_SUBDIRS]
+    if cfg.run.use_mpi:                   # Intel MPI runtime (impi.dll, libfabric) for the engine
+        env["I_MPI_ROOT"] = str(Path(p.intel_mpi_root))
+        env["I_MPI_OFI_LIBRARY_INTERNAL"] = "1"
+        prepend = p.mpi_path_dirs() + prepend
+    env["PATH"] = os.pathsep.join(prepend + [env.get("PATH", "")])
+    return env
+
+
+def _run(cmd, cwd: Path, env: dict, log: Path, timeout: float) -> subprocess.CompletedProcess:
+    with open(log, "w", encoding="utf-8", errors="replace") as fh:
+        return subprocess.run(
+            cmd, cwd=str(cwd), env=env, stdout=fh, stderr=subprocess.STDOUT,
+            timeout=timeout, check=False,
+        )
+
+
+def _starter_ok(out_file: Path) -> tuple[bool, str]:
+    """Starter success = its listing reports ``0 ERROR(S)`` (it never prints
+    "NORMAL TERMINATION" — that is the engine's marker)."""
+    if not out_file.exists():
+        return False, f"missing starter listing: {out_file.name}"
+    text = out_file.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"(\d+)\s+ERROR\(S\)", text)
+    if m:
+        n = int(m.group(1))
+        return (n == 0), ("0 ERROR(S)" if n == 0 else f"{n} starter ERROR(S)")
+    return False, "starter ended without an ERROR(S) summary"
+
+
+def _engine_ok(out_file: Path) -> tuple[bool, str]:
+    if not out_file.exists():
+        return False, f"missing engine listing: {out_file.name}"
+    text = out_file.read_text(encoding="utf-8", errors="replace")
+    if "NORMAL TERMINATION" in text:
+        return True, "NORMAL TERMINATION"
+    for marker in ("ERROR TERMINATION", "ERROR ID", "** ERROR"):
+        if marker in text:
+            for line in text.splitlines():
+                if marker in line:
+                    return False, line.strip()
+    return False, "no NORMAL TERMINATION found"
+
+
+def _parse_engine_stats(out_file: Path) -> tuple[Optional[int], Optional[float]]:
+    if not out_file.exists():
+        return None, None
+    text = out_file.read_text(encoding="utf-8", errors="replace")
+    cyc = re.search(r"TOTAL NUMBER OF CYCLES\s*:\s*(\d+)", text)
+    el = re.search(r"ELAPSED TIME\s*=\s*([\d.]+)\s*s", text)
+    return (int(cyc.group(1)) if cyc else None,
+            float(el.group(1)) if el else None)
+
+
+def run_solver(cfg: Config, run_dir: str | Path) -> RunResult:
+    """Run starter then engine in *run_dir*; return a RunResult.
+
+    The deck (``<stem>_0000.rad`` / ``_0001.rad``) must already exist in *run_dir*.
+    """
+    run_dir = Path(run_dir).resolve()
+    env = build_env(cfg)
+    stem = cfg.model.stem
+
+    starter = cfg.or_paths.abs("starter")
+    engine = cfg.or_paths.abs("engine")
+    for exe in (starter, engine):
+        if not exe.exists():
+            return RunResult(False, "setup", f"executable not found: {exe}")
+    if cfg.run.use_mpi and not cfg.or_paths.mpiexec().exists():
+        return RunResult(False, "setup", f"mpiexec not found: {cfg.or_paths.mpiexec()}")
+
+    # --- starter ---
+    try:
+        cp = _run([str(starter), "-i", f"{stem}_0000.rad", "-np", str(cfg.run.np)],
+                  run_dir, env, run_dir / f"{stem}_starter.log", cfg.run.starter_timeout_s)
+    except subprocess.TimeoutExpired:
+        return RunResult(False, "starter", "starter timed out", cycles=None)
+    ok, msg = _starter_ok(run_dir / f"{stem}_0000.out")
+    if not ok:
+        return RunResult(False, "starter", f"starter failed: {msg}", cp.returncode)
+
+    # --- engine (np=1 via mpiexec; the bare engine cannot load its MPI DLLs) ---
+    if cfg.run.use_mpi:
+        engine_cmd = [str(cfg.or_paths.mpiexec()), "-np", str(cfg.run.np),
+                      str(engine), "-i", f"{stem}_0001.rad", "-nt", str(cfg.run.nt)]
+    else:
+        engine_cmd = [str(engine), "-i", f"{stem}_0001.rad", "-nt", str(cfg.run.nt)]
+    try:
+        cp = _run(engine_cmd, run_dir, env, run_dir / f"{stem}_engine.log", cfg.run.engine_timeout_s)
+    except subprocess.TimeoutExpired:
+        return RunResult(False, "engine", "engine timed out")
+    ok, msg = _engine_ok(run_dir / f"{stem}_0001.out")
+    cycles, elapsed = _parse_engine_stats(run_dir / f"{stem}_0001.out")
+    if not ok:
+        return RunResult(False, "engine", f"engine failed: {msg}", cp.returncode, cycles, elapsed)
+    return RunResult(True, "ok", msg, cp.returncode, cycles, elapsed)
+
+
+def find_t01(run_dir: str | Path, stem: str) -> Optional[Path]:
+    p = Path(run_dir) / f"{stem}T01"
+    return p if p.exists() else None
+
+
+def find_last_anim(run_dir: str | Path, stem: str) -> Optional[Path]:
+    """Latest animation file ``<stem>A0NN`` in *run_dir* (highest index)."""
+    run_dir = Path(run_dir)
+    anims = sorted(run_dir.glob(f"{stem}A[0-9][0-9]*"))
+    return anims[-1] if anims else None
