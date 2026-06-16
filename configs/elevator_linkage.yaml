@@ -1,0 +1,44 @@
+or_paths:
+  root: C:\OpenRadioss
+  starter: exec/starter_win64.exe
+  engine: exec/engine_win64_impi.exe
+  anim_to_vtk: exec/anim_to_vtk_win64.exe
+  th_to_csv: exec/th_to_csv_win64.exe
+  cfg_path: hm_cfg_files
+  h3d_path: extlib\h3d\lib\win64
+  intel_mpi_root: C:\Program Files (x86)\Intel\oneAPI\mpi\latest
+run:
+  np: 1
+  nt: 12
+  use_mpi: true
+  starter_timeout_s: 60000
+  engine_timeout_s: 360000
+  kmp_stacksize: 400m
+  anim_dt: 1.0
+model:
+  case_dir: E:\foxcore_data\_MITEB\openradioss\implicit_elevator-linkage\implicit_6kN_elevator-linkage_pull__BC-A\opti_test
+  stem: implicit_elevator-linkage
+  design_part_id: 60000000
+  design_node_min: 60000000
+  disp_node_id: 10021367
+  bc_group_id: 60000000
+  freeze_group_ids:
+  - 99999999
+  freeze_node_ids: []
+constraints:
+  sigma_allow: 292.0
+  d_allow: 5.0
+beso:
+  evolution_rate: 0.02
+  max_add_ratio: 0.01
+  filter_radius: 1.25
+  history_weight: 0.5
+  target_volume_fraction: 0.7
+  sensitivity: energy
+  blend_weight: 0.5
+  max_iter: 150
+  convergence_tol: 0.001
+  convergence_window: 5
+  protect_layers: 2
+  contact_protect_dist: 0.0
+work_dir: runs/run01
