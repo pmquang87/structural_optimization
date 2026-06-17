@@ -1,5 +1,7 @@
 """Status/history/checkpoint round-trips and topology export."""
 import os
+import subprocess
+import sys
 
 import numpy as np
 
@@ -88,3 +90,12 @@ def test_pid_alive():
     assert st.pid_alive(os.getpid())
     assert not st.pid_alive(2_000_000_000)
     assert not st.pid_alive(None)
+
+
+def test_pid_alive_exited_child():
+    # subprocess keeps the child's process handle open after wait(), which on
+    # Windows keeps the kernel object around — the lingering-handle case that
+    # made pid_alive() report an exited run as still running.
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    assert not st.pid_alive(child.pid)
