@@ -66,7 +66,7 @@ if not cfg_path.exists():
     st.sidebar.error("Config not found.")
     st.stop()
 cfg = Config.from_yaml(cfg_path)
-work = Path(cfg.work_dir)
+work = Path(cfg.run_folder())          # work_dir, or the input case_dir when blank
 if not work.is_absolute():
     work = PROJECT_ROOT / work
 
@@ -86,6 +86,10 @@ if c3.button("↻ Resume", disabled=running, use_container_width=True):
 if st.sidebar.button("⏹ Force kill", disabled=not running):
     force_kill(work)
 
+refresh_s = int(st.sidebar.number_input(
+    "Refresh interval (s)", min_value=1, max_value=3600, value=60, step=5,
+    help="How often the Monitor tab re-reads the run's status files."))
+
 tab_in, tab_con, tab_mon = st.tabs(["📥 Input", "🎚 Constraints / BC", "📊 Monitor"])
 
 # ---- Input tab -------------------------------------------------------------
@@ -93,6 +97,10 @@ with tab_in:
     st.subheader("Model")
     cfg.model.case_dir = st.text_input("Case directory", cfg.model.case_dir)
     cfg.model.stem = st.text_input("Deck stem", cfg.model.stem)
+    cfg.work_dir = st.text_input(
+        "Run / output folder", cfg.run_folder(),
+        help="Scratch, checkpoints and status files go here. Defaults to the "
+             "case directory; the mutated deck is isolated in its solve/ sub-folder.")
     cc = st.columns(3)
     cfg.model.design_part_id = int(cc[0].number_input(
         "Design part id", value=cfg.model.design_part_id, step=1))
@@ -147,7 +155,7 @@ with tab_con:
 
 # ---- Monitor tab -----------------------------------------------------------
 with tab_mon:
-    @st.fragment(run_every=5.0)
+    @st.fragment(run_every=refresh_s)
     def monitor():
         status = st_io.read_status(work)
         if status is None:
