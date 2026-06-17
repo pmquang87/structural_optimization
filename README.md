@@ -38,7 +38,7 @@ oropt/
   deck.py     parse /NODE + /TETRA4 once; verbatim filtered re-write; free-node pinning; engine trim
   mesh.py     centroids, volumes, sensitivity-filter matrix, connectivity, protected/keep-out regions
   beso.py     sensitivity -> filter + history average -> volume-target threshold + add-back + connectivity
-  status.py   status.json / history.csv / topology_latest.vtu + PID + checkpoint (GUI/CLI decoupling)
+  status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
   loop.py     solve -> extract -> rank -> delete -> repeat; resumable; constraint feasibility gate
   run.py      CLI entry point
   gui/app.py  Streamlit dashboard (input / constraints / live monitor) — reads status files only
@@ -78,6 +78,11 @@ GUI (configure, launch, and live-monitor; safe to close mid-run):
 > `streamlit run` or `run_gui.py`. In PyCharm, point the Run configuration at
 > `run_gui.py` and the interpreter at `.venv\Scripts\python.exe`.
 
+The Monitor tab auto-refreshes from the status files on a fixed interval
+(default 60 s); adjust it with the **Refresh interval (s)** control in the
+sidebar. The **Run / output folder** field on the Input tab defaults to the case
+directory (matching the blank-`work_dir` default).
+
 ## Configuration highlights (`configs/elevator_linkage.yaml`)
 
 * `constraints.sigma_allow`, `constraints.d_allow` — the mass-minimisation limits,
@@ -87,7 +92,43 @@ GUI (configure, launch, and live-monitor; safe to close mid-run):
 * **Keep-out / non-design regions** — `model.freeze_group_ids` (e.g. `[99999999]`,
   any `/GRNOD/NODE` set in the deck) and `model.freeze_node_ids`: every design
   element touching those nodes is frozen and never deleted. Boundary-condition,
+  symmetry and contact regions are protected automatically. Frozen elements are
+  **excluded from the removal ranking** (they always count as present), so the
+  optimiser only ever removes the remaining design material — note that an
+  over-large keep-out caps how much mass can be removed (if it already exceeds
+  `target_volume_fraction`, no removal is possible).
   symmetry and contact regions are protected automatically.
+* `work_dir` — the run/output folder for scratch, checkpoints and status files.
+  **Leave it blank to default to the input deck folder (`model.case_dir`)**, so a
+  run writes its artefacts next to the deck it optimises; set an explicit path
+  (e.g. `runs/run01`) to keep outputs separate. The mutated deck always lives in
+  the `solve/` sub-folder (`<run_folder>/solve/<stem>_0000.rad`), so the source
+  `<run_folder>/<stem>_0000.rad` is never overwritten — even when the run folder
+  *is* the input folder.
+* `beso.archive_iterations` / `beso.archive_restart` (both default `false`) — see *Outputs* below.
+
+## Outputs
+
+Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir`):
+
+* `status.json` / `history.csv` — live scalar state + one row per iteration.
+* `topology_latest.vtu` — the current alive mesh (overwritten), for the GUI.
+* `topology_iterNNNN.vtu` — an **immutable per-iteration snapshot** of the alive
+  mesh (sensitivity + von-Mises fields), so the topology evolution can be
+  replayed/animated after the run. These are small (only the surviving tets).
+
+Set **`beso.archive_iterations: true`** to also keep each iteration's key
+OpenRadioss outputs under `work_dir/iter_NNNN/` before the `solve/` folder is
+recycled for the next iteration: the mutated `<stem>_0000.rad`, the final
+animation state(s) `<stem>A0*`, and the engine listing `<stem>_0001.out`. Add
+**`beso.archive_restart: true`** to also copy the restart (`<stem>*.rst`),
+preserving the *full* solver state of every iteration for replay/debug.
+
+> **Disk cost.** Archiving is off by default because it adds up: tens of MB per
+> iteration (deck + animation), so a 50–150 iteration run can reach several GB.
+> The ~345 MB restart (`<stem>_0000_0001.rst`) is excluded unless you opt in with
+> `archive_restart` — that alone is ~50 GB over a long run, so enable it only when
+> you truly need every iteration's full state.
 
 ## Honest caveats
 
@@ -110,7 +151,9 @@ GUI (configure, launch, and live-monitor; safe to close mid-run):
 * A hand-deletion (−16 % volume, 16 352 freed nodes auto-pinned) produces a deck
   that OpenRadioss solves to NORMAL TERMINATION.
 * `pytest` covers deck round-trip/pinning, mesh geometry/connectivity/protection,
-  BESO ranking/threshold, status/checkpoint round-trips, and VTK extraction.
+  BESO ranking/threshold, status/checkpoint round-trips, VTK extraction,
+  per-iteration snapshot/archive file-writing, and the run-folder fallback +
+  source-deck isolation.
 
 This project consumes decks produced by the sibling `k_to_rad_converter`
 (LS-DYNA → OpenRadioss); see that project for the conversion step.

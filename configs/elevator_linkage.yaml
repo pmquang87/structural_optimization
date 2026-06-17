@@ -26,7 +26,7 @@ model:
   - 99999999
   freeze_node_ids: []
 constraints:
-  sigma_allow: 292.0
+  sigma_allow: 452.0
   d_allow: 5.0
 beso:
   evolution_rate: 0.02
@@ -36,9 +36,15 @@ beso:
   target_volume_fraction: 0.7
   sensitivity: energy
   blend_weight: 0.5
-  max_iter: 150
+  max_iter: 15
   convergence_tol: 0.001
   convergence_window: 5
   protect_layers: 2
   contact_protect_dist: 0.0
-work_dir: runs/run01
+  # Keep each iteration's deck + final animation + engine listing in
+  # work_dir/iter_NNNN/ (skips the ~345 MB restart). Off by default; see README.
+  archive_iterations: false
+# Run/output folder for scratch, checkpoints and status files. Blank -> default
+# to the input deck folder (model.case_dir above); set an explicit path such as
+# runs/run01 to keep outputs separate from the source decks.
+work_dir: ""

@@ -80,16 +80,28 @@ class Beso:
     # ---- alive-set update --------------------------------------------------
     def update(self, alive_mask: np.ndarray, sens: np.ndarray,
                target_vf: float) -> np.ndarray:
-        """New alive mask: keep the top-ranked elements up to *target_vf* volume,
-        force protected on, cap bi-directional add-back, and drop islands."""
+        """New alive mask: protected elements are always kept; among the
+        *removable* (non-protected) elements keep the highest-ranked until the
+        total volume reaches *target_vf*, cap bi-directional add-back, drop islands.
+
+        Only the removable elements are ranked against the volume budget — never
+        all elements with protected then forced back on. Otherwise, when the
+        lowest-sensitivity elements happen to be protected (e.g. a low-stress
+        keep-out region), the global volume threshold would mark only protected
+        elements for deletion and ``|= protected`` would immediately restore them,
+        stalling the optimisation at the start volume (no element ever removed).
+        """
         alive_mask = np.asarray(alive_mask, dtype=bool)
         target_V = target_vf * self.V0
 
-        order = np.argsort(sens)[::-1]                 # high sensitivity first
-        cum = np.cumsum(self.vol[order])
-        cand = np.zeros_like(alive_mask)
-        cand[order[cum <= target_V]] = True
-        cand |= self.protected
+        cand = self.protected.copy()
+        removable = np.flatnonzero(~self.protected)
+        if removable.size:
+            # protected volume is always kept; spend what's left on the best removables
+            budget = max(0.0, target_V - float(self.vol[self.protected].sum()))
+            order = removable[np.argsort(sens[removable])[::-1]]   # high sensitivity first
+            cum = np.cumsum(self.vol[order])
+            cand[order[cum <= budget]] = True
 
         # cap re-added (dead -> alive) volume at max_add_ratio * V0
         newly = cand & ~alive_mask

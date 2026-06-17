@@ -66,7 +66,7 @@ if not cfg_path.exists():
     st.sidebar.error("Config not found.")
     st.stop()
 cfg = Config.from_yaml(cfg_path)
-work = Path(cfg.work_dir)
+work = Path(cfg.run_folder())          # work_dir, or the input case_dir when blank
 if not work.is_absolute():
     work = PROJECT_ROOT / work
 
@@ -86,6 +86,10 @@ if c3.button("↻ Resume", disabled=running, use_container_width=True):
 if st.sidebar.button("⏹ Force kill", disabled=not running):
     force_kill(work)
 
+refresh_s = int(st.sidebar.number_input(
+    "Refresh interval (s)", min_value=1, max_value=3600, value=60, step=5,
+    help="How often the Monitor tab re-reads the run's status files."))
+
 tab_in, tab_con, tab_mon = st.tabs(["📥 Input", "🎚 Constraints / BC", "📊 Monitor"])
 
 # ---- Input tab -------------------------------------------------------------
@@ -93,6 +97,10 @@ with tab_in:
     st.subheader("Model")
     cfg.model.case_dir = st.text_input("Case directory", cfg.model.case_dir)
     cfg.model.stem = st.text_input("Deck stem", cfg.model.stem)
+    cfg.work_dir = st.text_input(
+        "Run / output folder", cfg.run_folder(),
+        help="Scratch, checkpoints and status files go here. Defaults to the "
+             "case directory; the mutated deck is isolated in its solve/ sub-folder.")
     cc = st.columns(3)
     cfg.model.design_part_id = int(cc[0].number_input(
         "Design part id", value=cfg.model.design_part_id, step=1))
@@ -139,6 +147,15 @@ with tab_con:
     cfg.beso.sensitivity = h[2].selectbox(
         "Sensitivity", ["energy", "vonmises", "blend"],
         index=["energy", "vonmises", "blend"].index(cfg.beso.sensitivity))
+    arch = st.columns(2)
+    cfg.beso.archive_iterations = arch[0].checkbox(
+        "Archive each iteration", value=cfg.beso.archive_iterations,
+        help="Copy each iteration's deck, animation and listing into "
+             "<run_folder>/iter_NNNN/ before solve/ is recycled.")
+    cfg.beso.archive_restart = arch[1].checkbox(
+        "…incl. restart (~345 MB/iter)", value=cfg.beso.archive_restart,
+        help="Also copy the restart file, preserving the full solver state for "
+             "every iteration. Applies only when 'Archive each iteration' is on.")
 
     if st.button("💾 Save config"):
         cfg.to_yaml(cfg_path)
@@ -147,7 +164,7 @@ with tab_con:
 
 # ---- Monitor tab -----------------------------------------------------------
 with tab_mon:
-    @st.fragment(run_every=5.0)
+    @st.fragment(run_every=refresh_s)
     def monitor():
         status = st_io.read_status(work)
         if status is None:
@@ -188,10 +205,14 @@ with tab_mon:
                 from stpyvista import stpyvista
                 grid = pv.read(str(topo))
                 scal = "sensitivity" if "sensitivity" in grid.cell_data else None
-                pl = pv.Plotter(window_size=[700, 450])
+                pl = pv.Plotter(window_size=[700, 450], off_screen=True)
                 pl.add_mesh(grid, scalars=scal, cmap="viridis", show_edges=False)
                 pl.view_isometric(); pl.background_color = "white"
-                stpyvista(pl, key="topo")
+                # backend="panel" renders in-process. The default "trame" backend
+                # exports the scene from a multiprocessing.Process whose spawned
+                # child dies in DuplicateHandle under `streamlit run` on Windows
+                # (and would then hang the parent on queue.get()).
+                stpyvista(pl, backend="panel", key="topo")
             except Exception as exc:  # noqa: BLE001
                 st.caption(f"(3D view unavailable: {exc})")
 

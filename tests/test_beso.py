@@ -51,6 +51,28 @@ def test_update_removes_lowest_keeps_protected():
     assert new.sum() < 5     # something was removed
 
 
+def test_update_progresses_when_lowest_sensitivity_is_protected():
+    """Regression: if the lowest-sensitivity elements are all protected (e.g. a
+    low-stress keep-out region), removal must still proceed by deleting the
+    lowest-ranked *removable* elements. The old 'rank all, then force protected
+    back on' logic deleted only protected elements and restored them, stalling
+    the run at the start volume (vf stuck at 1.0 forever)."""
+    m = _chain_mesh(5)                                  # vols all 1.0, V0 = 5
+    cfg = BesoCfg(filter_radius=0.0, target_volume_fraction=0.6,
+                  evolution_rate=0.2, max_add_ratio=0.0)
+    protected = np.array([True, True, False, False, False])
+    b = Beso(m, cfg, protected)
+    sens = np.array([1.0, 2.0, 100.0, 200.0, 300.0])    # protected elems rank LAST
+
+    new = b.update(np.ones(5, bool), sens, target_vf=0.6)
+
+    assert new.sum() < 5                                 # progress: not everything restored
+    assert new[0] and new[1]                             # protected always kept
+    assert new[4]                                        # best removable kept
+    assert not new[2]                                    # lowest removable deleted
+    assert abs(b.volume_fraction(new) - 0.6) < 1e-9      # hits the total-volume target
+
+
 def test_next_target_vf_gate():
     b = _beso()
     assert b.next_target_vf(0.8, feasible=True) < 0.8     # shrink while feasible
