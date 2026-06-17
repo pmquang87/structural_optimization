@@ -96,10 +96,24 @@ def read_history(work_dir: str | Path) -> list[dict]:
         return list(csv.DictReader(fh))
 
 
+def topology_snapshot_name(iteration: int) -> str:
+    """Filename of the immutable per-iteration topology snapshot."""
+    return f"topology_iter{int(iteration):04d}.vtu"
+
+
 def write_topology(work_dir: str | Path, node_xyz: np.ndarray,
                    conn_rows: np.ndarray, alive_mask: np.ndarray,
-                   fields: Optional[dict] = None) -> None:
-    """Write the current alive tetra mesh to ``topology_latest.vtu`` for the GUI."""
+                   fields: Optional[dict] = None,
+                   filename: str = TOPOLOGY,
+                   iteration: Optional[int] = None) -> None:
+    """Write the current alive tetra mesh to ``filename`` (default
+    ``topology_latest.vtu``) for the GUI.
+
+    When *iteration* is given, also write an immutable per-iteration snapshot
+    ``topology_iter{iteration:04d}.vtu`` so the whole topology evolution can be
+    replayed (the latest file is overwritten each iteration). The grid is built
+    once and saved to both paths.
+    """
     import pyvista as pv
     idx = np.flatnonzero(alive_mask)
     if idx.size == 0:
@@ -110,7 +124,10 @@ def write_topology(work_dir: str | Path, node_xyz: np.ndarray,
     grid = pv.UnstructuredGrid(cells, celltypes, node_xyz.astype(float))
     for name, arr in (fields or {}).items():
         grid.cell_data[name] = np.asarray(arr)[idx]
-    grid.save(str(Path(work_dir) / TOPOLOGY))
+    out = Path(work_dir)
+    grid.save(str(out / filename))
+    if iteration is not None:
+        grid.save(str(out / topology_snapshot_name(iteration)))
 
 
 # ---- PID / liveness --------------------------------------------------------

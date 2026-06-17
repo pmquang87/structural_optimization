@@ -94,6 +94,7 @@ class Beso:
     convergence_window: int = 5
     protect_layers: int = 2          # element layers around protected nodes to freeze (never delete)
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid (cylinder) node
+    archive_iterations: bool = False   # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (see README disk cost)
 
 
 @dataclass
@@ -103,7 +104,10 @@ class Config:
     model: Model = field(default_factory=Model)
     constraints: Constraints = field(default_factory=Constraints)
     beso: Beso = field(default_factory=Beso)
-    work_dir: str = "runs/run01"     # per-iteration scratch + checkpoints + status files
+    # Run/output folder: per-iteration scratch + checkpoints + status files. Leave
+    # blank to default to the input deck folder (``model.case_dir``); set a path
+    # (e.g. ``runs/run01``) to keep outputs separate from the source decks.
+    work_dir: str = ""
 
     # ---- (de)serialisation -------------------------------------------------
     @classmethod
@@ -122,7 +126,7 @@ class Config:
             model=build(Model, data.get("model")),
             constraints=build(Constraints, data.get("constraints")),
             beso=build(Beso, data.get("beso")),
-            work_dir=data.get("work_dir", "runs/run01"),
+            work_dir=data.get("work_dir") or "",
         )
 
     def to_yaml(self, path: str | Path) -> None:
@@ -131,7 +135,19 @@ class Config:
             encoding="utf-8",
         )
 
+    def run_folder(self) -> str:
+        """The configured run/output folder *as written* (may be relative).
+
+        Falls back to the input deck folder (``model.case_dir``) when ``work_dir``
+        is blank, so by default a run writes its scratch/status next to the deck
+        it optimises. The mutated deck still goes to ``<run_folder>/solve/`` — a
+        sub-folder — so the source ``<run_folder>/<stem>_0000.rad`` is never
+        clobbered even when the run folder *is* the input folder.
+        """
+        wd = (self.work_dir or "").strip()
+        return wd if wd else self.model.case_dir
+
     def work(self) -> Path:
-        p = Path(self.work_dir).resolve()
+        p = Path(self.run_folder()).resolve()
         p.mkdir(parents=True, exist_ok=True)
         return p
