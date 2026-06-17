@@ -147,6 +147,15 @@ with tab_con:
     cfg.beso.sensitivity = h[2].selectbox(
         "Sensitivity", ["energy", "vonmises", "blend"],
         index=["energy", "vonmises", "blend"].index(cfg.beso.sensitivity))
+    arch = st.columns(2)
+    cfg.beso.archive_iterations = arch[0].checkbox(
+        "Archive each iteration", value=cfg.beso.archive_iterations,
+        help="Copy each iteration's deck, animation and listing into "
+             "<run_folder>/iter_NNNN/ before solve/ is recycled.")
+    cfg.beso.archive_restart = arch[1].checkbox(
+        "…incl. restart (~345 MB/iter)", value=cfg.beso.archive_restart,
+        help="Also copy the restart file, preserving the full solver state for "
+             "every iteration. Applies only when 'Archive each iteration' is on.")
 
     if st.button("💾 Save config"):
         cfg.to_yaml(cfg_path)
@@ -196,10 +205,14 @@ with tab_mon:
                 from stpyvista import stpyvista
                 grid = pv.read(str(topo))
                 scal = "sensitivity" if "sensitivity" in grid.cell_data else None
-                pl = pv.Plotter(window_size=[700, 450])
+                pl = pv.Plotter(window_size=[700, 450], off_screen=True)
                 pl.add_mesh(grid, scalars=scal, cmap="viridis", show_edges=False)
                 pl.view_isometric(); pl.background_color = "white"
-                stpyvista(pl, key="topo")
+                # backend="panel" renders in-process. The default "trame" backend
+                # exports the scene from a multiprocessing.Process whose spawned
+                # child dies in DuplicateHandle under `streamlit run` on Windows
+                # (and would then hang the parent on queue.get()).
+                stpyvista(pl, backend="panel", key="topo")
             except Exception as exc:  # noqa: BLE001
                 st.caption(f"(3D view unavailable: {exc})")
 

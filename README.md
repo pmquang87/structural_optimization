@@ -105,7 +105,7 @@ directory (matching the blank-`work_dir` default).
   the `solve/` sub-folder (`<run_folder>/solve/<stem>_0000.rad`), so the source
   `<run_folder>/<stem>_0000.rad` is never overwritten — even when the run folder
   *is* the input folder.
-* `beso.archive_iterations` (default `false`) — see *Outputs* below.
+* `beso.archive_iterations` / `beso.archive_restart` (both default `false`) — see *Outputs* below.
 
 ## Outputs
 
@@ -120,12 +120,15 @@ Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir`)
 Set **`beso.archive_iterations: true`** to also keep each iteration's key
 OpenRadioss outputs under `work_dir/iter_NNNN/` before the `solve/` folder is
 recycled for the next iteration: the mutated `<stem>_0000.rad`, the final
-animation state(s) `<stem>A0*`, and the engine listing `<stem>_0001.out`.
+animation state(s) `<stem>A0*`, and the engine listing `<stem>_0001.out`. Add
+**`beso.archive_restart: true`** to also copy the restart (`<stem>*.rst`),
+preserving the *full* solver state of every iteration for replay/debug.
 
 > **Disk cost.** Archiving is off by default because it adds up: tens of MB per
 > iteration (deck + animation), so a 50–150 iteration run can reach several GB.
-> The ~345 MB restart (`<stem>_0000_0001.rst`) is deliberately **never** copied
-> — that alone would be ~50 GB over a long run.
+> The ~345 MB restart (`<stem>_0000_0001.rst`) is excluded unless you opt in with
+> `archive_restart` — that alone is ~50 GB over a long run, so enable it only when
+> you truly need every iteration's full state.
 
 ## Honest caveats
 

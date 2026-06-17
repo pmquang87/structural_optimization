@@ -95,6 +95,7 @@ class Beso:
     protect_layers: int = 2          # element layers around protected nodes to freeze (never delete)
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid (cylinder) node
     archive_iterations: bool = False   # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (see README disk cost)
+    archive_restart: bool = False      # when archiving, also copy the ~345 MB restart (<stem>*.rst) into iter_NNNN/ -> full per-iteration solver state
 
 
 @dataclass
