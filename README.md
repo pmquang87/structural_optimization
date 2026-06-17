@@ -87,7 +87,11 @@ GUI (configure, launch, and live-monitor; safe to close mid-run):
 * **Keep-out / non-design regions** — `model.freeze_group_ids` (e.g. `[99999999]`,
   any `/GRNOD/NODE` set in the deck) and `model.freeze_node_ids`: every design
   element touching those nodes is frozen and never deleted. Boundary-condition,
-  symmetry and contact regions are protected automatically.
+  symmetry and contact regions are protected automatically. Frozen elements are
+  **excluded from the removal ranking** (they always count as present), so the
+  optimiser only ever removes the remaining design material — note that an
+  over-large keep-out caps how much mass can be removed (if it already exceeds
+  `target_volume_fraction`, no removal is possible).
 
 ## Honest caveats
 
