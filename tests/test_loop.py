@@ -42,6 +42,22 @@ def test_archive_iteration_copies_key_outputs(tmp_path):
     assert (dest / f"{stem}A002").read_bytes() == b"anim-state-2"
 
 
+def test_archive_iteration_keeps_restart_when_requested(tmp_path):
+    """With keep_restart the bulky restart is preserved alongside the curated
+    outputs, giving a full per-iteration solver snapshot."""
+    stem = "demo"
+    solve_dir = tmp_path / "solve"
+    _fake_solve_outputs(solve_dir, stem)
+
+    dest = _archive_iteration(solve_dir, tmp_path, stem, it=2, keep_restart=True)
+
+    rst = dest / f"{stem}_0000_0001.rst"
+    assert rst.exists() and rst.read_bytes() == b"x" * 8192
+    # the curated outputs are still archived too
+    assert (dest / f"{stem}_0000.rad").exists()
+    assert (dest / f"{stem}A002").exists()
+
+
 def test_archive_iteration_tolerates_missing_files(tmp_path):
     """A failed/partial solve leaves only some outputs — archive what exists."""
     stem = "demo"

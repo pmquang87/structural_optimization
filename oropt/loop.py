@@ -40,14 +40,16 @@ def _clean_solve_dir(run_dir: Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int) -> Path:
+def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int,
+                       keep_restart: bool = False) -> Path:
     """Copy iteration *it*'s key OpenRadioss outputs into ``work/iter_{it:04d}/``.
 
     Preserves the small, replay-worthy artefacts before ``solve_dir`` is wiped for
     the next iteration: the mutated starter deck (``<stem>_0000.rad``), the engine
     listing (``<stem>_0001.out``) and the final animation state(s) (``<stem>A0*``).
-    The ~345 MB restart (``<stem>_0000_0001.rst``) is deliberately *not* copied.
-    Missing files are skipped (e.g. after a failed solve)."""
+    The ~345 MB restart (``<stem>*.rst``) is skipped unless *keep_restart* is set,
+    in which case the full solver state is kept too. Missing files are skipped
+    (e.g. after a failed solve)."""
     dest = work / f"iter_{it:04d}"
     dest.mkdir(parents=True, exist_ok=True)
     for name in (f"{stem}_0000.rad", f"{stem}_0001.out"):
@@ -57,6 +59,10 @@ def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int) -> Path:
     for anim in sorted(solve_dir.glob(f"{stem}A0*")):
         if anim.is_file():
             shutil.copy2(anim, dest / anim.name)
+    if keep_restart:
+        for rst in sorted(solve_dir.glob(f"{stem}*.rst")):
+            if rst.is_file():
+                shutil.copy2(rst, dest / rst.name)
     return dest
 
 
@@ -177,7 +183,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                                       "vonmises": _scatter(r, deck.elem_ids)},
                               iteration=it)
             if cfg.beso.archive_iterations:
-                _archive_iteration(solve_dir, work, stem, it)
+                _archive_iteration(solve_dir, work, stem, it,
+                                   keep_restart=cfg.beso.archive_restart)
             log(f"[oropt] iter {it}: sigma_max={r.sigma_max:.2f}/"
                 f"{cfg.constraints.sigma_allow} disp={r.disp:.4f}/"
                 f"{cfg.constraints.d_allow} feasible={feasible} "
