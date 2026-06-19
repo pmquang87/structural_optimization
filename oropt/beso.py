@@ -19,10 +19,17 @@ from .results import Results
 
 
 class Beso:
-    def __init__(self, mesh: Mesh, cfg: BesoCfg, protected_mask: np.ndarray):
+    def __init__(self, mesh: Mesh, cfg: BesoCfg, protected_mask: np.ndarray,
+                 anchor: np.ndarray | None = None):
         self.mesh = mesh
         self.cfg = cfg
         self.protected = np.asarray(protected_mask, dtype=bool)
+        # Elements that anchor connectivity for island-dropping. Defaults to the
+        # frozen (protected) set, but is decoupled so the BC/load region can keep
+        # anchoring even when its elements are allowed to be deleted (i.e. when
+        # they are no longer in ``protected``).
+        self.anchor = (np.asarray(anchor, dtype=bool)
+                       if anchor is not None else self.protected)
         self.vol = mesh.volumes
         self.V0 = float(self.vol.sum())
         self._W = mesh.filter_matrix(cfg.filter_radius)
@@ -114,6 +121,6 @@ class Beso:
             cand[keep_add] = True
             cand |= self.protected
 
-        # drop anything no longer connected to a protected (BC/load) seed
-        cand = self.mesh.keep_connected(cand, self.protected)
+        # drop anything no longer connected to an anchor (BC/load) seed
+        cand = self.mesh.keep_connected(cand, self.anchor)
         return cand

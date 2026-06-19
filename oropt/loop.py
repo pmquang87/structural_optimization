@@ -20,13 +20,17 @@ from .deck import Deck, prepare_engine
 from .mesh import Mesh
 from .results import extract
 from .runner import run_solver
+from .smoothing import smooth_final
 
 
-def collect_protect_nodes(deck: Deck, model) -> np.ndarray:
-    """Seed nodes whose elements must be frozen: the BC/symmetry set plus any
-    user-defined keep-out regions (``freeze_group_ids`` /GRNOD/NODE groups, e.g.
-    99999999, and explicit ``freeze_node_ids``)."""
-    parts = [deck.group_nodes(model.bc_group_id)]
+def collect_protect_nodes(deck: Deck, model, include_bc: bool = True) -> np.ndarray:
+    """Seed nodes whose elements must be frozen: the BC/symmetry set (included
+    unless *include_bc* is False) plus any user-defined keep-out regions
+    (``freeze_group_ids`` /GRNOD/NODE groups, e.g. 99999999, and explicit
+    ``freeze_node_ids``)."""
+    parts = []
+    if include_bc:
+        parts.append(deck.group_nodes(model.bc_group_id))
     for gid in getattr(model, "freeze_group_ids", []) or []:
         parts.append(deck.group_nodes(int(gid)))
     explicit = getattr(model, "freeze_node_ids", []) or []
@@ -94,14 +98,24 @@ def run_optimization(cfg: Config, resume: bool = False,
     mesh = Mesh.from_deck(deck)
     bc_nodes = deck.group_nodes(m.bc_group_id)
     no_pin = set(int(v) for v in bc_nodes)            # already kinematically constrained
-    protect_nodes = collect_protect_nodes(deck, m)    # BC + user keep-out sets
+    protect_bc = getattr(cfg.beso, "protect_bc_nodes", True)
+    frozen_nodes = collect_protect_nodes(deck, m, include_bc=protect_bc)  # BC frozen unless opted out
     log(f"[oropt] {deck.n_design_elements} design elements; "
-        f"{bc_nodes.size} BC nodes; {protect_nodes.size} protected seed nodes; "
-        f"building protected set + filter ...")
-    protected = mesh.protected_mask(deck, protect_nodes,
+        f"{bc_nodes.size} BC nodes ({'frozen' if protect_bc else 'deletable'}); "
+        f"{frozen_nodes.size} frozen seed nodes; building protected set + filter ...")
+    protected = mesh.protected_mask(deck, frozen_nodes,
                                     contact_dist=cfg.beso.contact_protect_dist,
                                     layers=cfg.beso.protect_layers)
-    beso = Beso(mesh, cfg.beso, protected)
+    # The BC/load region always anchors connectivity (so floating islands are
+    # still dropped sensibly) even when its elements are allowed to be deleted.
+    if protect_bc:
+        anchor = protected
+    else:
+        anchor_nodes = collect_protect_nodes(deck, m, include_bc=True)
+        anchor = mesh.protected_mask(deck, anchor_nodes,
+                                     contact_dist=cfg.beso.contact_protect_dist,
+                                     layers=cfg.beso.protect_layers)
+    beso = Beso(mesh, cfg.beso, protected, anchor=anchor)
     log(f"[oropt] protected elements: {int(protected.sum())} "
         f"({100*protected.mean():.1f}%); V0={beso.V0:.3f}")
 
@@ -220,6 +234,10 @@ def run_optimization(cfg: Config, resume: bool = False,
             convert_final(cfg, solve_dir, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] d3plot: unexpected error during conversion: {exc}")
+        try:
+            smooth_final(cfg, work, log)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[oropt] smooth: unexpected error during smoothing: {exc}")
         st.clear_pid(work)
     return status
 

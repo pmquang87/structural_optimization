@@ -57,6 +57,26 @@ class RunOpts:
 
 
 @dataclass
+class DockerOpts:
+    """Optionally run OpenRadioss via the Dockerised MUMPS-implicit build instead
+    of the native Windows binaries — no Intel oneAPI/MKL/MPI install needed, and
+    it works on AMD or Intel. The run folder is bind-mounted to ``/data`` and the
+    container writes its outputs (.out, A0NN, T01, .rst) back there, so the rest
+    of the pipeline is unchanged. See the image's ``COLLEAGUE_INSTRUCTIONS.md``.
+
+    When enabled, ``or_paths`` and the Intel-MPI ``run`` settings are ignored; the
+    container supports real MPI, so ``np`` may be > 1 (keep ``np * nt`` <= cores).
+    """
+    enabled: bool = False
+    image: str = "openradioss-mumps:20260520"
+    docker_exe: str = "docker"       # docker CLI: a name on PATH or a full path
+    shm_size: str = "2g"             # --shm-size (MUMPS needs shared memory)
+    np: int = 4                      # MPI domains (Docker build supports np > 1)
+    nt: int = 1                      # OpenMP threads per domain
+    extra_args: list = field(default_factory=list)  # extra `docker run` args, e.g. ["--cpus", "8"]
+
+
+@dataclass
 class Model:
     """The converted deck and what it contains."""
     case_dir: str = "."                 # folder holding <stem>_0000.rad / _0001.rad
@@ -100,6 +120,7 @@ class Beso:
     convergence_window: int = 5
     protect_layers: int = 2          # element layers around protected nodes to freeze (never delete)
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid (cylinder) node
+    protect_bc_nodes: bool = True    # freeze elements touching the BC node-group (model.bc_group_id). False -> they may be deleted; the BC nodes stay fixed via their /BCS and still anchor connectivity
     archive_iterations: bool = False   # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (see README disk cost)
     archive_restart: bool = False      # when archiving, also copy the ~345 MB restart (<stem>*.rst) into iter_NNNN/ -> full per-iteration solver state
 
@@ -127,13 +148,32 @@ class D3plotOpts:
 
 
 @dataclass
+class SmoothOpts:
+    """Optional surface smoothing of the final optimised geometry.
+
+    When enabled, after a run finishes the surface of the final design (the
+    latest ``topology_latest.vtu``) is extracted, smoothed and written as
+    ``topology_smoothed.<ext>`` in the run folder — a clean deliverable for
+    CAD / 3D-print / review. Best-effort: a failure is logged, never fatal.
+    """
+    enabled: bool = False
+    iterations: int = 20             # smoothing passes
+    method: str = "taubin"           # "taubin" (volume-preserving) | "laplacian" (shrinks)
+    pass_band: float = 0.1           # Taubin pass-band (smaller -> smoother)
+    relaxation: float = 0.1          # Laplacian relaxation factor (method == "laplacian")
+    output_format: str = "stl"       # "stl" | "vtp" | "both"
+
+
+@dataclass
 class Config:
     or_paths: ORPaths = field(default_factory=ORPaths)
     run: RunOpts = field(default_factory=RunOpts)
+    docker: DockerOpts = field(default_factory=DockerOpts)
     model: Model = field(default_factory=Model)
     constraints: Constraints = field(default_factory=Constraints)
     beso: Beso = field(default_factory=Beso)
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
+    smooth: SmoothOpts = field(default_factory=SmoothOpts)
     # Run/output folder: per-iteration scratch + checkpoints + status files. Leave
     # blank to default to a ``work/`` sub-folder *inside* the input deck folder
     # (``model.case_dir``); set a path (e.g. ``runs/run01``) to put outputs
@@ -154,10 +194,12 @@ class Config:
         return cls(
             or_paths=build(ORPaths, data.get("or_paths")),
             run=build(RunOpts, data.get("run")),
+            docker=build(DockerOpts, data.get("docker")),
             model=build(Model, data.get("model")),
             constraints=build(Constraints, data.get("constraints")),
             beso=build(Beso, data.get("beso")),
             d3plot=build(D3plotOpts, data.get("d3plot")),
+            smooth=build(SmoothOpts, data.get("smooth")),
             work_dir=data.get("work_dir") or "",
         )
 
