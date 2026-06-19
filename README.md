@@ -80,8 +80,9 @@ GUI (configure, launch, and live-monitor; safe to close mid-run):
 
 The Monitor tab auto-refreshes from the status files on a fixed interval
 (default 60 s); adjust it with the **Refresh interval (s)** control in the
-sidebar. The **Run / output folder** field on the Input tab defaults to the case
-directory (matching the blank-`work_dir` default).
+sidebar. The **Run / output folder** field on the Input tab is editable; leave it
+blank to use a `work/` sub-folder inside the case directory (matching the
+blank-`work_dir` default), or type an explicit path to override it.
 
 ## Configuration highlights (`configs/elevator_linkage.yaml`)
 
@@ -99,17 +100,26 @@ directory (matching the blank-`work_dir` default).
   `target_volume_fraction`, no removal is possible).
   symmetry and contact regions are protected automatically.
 * `work_dir` — the run/output folder for scratch, checkpoints and status files.
-  **Leave it blank to default to the input deck folder (`model.case_dir`)**, so a
-  run writes its artefacts next to the deck it optimises; set an explicit path
-  (e.g. `runs/run01`) to keep outputs separate. The mutated deck always lives in
+  **Leave it blank to default to a `work/` sub-folder inside the input deck folder
+  (`model.case_dir/work`)**, so a run writes its artefacts right next to the deck
+  it optimises without cluttering the source folder; set an explicit path
+  (e.g. `runs/run01`) to put outputs elsewhere. The mutated deck always lives in
   the `solve/` sub-folder (`<run_folder>/solve/<stem>_0000.rad`), so the source
-  `<run_folder>/<stem>_0000.rad` is never overwritten — even when the run folder
-  *is* the input folder.
+  decks in `model.case_dir` are never overwritten.
 * `beso.archive_iterations` / `beso.archive_restart` (both default `false`) — see *Outputs* below.
+* `d3plot` — optional post-run conversion of the final OpenRadioss animation into
+  an LS-Dyna `d3plot` (viewable in LS-PrePost etc.). Set `d3plot.enabled: true`;
+  `tool_root` points at the [Vortex-Radioss](https://github.com/Vortex-CAE/Vortex-Radioss)
+  `openradioss_tools` checkout (the folder holding the `vortex_radioss` package).
+  The converter runs in an **isolated subprocess** using `python_exe` — blank
+  picks `tool_root/.venv` (where lasso-python/tqdm live), so oropt's own
+  environment stays clean. It is best-effort: a missing tool, interpreter or
+  dependency is logged and skipped, never failing the run. Also exposed as
+  **Post-processing — d3plot** on the GUI's *Constraints / BC* tab.
 
 ## Outputs
 
-Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir`):
+Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir/work`):
 
 * `status.json` / `history.csv` — live scalar state + one row per iteration.
 * `topology_latest.vtu` — the current alive mesh (overwritten), for the GUI.
@@ -123,6 +133,10 @@ recycled for the next iteration: the mutated `<stem>_0000.rad`, the final
 animation state(s) `<stem>A0*`, and the engine listing `<stem>_0001.out`. Add
 **`beso.archive_restart: true`** to also copy the restart (`<stem>*.rst`),
 preserving the *full* solver state of every iteration for replay/debug.
+
+When **`d3plot.enabled: true`**, once the run finishes the final design's
+animation is converted to an LS-Dyna d3plot and written to
+`work_dir/d3plot/<stem>.d3plot` (+ its `.d3plotNN` state files).
 
 > **Disk cost.** Archiving is off by default because it adds up: tens of MB per
 > iteration (deck + animation), so a 50–150 iteration run can reach several GB.

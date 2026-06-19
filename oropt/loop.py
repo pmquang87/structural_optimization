@@ -15,6 +15,7 @@ import numpy as np
 from . import status as st
 from .beso import Beso
 from .config import Config
+from .d3plot import convert_final
 from .deck import Deck, prepare_engine
 from .mesh import Mesh
 from .results import extract
@@ -211,6 +212,14 @@ def run_optimization(cfg: Config, resume: bool = False,
         if status.state == "running":
             status.state = "stopped"
         st.write_status(work, status)
+        # Post-run: best-effort OpenRadioss anim -> LS-Dyna d3plot of the final
+        # design. Done while the run still owns the pid (so the GUI stays
+        # 'running' and won't recycle solve/ mid-conversion); never let
+        # post-processing affect the run's result/state.
+        try:
+            convert_final(cfg, solve_dir, work, log)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[oropt] d3plot: unexpected error during conversion: {exc}")
         st.clear_pid(work)
     return status
 

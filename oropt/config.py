@@ -14,6 +14,12 @@ from typing import Optional
 import yaml
 
 
+# Default run/output sub-folder created *inside* the case directory when
+# ``work_dir`` is left blank — keeps per-run scratch/status/checkpoints out of
+# the source deck folder while staying right next to it.
+DEFAULT_WORK_SUBDIR = "work"
+
+
 @dataclass
 class ORPaths:
     """Locations of the OpenRadioss install and its executables/post tools."""
@@ -99,15 +105,39 @@ class Beso:
 
 
 @dataclass
+class D3plotOpts:
+    """Optional post-run conversion of the final OpenRadioss animation into an
+    LS-Dyna ``d3plot`` (viewable in LS-PrePost etc.).
+
+    Delegated to the external Vortex-Radioss ``Anim_to_D3plot`` tool, run as an
+    *isolated subprocess* so its dependency set (lasso-python, tqdm) never has to
+    be installed alongside oropt. Strictly best-effort: a missing tool, missing
+    interpreter or a failed conversion is logged and skipped — it never aborts or
+    fails the optimisation run.
+    """
+    enabled: bool = False
+    # Folder containing the ``vortex_radioss`` package (the openradioss_tools repo
+    # root); placed on the converter subprocess's ``sys.path``.
+    tool_root: str = r"C:\Users\pmqua\PycharmProjects\openradioss_tools"
+    # Interpreter that has lasso-python/tqdm installed. Blank -> ``<tool_root>/
+    # .venv`` if present, else the interpreter running oropt.
+    python_exe: str = ""
+    show_rigidwall: bool = True      # keep rigid-wall/rigid parts in the d3plot
+    timeout_s: float = 1800.0        # cap on the conversion subprocess
+
+
+@dataclass
 class Config:
     or_paths: ORPaths = field(default_factory=ORPaths)
     run: RunOpts = field(default_factory=RunOpts)
     model: Model = field(default_factory=Model)
     constraints: Constraints = field(default_factory=Constraints)
     beso: Beso = field(default_factory=Beso)
+    d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     # Run/output folder: per-iteration scratch + checkpoints + status files. Leave
-    # blank to default to the input deck folder (``model.case_dir``); set a path
-    # (e.g. ``runs/run01``) to keep outputs separate from the source decks.
+    # blank to default to a ``work/`` sub-folder *inside* the input deck folder
+    # (``model.case_dir``); set a path (e.g. ``runs/run01``) to put outputs
+    # elsewhere.
     work_dir: str = ""
 
     # ---- (de)serialisation -------------------------------------------------
@@ -127,6 +157,7 @@ class Config:
             model=build(Model, data.get("model")),
             constraints=build(Constraints, data.get("constraints")),
             beso=build(Beso, data.get("beso")),
+            d3plot=build(D3plotOpts, data.get("d3plot")),
             work_dir=data.get("work_dir") or "",
         )
 
@@ -139,14 +170,16 @@ class Config:
     def run_folder(self) -> str:
         """The configured run/output folder *as written* (may be relative).
 
-        Falls back to the input deck folder (``model.case_dir``) when ``work_dir``
-        is blank, so by default a run writes its scratch/status next to the deck
-        it optimises. The mutated deck still goes to ``<run_folder>/solve/`` — a
-        sub-folder — so the source ``<run_folder>/<stem>_0000.rad`` is never
-        clobbered even when the run folder *is* the input folder.
+        Falls back to a ``work/`` sub-folder *inside* the input deck folder
+        (``model.case_dir``) when ``work_dir`` is blank, so by default a run keeps
+        its scratch/status/checkpoints out of the source deck folder while staying
+        next to it. The mutated deck still goes to ``<run_folder>/solve/`` — a
+        further sub-folder — so the source decks are never clobbered.
         """
         wd = (self.work_dir or "").strip()
-        return wd if wd else self.model.case_dir
+        if wd:
+            return wd
+        return str(Path(self.model.case_dir) / DEFAULT_WORK_SUBDIR)
 
     def work(self) -> Path:
         p = Path(self.run_folder()).resolve()

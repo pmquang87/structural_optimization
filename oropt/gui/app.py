@@ -20,7 +20,7 @@ import pandas as pd
 import streamlit as st
 
 from oropt import status as st_io
-from oropt.config import Config
+from oropt.config import Config, DEFAULT_WORK_SUBDIR
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CFG = PROJECT_ROOT / "configs" / "elevator_linkage.yaml"
@@ -66,7 +66,7 @@ if not cfg_path.exists():
     st.sidebar.error("Config not found.")
     st.stop()
 cfg = Config.from_yaml(cfg_path)
-work = Path(cfg.run_folder())          # work_dir, or the input case_dir when blank
+work = Path(cfg.run_folder())          # work_dir, or <case_dir>/work when blank
 if not work.is_absolute():
     work = PROJECT_ROOT / work
 
@@ -98,9 +98,12 @@ with tab_in:
     cfg.model.case_dir = st.text_input("Case directory", cfg.model.case_dir)
     cfg.model.stem = st.text_input("Deck stem", cfg.model.stem)
     cfg.work_dir = st.text_input(
-        "Run / output folder", cfg.run_folder(),
-        help="Scratch, checkpoints and status files go here. Defaults to the "
-             "case directory; the mutated deck is isolated in its solve/ sub-folder.")
+        "Run / output folder", cfg.work_dir,
+        placeholder=cfg.run_folder(),
+        help="Scratch, checkpoints and status files go here. Leave blank to use "
+             f"a `{DEFAULT_WORK_SUBDIR}/` sub-folder inside the case directory "
+             f"(→ `{cfg.run_folder()}`); the mutated deck is isolated in its "
+             "solve/ sub-folder.")
     cc = st.columns(3)
     cfg.model.design_part_id = int(cc[0].number_input(
         "Design part id", value=cfg.model.design_part_id, step=1))
@@ -156,6 +159,24 @@ with tab_con:
         "…incl. restart (~345 MB/iter)", value=cfg.beso.archive_restart,
         help="Also copy the restart file, preserving the full solver state for "
              "every iteration. Applies only when 'Archive each iteration' is on.")
+
+    st.subheader("Post-processing — d3plot")
+    cfg.d3plot.enabled = st.checkbox(
+        "Convert final animation to d3plot when the run finishes",
+        value=cfg.d3plot.enabled,
+        help="Runs the external Vortex-Radioss Anim_to_D3plot tool on the final "
+             "design's OpenRadioss animation, writing <work>/d3plot/<stem>.d3plot. "
+             "Best-effort — a missing tool or dependency never fails the run.")
+    dc = st.columns(2)
+    cfg.d3plot.tool_root = dc[0].text_input(
+        "Vortex-Radioss tool root", cfg.d3plot.tool_root,
+        help="Folder containing the `vortex_radioss` package "
+             "(the openradioss_tools repo root).")
+    cfg.d3plot.python_exe = dc[1].text_input(
+        "Converter Python (optional)", cfg.d3plot.python_exe,
+        placeholder=str(Path(cfg.d3plot.tool_root) / ".venv" / "Scripts" / "python.exe"),
+        help="Interpreter with lasso-python + tqdm installed. Blank → the tool "
+             "root's .venv if present, else the oropt interpreter.")
 
     if st.button("💾 Save config"):
         cfg.to_yaml(cfg_path)

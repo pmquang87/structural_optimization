@@ -1,14 +1,17 @@
 """Config (de)serialisation and the run/output-folder fallback behaviour."""
 from __future__ import annotations
 
-from oropt.config import Config
+from pathlib import Path
+
+from oropt.config import Config, DEFAULT_WORK_SUBDIR
 
 
-def test_run_folder_defaults_to_case_dir():
+def test_run_folder_defaults_to_work_subdir_inside_case_dir():
     cfg = Config()
-    cfg.model.case_dir = r"E:\decks\my_case"
+    case = r"E:\decks\my_case"
+    cfg.model.case_dir = case
     cfg.work_dir = ""
-    assert cfg.run_folder() == r"E:\decks\my_case"
+    assert Path(cfg.run_folder()) == Path(case) / DEFAULT_WORK_SUBDIR
 
 
 def test_run_folder_uses_explicit_work_dir():
@@ -18,29 +21,30 @@ def test_run_folder_uses_explicit_work_dir():
     assert cfg.run_folder() == "runs/run01"
 
 
-def test_run_folder_blank_variants_fall_back_to_case_dir():
+def test_run_folder_blank_variants_fall_back_to_work_subdir():
     cfg = Config()
-    cfg.model.case_dir = "/data/case"
+    case = "/data/case"
+    cfg.model.case_dir = case
     for blank in ("", "   ", None):
         cfg.work_dir = blank  # type: ignore[assignment]
-        assert cfg.run_folder() == "/data/case"
+        assert Path(cfg.run_folder()) == Path(case) / DEFAULT_WORK_SUBDIR
 
 
-def test_from_yaml_blank_work_dir_defaults_to_input(tmp_path):
+def test_from_yaml_blank_work_dir_defaults_to_work_subdir(tmp_path):
     p = tmp_path / "cfg.yaml"
     p.write_text('model:\n  case_dir: /data/case\n  stem: demo\nwork_dir: ""\n',
                  encoding="utf-8")
     cfg = Config.from_yaml(p)
     assert cfg.work_dir == ""
-    assert cfg.run_folder() == "/data/case"
+    assert Path(cfg.run_folder()) == Path("/data/case") / DEFAULT_WORK_SUBDIR
 
 
-def test_from_yaml_missing_work_dir_defaults_to_input(tmp_path):
+def test_from_yaml_missing_work_dir_defaults_to_work_subdir(tmp_path):
     p = tmp_path / "cfg.yaml"
     p.write_text("model:\n  case_dir: /data/case\n", encoding="utf-8")
     cfg = Config.from_yaml(p)
     assert cfg.work_dir == ""
-    assert cfg.run_folder() == "/data/case"
+    assert Path(cfg.run_folder()) == Path("/data/case") / DEFAULT_WORK_SUBDIR
 
 
 def test_work_creates_explicit_run_folder(tmp_path):
@@ -52,13 +56,13 @@ def test_work_creates_explicit_run_folder(tmp_path):
     assert p.is_dir()
 
 
-def test_work_falls_back_to_case_dir_and_creates_it(tmp_path):
+def test_work_falls_back_to_work_subdir_and_creates_it(tmp_path):
     cfg = Config()
     case = tmp_path / "case_as_output"
     cfg.model.case_dir = str(case)
     cfg.work_dir = ""
     p = cfg.work()
-    assert p == case.resolve()
+    assert p == (case / DEFAULT_WORK_SUBDIR).resolve()
     assert p.is_dir()
 
 
