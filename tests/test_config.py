@@ -73,3 +73,20 @@ def test_archive_iterations_flag_default_off_and_roundtrips(tmp_path):
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)
     assert Config.from_yaml(p).beso.archive_iterations is True
+
+
+def test_protect_bc_and_smooth_defaults_and_roundtrip(tmp_path):
+    cfg = Config()
+    assert cfg.beso.protect_bc_nodes is True            # default: BC frozen
+    assert cfg.smooth.enabled is False                  # opt-in
+    cfg.beso.protect_bc_nodes = False
+    cfg.smooth.enabled = True
+    cfg.smooth.method = "laplacian"
+    cfg.smooth.output_format = "both"
+    p = tmp_path / "cfg.yaml"
+    cfg.to_yaml(p)
+    back = Config.from_yaml(p)
+    assert back.beso.protect_bc_nodes is False
+    assert back.smooth.enabled is True
+    assert back.smooth.method == "laplacian"
+    assert back.smooth.output_format == "both"

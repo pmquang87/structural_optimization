@@ -57,6 +57,10 @@ oneAPI MPI — the engine is launched as `mpiexec -np 1 engine_win64_impi.exe`
 (the bare engine cannot load its MPI DLLs). Threads default to 6 with
 `KMP_BLOCKTIME=0` / `OMP_WAIT_POLICY=PASSIVE` (i9-13900H livelock mitigation).
 
+**No native OpenRadioss?** Set `docker.enabled: true` (see *Configuration
+highlights*) to run the solver from the Dockerised MUMPS-implicit build instead —
+just Docker Desktop and the loaded image, no Intel oneAPI/MPI, AMD or Intel.
+
 ## Usage
 
 Headless:
@@ -99,6 +103,12 @@ blank-`work_dir` default), or type an explicit path to override it.
   over-large keep-out caps how much mass can be removed (if it already exceeds
   `target_volume_fraction`, no removal is possible).
   symmetry and contact regions are protected automatically.
+* `beso.protect_bc_nodes` (default `true`) — whether elements touching the BC
+  node-group (`model.bc_group_id`) are frozen. Set it `false` to **allow the
+  optimiser to delete material at the BC nodes** too; those nodes stay fixed via
+  their own `/BCS` (so the solve is still well-posed) and continue to anchor
+  connectivity, so floating islands are still dropped. Exposed as **Allow
+  deleting elements at BC nodes** on the GUI's *Constraints / BC* tab.
 * `work_dir` — the run/output folder for scratch, checkpoints and status files.
   **Leave it blank to default to a `work/` sub-folder inside the input deck folder
   (`model.case_dir/work`)**, so a run writes its artefacts right next to the deck
@@ -116,6 +126,20 @@ blank-`work_dir` default), or type an explicit path to override it.
   environment stays clean. It is best-effort: a missing tool, interpreter or
   dependency is logged and skipped, never failing the run. Also exposed as
   **Post-processing — d3plot** on the GUI's *Constraints / BC* tab.
+* `smooth` — optional surface smoothing of the **final optimised geometry**. Set
+  `smooth.enabled: true` to extract the final design's surface, smooth it
+  (`method: taubin` volume-preserving, or `laplacian`; `iterations` passes) and
+  write `topology_smoothed.<ext>` (`output_format: stl|vtp|both`) to the run
+  folder — a clean deliverable for CAD / 3D-print / review. Best-effort. Exposed
+  under **Post-processing — Surface smoothing** in the GUI.
+* `docker` — optionally run the solver via the **Dockerised OpenRadioss MUMPS
+  build** instead of the native Windows binaries (no Intel oneAPI/MKL/MPI; works
+  on AMD or Intel). Set `docker.enabled: true` with the loaded `image`
+  (`openradioss-mumps:20260520`) and `np`/`nt` (the container supports real MPI,
+  so `np > 1` is fine — keep `np × nt` ≤ cores). The run folder is bind-mounted
+  to `/data` and the container writes its `.out`/animation/`T01`/`.rst` back
+  there, so the rest of the pipeline is unchanged. Requires Docker Desktop
+  running; selectable as **Solver backend** on the GUI's *Input* tab.
 
 ## Outputs
 
@@ -136,7 +160,9 @@ preserving the *full* solver state of every iteration for replay/debug.
 
 When **`d3plot.enabled: true`**, once the run finishes the final design's
 animation is converted to an LS-Dyna d3plot and written to
-`work_dir/d3plot/<stem>.d3plot` (+ its `.d3plotNN` state files).
+`work_dir/d3plot/<stem>.d3plot` (+ its `.d3plotNN` state files). When
+**`smooth.enabled: true`**, the final design's surface is extracted, smoothed and
+written to `work_dir/topology_smoothed.<ext>` (STL/VTP).
 
 > **Disk cost.** Archiving is off by default because it adds up: tens of MB per
 > iteration (deck + animation), so a 50–150 iteration run can reach several GB.

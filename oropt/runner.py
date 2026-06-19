@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,44 @@ def build_env(cfg: Config) -> dict:
         prepend = p.mpi_path_dirs() + prepend
     env["PATH"] = os.pathsep.join(prepend + [env.get("PATH", "")])
     return env
+
+
+def _docker_base(cfg: Config, run_dir: Path) -> list[str]:
+    """``docker run`` prefix that bind-mounts *run_dir* to ``/data`` (forward-slash
+    path so Docker Desktop accepts the Windows drive), up to the image name."""
+    d = cfg.docker
+    data = str(Path(run_dir).resolve()).replace("\\", "/")
+    return [d.docker_exe, "run", "--rm", f"--shm-size={d.shm_size}",
+            "-v", f"{data}:/data", "-w", "/data", *list(d.extra_args), d.image]
+
+
+def _starter_cmd(cfg: Config, run_dir: Path, stem: str) -> list[str]:
+    if cfg.docker.enabled:
+        d = cfg.docker
+        return _docker_base(cfg, run_dir) + [
+            "starter", "-i", f"{stem}_0000.rad", "-np", str(d.np), "-nt", str(d.nt)]
+    return [str(cfg.or_paths.abs("starter")), "-i", f"{stem}_0000.rad",
+            "-np", str(cfg.run.np)]
+
+
+def _engine_cmd(cfg: Config, run_dir: Path, stem: str) -> list[str]:
+    if cfg.docker.enabled:
+        d = cfg.docker
+        return _docker_base(cfg, run_dir) + [
+            "engine", str(d.np), "-i", f"{stem}_0001.rad", "-nt", str(d.nt)]
+    engine = cfg.or_paths.abs("engine")
+    if cfg.run.use_mpi:        # np=1 via mpiexec; the bare engine cannot load its MPI DLLs
+        return [str(cfg.or_paths.mpiexec()), "-np", str(cfg.run.np),
+                str(engine), "-i", f"{stem}_0001.rad", "-nt", str(cfg.run.nt)]
+    return [str(engine), "-i", f"{stem}_0001.rad", "-nt", str(cfg.run.nt)]
+
+
+def _log_tail(path: Path, n: int = 12) -> str:
+    """Last *n* non-blank lines of a log, joined — for surfacing docker errors."""
+    if not path.exists():
+        return ""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return " | ".join(s.strip() for s in lines[-n:] if s.strip())
 
 
 def _run(cmd, cwd: Path, env: dict, log: Path, timeout: float) -> subprocess.CompletedProcess:
@@ -109,40 +148,50 @@ def run_solver(cfg: Config, run_dir: str | Path) -> RunResult:
     The deck (``<stem>_0000.rad`` / ``_0001.rad``) must already exist in *run_dir*.
     """
     run_dir = Path(run_dir).resolve()
-    env = build_env(cfg)
     stem = cfg.model.stem
 
-    starter = cfg.or_paths.abs("starter")
-    engine = cfg.or_paths.abs("engine")
-    for exe in (starter, engine):
-        if not exe.exists():
-            return RunResult(False, "setup", f"executable not found: {exe}")
-    if cfg.run.use_mpi and not cfg.or_paths.mpiexec().exists():
-        return RunResult(False, "setup", f"mpiexec not found: {cfg.or_paths.mpiexec()}")
+    # --- backend pre-flight + environment ---
+    if cfg.docker.enabled:
+        exe = cfg.docker.docker_exe
+        if shutil.which(exe) is None and not Path(exe).exists():
+            return RunResult(False, "setup", f"docker CLI not found: {exe} "
+                             "(install/start Docker Desktop, or set docker.docker_exe)")
+        env = dict(os.environ)        # the container carries its own OR runtime
+    else:
+        starter = cfg.or_paths.abs("starter")
+        engine = cfg.or_paths.abs("engine")
+        for exe_path in (starter, engine):
+            if not exe_path.exists():
+                return RunResult(False, "setup", f"executable not found: {exe_path}")
+        if cfg.run.use_mpi and not cfg.or_paths.mpiexec().exists():
+            return RunResult(False, "setup", f"mpiexec not found: {cfg.or_paths.mpiexec()}")
+        env = build_env(cfg)
 
     # --- starter ---
+    starter_log = run_dir / f"{stem}_starter.log"
     try:
-        cp = _run([str(starter), "-i", f"{stem}_0000.rad", "-np", str(cfg.run.np)],
-                  run_dir, env, run_dir / f"{stem}_starter.log", cfg.run.starter_timeout_s)
+        cp = _run(_starter_cmd(cfg, run_dir, stem), run_dir, env,
+                  starter_log, cfg.run.starter_timeout_s)
     except subprocess.TimeoutExpired:
         return RunResult(False, "starter", "starter timed out", cycles=None)
     ok, msg = _starter_ok(run_dir / f"{stem}_0000.out")
     if not ok:
+        if cfg.docker.enabled and cp.returncode != 0:   # surface docker/daemon errors
+            msg = f"{msg} [docker rc={cp.returncode}: {_log_tail(starter_log)}]"
         return RunResult(False, "starter", f"starter failed: {msg}", cp.returncode)
 
-    # --- engine (np=1 via mpiexec; the bare engine cannot load its MPI DLLs) ---
-    if cfg.run.use_mpi:
-        engine_cmd = [str(cfg.or_paths.mpiexec()), "-np", str(cfg.run.np),
-                      str(engine), "-i", f"{stem}_0001.rad", "-nt", str(cfg.run.nt)]
-    else:
-        engine_cmd = [str(engine), "-i", f"{stem}_0001.rad", "-nt", str(cfg.run.nt)]
+    # --- engine ---
+    engine_log = run_dir / f"{stem}_engine.log"
     try:
-        cp = _run(engine_cmd, run_dir, env, run_dir / f"{stem}_engine.log", cfg.run.engine_timeout_s)
+        cp = _run(_engine_cmd(cfg, run_dir, stem), run_dir, env,
+                  engine_log, cfg.run.engine_timeout_s)
     except subprocess.TimeoutExpired:
         return RunResult(False, "engine", "engine timed out")
     ok, msg = _engine_ok(run_dir / f"{stem}_0001.out")
     cycles, elapsed = _parse_engine_stats(run_dir / f"{stem}_0001.out")
     if not ok:
+        if cfg.docker.enabled and cp.returncode != 0:
+            msg = f"{msg} [docker rc={cp.returncode}: {_log_tail(engine_log)}]"
         return RunResult(False, "engine", f"engine failed: {msg}", cp.returncode, cycles, elapsed)
     return RunResult(True, "ok", msg, cp.returncode, cycles, elapsed)
 

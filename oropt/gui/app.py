@@ -114,6 +114,24 @@ with tab_in:
     st.caption(f"OpenRadioss root: `{cfg.or_paths.root}`  ·  np={cfg.run.np} "
                f"nt={cfg.run.nt}  ·  starter `{cfg.model.starter().name}`")
 
+    st.subheader("Solver backend")
+    cfg.docker.enabled = st.checkbox(
+        "Run OpenRadioss via Docker (MUMPS implicit — no Intel MPI needed)",
+        value=cfg.docker.enabled,
+        help="Use the Dockerised OpenRadioss build instead of the native Windows "
+             "binaries (works on AMD or Intel). Requires Docker Desktop running "
+             "and the image loaded; outputs are written into the run folder, "
+             "exactly like the native backend.")
+    if cfg.docker.enabled:
+        dk = st.columns([2, 1, 1])
+        cfg.docker.image = dk[0].text_input("Docker image", cfg.docker.image)
+        cfg.docker.np = int(dk[1].number_input(
+            "MPI np", value=int(cfg.docker.np), min_value=1, step=1))
+        cfg.docker.nt = int(dk[2].number_input(
+            "Threads nt", value=int(cfg.docker.nt), min_value=1, step=1))
+        st.caption("Keep np × nt ≤ CPU cores. The container bind-mounts the run "
+                   "folder to /data and writes results back there.")
+
 # ---- Constraints / BC tab --------------------------------------------------
 with tab_con:
     st.subheader("Constraints")
@@ -131,6 +149,13 @@ with tab_con:
                        ",".join(str(x) for x in cfg.model.freeze_node_ids))
     cfg.model.freeze_group_ids = [int(x) for x in fg.replace(" ", "").split(",") if x]
     cfg.model.freeze_node_ids = [int(x) for x in fn.replace(" ", "").split(",") if x]
+    allow_del_bc = st.checkbox(
+        "Allow deleting elements at BC nodes",
+        value=not cfg.beso.protect_bc_nodes,
+        help="By default the BC node-group (model.bc_group_id) is frozen. Enable "
+             "this to let the optimiser remove material there too — the BC nodes "
+             "stay fixed via their /BCS and still anchor connectivity.")
+    cfg.beso.protect_bc_nodes = not allow_del_bc
 
     st.subheader("BESO parameters")
     g = st.columns(3)
@@ -160,7 +185,8 @@ with tab_con:
         help="Also copy the restart file, preserving the full solver state for "
              "every iteration. Applies only when 'Archive each iteration' is on.")
 
-    st.subheader("Post-processing — d3plot")
+    st.subheader("Post-processing")
+    st.markdown("**Animation → d3plot**")
     cfg.d3plot.enabled = st.checkbox(
         "Convert final animation to d3plot when the run finishes",
         value=cfg.d3plot.enabled,
@@ -177,6 +203,26 @@ with tab_con:
         placeholder=str(Path(cfg.d3plot.tool_root) / ".venv" / "Scripts" / "python.exe"),
         help="Interpreter with lasso-python + tqdm installed. Blank → the tool "
              "root's .venv if present, else the oropt interpreter.")
+
+    st.markdown("**Surface smoothing**")
+    cfg.smooth.enabled = st.checkbox(
+        "Smooth the final geometry surface when the run finishes",
+        value=cfg.smooth.enabled,
+        help="Extracts and smooths the final design's surface, writing "
+             "<work>/topology_smoothed.<ext> — a clean mesh for CAD / 3D-print / review.")
+    sc = st.columns(3)
+    cfg.smooth.iterations = int(sc[0].number_input(
+        "Smoothing passes", value=int(cfg.smooth.iterations), min_value=0, step=5))
+    _methods = ["taubin", "laplacian"]
+    cfg.smooth.method = sc[1].selectbox(
+        "Method", _methods,
+        index=_methods.index(cfg.smooth.method) if cfg.smooth.method in _methods else 0,
+        help="Taubin preserves volume; Laplacian smooths more but shrinks.")
+    _fmts = ["stl", "vtp", "both"]
+    cfg.smooth.output_format = sc[2].selectbox(
+        "Output format", _fmts,
+        index=_fmts.index(cfg.smooth.output_format)
+        if cfg.smooth.output_format in _fmts else 0)
 
     if st.button("💾 Save config"):
         cfg.to_yaml(cfg_path)
