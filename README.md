@@ -39,6 +39,7 @@ oropt/
   mesh.py     centroids, volumes, sensitivity-filter matrix, connectivity, protected/keep-out regions
   beso.py     sensitivity -> filter + history average -> volume-target threshold + add-back + connectivity
   levelset.py nodal level-set alternative: energy -> nodal velocity -> phi evolution + smoothing -> bisected threshold
+  manufacturing.py additive-manufacturing constraints on the alive mask: min member size (open), symmetry, overhang
   status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
   loop.py     solve -> extract -> rank -> delete -> repeat; resumable; constraint feasibility gate
   run.py      CLI entry point
@@ -102,6 +103,13 @@ blank-`work_dir` default), or type an explicit path to override it.
   `evolution_rate`, `filter_radius`, `history_weight`, `max_iter`, `convergence_*`,
   `protect_*`, `archive_*`) plus level-set specifics `levelset.dt`,
   `levelset.smoothing_passes`, `levelset.band_width`.
+* **Additive-manufacturing constraints** (`manufacturing:`, all OFF by default) —
+  applied to the alive mask each iteration after the optimiser update, for parts
+  printed by powder-bed fusion (e.g. AlSi10Mg). `min_member_layers` (morphological
+  open removing thin features; 0 = off), `symmetry_planes` (list of
+  `{axis: x|y|z, offset: <coord>}`, mirrored *either-alive ⇒ both-alive*), and
+  overhang self-support via `build_direction` (`[x,y,z]`, `null` = off) +
+  `max_overhang_angle` (cone half-angle in degrees from the build direction).
 * **Keep-out / non-design regions** — `model.freeze_group_ids` (e.g. `[99999999]`,
   any `/GRNOD/NODE` set in the deck) and `model.freeze_node_ids`: every design
   element touching those nodes is frozen and never deleted. Boundary-condition,

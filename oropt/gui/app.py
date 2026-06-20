@@ -185,6 +185,51 @@ with tab_con:
         help="Also copy the restart file, preserving the full solver state for "
              "every iteration. Applies only when 'Archive each iteration' is on.")
 
+    st.subheader("Manufacturing (AM) constraints")
+    st.caption("Printability constraints applied to the design each iteration "
+               "(after the optimiser update). All default OFF — leave them off "
+               "for an unconstrained run.")
+    mfg = cfg.manufacturing
+    mfg.min_member_layers = int(st.number_input(
+        "Minimum member size (erode/dilate hops)", value=int(mfg.min_member_layers),
+        min_value=0, step=1,
+        help="Morphological open removing thin features / single-element slivers. "
+             "0 = off; 1–2 is typical."))
+
+    st.markdown("**Symmetry planes** — force the design symmetric across a plane "
+                "(either side alive ⇒ both alive).")
+    existing_sym = {str(p.get("axis", "")).lower(): float(p.get("offset", 0.0))
+                    for p in (mfg.symmetry_planes or [])}
+    planes: list[dict] = []
+    for col, ax in zip(st.columns(3), ("x", "y", "z")):
+        on = col.checkbox(f"Mirror {ax.upper()}", value=ax in existing_sym,
+                          key=f"sym_{ax}")
+        off = col.number_input(f"{ax.upper()} plane offset",
+                               value=existing_sym.get(ax, 0.0), step=0.5,
+                               key=f"sym_off_{ax}", disabled=not on)
+        if on:
+            planes.append({"axis": ax, "offset": float(off)})
+    mfg.symmetry_planes = planes
+
+    st.markdown("**Overhang / self-support** — forbid material unsupported below "
+                "the critical angle along the build direction.")
+    ov = st.columns(2)
+    _axis_vec = {"x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}
+    _cur = "off"
+    if mfg.build_direction is not None:
+        _t = [round(float(v), 6) for v in mfg.build_direction]
+        _cur = next((a for a, v in _axis_vec.items() if v == _t), "z")
+    _opts = ["off", "x", "y", "z"]
+    _sel = ov[0].selectbox("Build direction", _opts, index=_opts.index(_cur),
+                           help="Up/growth axis of the print. 'off' disables the "
+                                "overhang constraint.")
+    mfg.build_direction = None if _sel == "off" else _axis_vec[_sel]
+    mfg.max_overhang_angle = float(ov[1].number_input(
+        "Max overhang angle [deg]", value=float(mfg.max_overhang_angle),
+        min_value=0.0, max_value=90.0, step=5.0,
+        help="Cone half-angle from the build direction within which support must "
+             "exist. ~45° is a common self-supporting limit; 0 = off."))
+
     st.subheader("Post-processing")
     st.markdown("**Animation → d3plot**")
     cfg.d3plot.enabled = st.checkbox(
