@@ -235,6 +235,50 @@ class ManufacturingOpts:
 
 
 @dataclass
+class LoadCase:
+    """One load case: a *separate* deck pair that shares the design mesh but
+    applies a different load (the elevator linkage pulled in another direction).
+
+    The model is deliberately the simplest one that reuses the whole solve path
+    unchanged: a load case is identified by its own deck ``stem`` (its
+    ``<stem>_0000.rad`` starter + ``<stem>_0001.rad`` engine in ``model.case_dir``)
+    whose *only* meaningful difference from the others is the applied-load cards
+    (``/CLOAD`` / imposed motion / etc.). All cases MUST share the same
+    design-part element ids and node ids — element removal is identical across
+    cases, so each iteration writes the same alive set into every case's deck and
+    only the load cards differ.
+
+    Blank/None fields fall back to the single-case defaults: ``stem`` ->
+    ``model.stem``, ``disp_node_id`` -> ``model.disp_node_id``, ``sigma_allow`` /
+    ``d_allow`` -> the global ``constraints``. The combined sensitivity is the
+    per-case-normalised weighted sum ``sum_i weight_i * energy_i`` and a design is
+    feasible only when *every* case is feasible against its own limits.
+    """
+    name: str = "default"
+    stem: str = ""                       # source deck stem; blank -> model.stem
+    weight: float = 1.0                  # w_i in the weighted-sum sensitivity
+    disp_node_id: Optional[int] = None   # blank -> model.disp_node_id
+    sigma_allow: Optional[float] = None  # blank -> constraints.sigma_allow
+    d_allow: Optional[float] = None      # blank -> constraints.d_allow
+
+
+@dataclass
+class ResolvedCase:
+    """A :class:`LoadCase` with every fallback filled in and deck paths resolved.
+
+    Runtime-only (never serialised): produced by :meth:`Config.load_case_list`.
+    """
+    name: str
+    stem: str
+    weight: float
+    disp_node_id: Optional[int]
+    sigma_allow: float
+    d_allow: float
+    starter: Path
+    engine: Path
+
+
+@dataclass
 class Config:
     or_paths: ORPaths = field(default_factory=ORPaths)
     run: RunOpts = field(default_factory=RunOpts)
@@ -246,6 +290,11 @@ class Config:
     manufacturing: ManufacturingOpts = field(default_factory=ManufacturingOpts)
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     smooth: SmoothOpts = field(default_factory=SmoothOpts)
+    # Multiple load cases (optional). Leave empty for the classic single-case run
+    # (one implicit case == the ``model`` deck, weight 1) — behaviour is then
+    # byte-identical to before. List ``LoadCase`` entries to minimise a
+    # weighted-sum compliance over several loads. See :class:`LoadCase`.
+    load_cases: list = field(default_factory=list)
     # Which topology optimiser to drive the loop: "beso" (default, bi-directional
     # element removal) or "levelset" (nodal level-set, smoother boundaries). The
     # active block's shared knobs (target_volume_fraction, max_iter, convergence,
@@ -279,6 +328,7 @@ class Config:
             manufacturing=build(ManufacturingOpts, data.get("manufacturing")),
             d3plot=build(D3plotOpts, data.get("d3plot")),
             smooth=build(SmoothOpts, data.get("smooth")),
+            load_cases=[build(LoadCase, lc) for lc in (data.get("load_cases") or [])],
             optimizer=(data.get("optimizer") or "beso"),
             work_dir=data.get("work_dir") or "",
         )
@@ -300,6 +350,35 @@ class Config:
         max_iter, convergence_*, protect_*, archive_*) from here so it stays
         optimiser-agnostic."""
         return self.levelset if self.optimizer_name() == "levelset" else self.beso
+
+    def load_case_list(self) -> list[ResolvedCase]:
+        """Resolve :attr:`load_cases` into concrete cases with fallbacks applied.
+
+        With no configured cases this returns the single implicit case (the
+        ``model`` deck, weight 1) so the optimiser's multi-case path collapses to
+        exactly the classic single-solve behaviour.
+        """
+        m, c = self.model, self.constraints
+        case_dir = Path(m.case_dir).resolve()
+        specs = self.load_cases or [
+            LoadCase(name="default", stem=m.stem, weight=1.0,
+                     disp_node_id=m.disp_node_id,
+                     sigma_allow=c.sigma_allow, d_allow=c.d_allow)]
+        out: list[ResolvedCase] = []
+        for lc in specs:
+            stem = lc.stem or m.stem
+            out.append(ResolvedCase(
+                name=lc.name or stem,
+                stem=stem,
+                weight=float(lc.weight),
+                disp_node_id=(lc.disp_node_id if lc.disp_node_id is not None
+                              else m.disp_node_id),
+                sigma_allow=(lc.sigma_allow if lc.sigma_allow is not None
+                             else c.sigma_allow),
+                d_allow=(lc.d_allow if lc.d_allow is not None else c.d_allow),
+                starter=case_dir / f"{stem}_0000.rad",
+                engine=case_dir / f"{stem}_0001.rad"))
+        return out
 
     def run_folder(self) -> str:
         """The configured run/output folder *as written* (may be relative).

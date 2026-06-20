@@ -56,6 +56,31 @@ def blend_history(W, raw: np.ndarray, sens_prev: np.ndarray | None,
     return history_weight * filt + (1.0 - history_weight) * sens_prev
 
 
+def combine_sensitivity(raws: list[np.ndarray],
+                        weights: list[float]) -> np.ndarray:
+    """Weighted-sum sensitivity over several load cases (optimiser-agnostic).
+
+    ``s_e = sum_i weight_i * (raw_i / max(raw_i))`` — each case's raw per-element
+    sensitivity (from :func:`map_sensitivity`) is normalised by its own peak
+    before weighting, so the weights express *relative* importance regardless of
+    how the cases' absolute strain-energy scales differ. Done on the raw
+    (pre-filter) sensitivity so the existing spatial filter + Huang-Xie history
+    blend then apply once to the combined field.
+
+    A single case is returned untouched (no normalisation, weight ignored) so the
+    classic single-load path stays byte-identical: per-iteration max normalisation
+    would otherwise rescale the sensitivity by a quantity that varies each
+    iteration and perturb the history blend.
+    """
+    if len(raws) == 1:
+        return raws[0]
+    total = np.zeros_like(raws[0], dtype=float)
+    for raw, w in zip(raws, weights):
+        mx = float(raw.max()) if raw.size else 0.0
+        total += w * (raw / mx if mx > 0.0 else raw)
+    return total
+
+
 class Beso:
     def __init__(self, mesh: Mesh, cfg: BesoCfg, protected_mask: np.ndarray,
                  anchor: np.ndarray | None = None):

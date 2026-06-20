@@ -5,6 +5,7 @@ monitor without ever touching the run. Resumable from ``checkpoint.npz``.
 """
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import time
 from pathlib import Path
@@ -13,8 +14,8 @@ from typing import Callable, Optional
 import numpy as np
 
 from . import status as st
-from .beso import Beso
-from .config import Config
+from .beso import Beso, combine_sensitivity
+from .config import Config, ResolvedCase
 from .d3plot import convert_final
 from .deck import Deck, prepare_engine
 from .levelset import LevelSet
@@ -64,6 +65,39 @@ def _clean_solve_dir(run_dir: Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
 
+def _case_solve_dir(solve_root: Path, n_cases: int, i: int) -> Path:
+    """Solve directory for load case *i*. A single case uses ``solve/`` directly
+    (so a classic run is byte-identical); multiple cases each get their own
+    ``solve/case_<i>/`` so their decks, listings and animations never collide."""
+    return solve_root if n_cases == 1 else solve_root / f"case_{i}"
+
+
+def _case_config(cfg: Config, case: ResolvedCase) -> Config:
+    """A shallow copy of *cfg* whose ``model.stem`` / ``model.disp_node_id`` are
+    the load case's, so the existing ``run_solver`` / ``extract`` (which key off
+    the model stem and disp node) operate on that case with no other change."""
+    return dataclasses.replace(
+        cfg, model=dataclasses.replace(cfg.model, stem=case.stem,
+                                       disp_node_id=case.disp_node_id))
+
+
+def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
+                no_pin: set, solve_dir: Path, anim_dt: float):
+    """Write the alive deck for one load case, solve it, extract its results.
+
+    The per-case "solve + extract" unit reused for every case each iteration.
+    Returns ``(run_result, results)`` where *results* is ``None`` if the solve
+    failed (the caller surfaces *run_result*)."""
+    case_cfg = _case_config(cfg, case)
+    _clean_solve_dir(solve_dir)
+    deck.write(solve_dir / f"{case.stem}_0000.rad", alive, no_pin=no_pin)
+    prepare_engine(case.engine, solve_dir / f"{case.stem}_0001.rad", anim_dt=anim_dt)
+    res = run_solver(case_cfg, solve_dir)
+    if not res.ok:
+        return res, None
+    return res, extract(case_cfg, solve_dir)
+
+
 def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int,
                        keep_restart: bool = False) -> Path:
     """Copy iteration *it*'s key OpenRadioss outputs into ``work/iter_{it:04d}/``.
@@ -104,7 +138,7 @@ def run_optimization(cfg: Config, resume: bool = False,
                      log: Callable[[str], None] = print,
                      should_stop: Optional[Callable[[], bool]] = None) -> st.Status:
     work = cfg.work()
-    solve_dir = work / "solve"
+    solve_root = work / "solve"
     stem = cfg.model.stem
     m = cfg.model
 
@@ -117,8 +151,27 @@ def run_optimization(cfg: Config, resume: bool = False,
     # config block, keeping the loop optimiser-agnostic.
     oc = cfg.active_opts()
 
-    log(f"[oropt] loading deck {m.starter()}")
-    deck = Deck.load(m.starter(), m.design_part_id, m.design_node_min)
+    # ---- load cases --------------------------------------------------------
+    # A single (default) case == the classic single-solve run. The primary case's
+    # deck defines the shared geometry/mesh/protected set; every other case must
+    # share the same design-part element ids (only its load cards differ).
+    cases = cfg.load_case_list()
+    n_cases = len(cases)
+    primary = cases[0]
+    primary_solve = _case_solve_dir(solve_root, n_cases, 0)
+
+    log(f"[oropt] loading deck {primary.starter}"
+        + (f" (+{n_cases - 1} more load case(s))" if n_cases > 1 else ""))
+    deck = Deck.load(primary.starter, m.design_part_id, m.design_node_min)
+    case_decks = [deck]
+    for case in cases[1:]:
+        cdeck = Deck.load(case.starter, m.design_part_id, m.design_node_min)
+        if not np.array_equal(cdeck.elem_ids, deck.elem_ids):
+            raise ValueError(
+                f"load case {case.name!r} (stem {case.stem!r}) has a different "
+                f"design-part element set than the primary case {primary.name!r}; "
+                "all load cases must share the same mesh")
+        case_decks.append(cdeck)
     mesh = Mesh.from_deck(deck)
     bc_nodes = deck.group_nodes(m.bc_group_id)
     no_pin = set(int(v) for v in bc_nodes)            # already kinematically constrained
@@ -170,38 +223,53 @@ def run_optimization(cfg: Config, resume: bool = False,
                 status.state = "stopped"; status.message = "stop requested"
                 break
 
-            _clean_solve_dir(solve_dir)
-            deck.write(solve_dir / f"{stem}_0000.rad", alive, no_pin=no_pin)
-            prepare_engine(m.engine(), solve_dir / f"{stem}_0001.rad",
-                           anim_dt=cfg.run.anim_dt)
-
             log(f"[oropt] iter {it}: vf={opt.volume_fraction(alive):.3f} "
-                f"alive={int(alive.sum())} -> solving ...")
+                f"alive={int(alive.sum())} -> solving "
+                + (f"{n_cases} load cases ..." if n_cases > 1 else "..."))
+            # ---- solve every load case (sequentially, each in its own dir) -
             t0 = time.time()
-            res = run_solver(cfg, solve_dir)
+            run_results: list = []
+            case_results = []
+            for i, (case, cdeck) in enumerate(zip(cases, case_decks)):
+                csolve = _case_solve_dir(solve_root, n_cases, i)
+                res, r = _solve_case(cfg, case, cdeck, alive, no_pin,
+                                     csolve, cfg.run.anim_dt)
+                run_results.append(res)
+                if r is None:                       # this case failed -> abort iter
+                    break
+                case_results.append(r)
             iter_wall = time.time() - t0
             elapsed += iter_wall
 
+            res = run_results[-1]
             if not res.ok:
+                failed = cases[len(case_results)]
                 status.state = "failed"
-                status.message = f"{res.stage}: {res.message}"
+                status.message = (f"{res.stage}: {res.message}" if n_cases == 1
+                                  else f"case {failed.name!r}: {res.stage}: {res.message}")
                 status.iteration = it
                 status.or_termination = res.message
                 log(f"[oropt] SOLVE FAILED: {status.message}")
                 break
 
-            r = extract(cfg, solve_dir)
+            # ---- combine cases: weighted-sum sensitivity + worst-case gate -
+            raws = [opt.raw_sensitivity(r, deck.elem_ids, alive)
+                    for r in case_results]
+            raw = combine_sensitivity(raws, [c.weight for c in cases])
+            sigma_max = max(r.sigma_max for r in case_results)   # worst over cases
+            disp = max(r.disp for r in case_results)             # worst over cases
+            feasible = all(r.sigma_max <= case.sigma_allow
+                           and r.disp <= case.d_allow
+                           for case, r in zip(cases, case_results))
             vf = opt.volume_fraction(alive)
-            feasible = bool(r.sigma_max <= cfg.constraints.sigma_allow
-                            and r.disp <= cfg.constraints.d_allow)
             vfs.append(vf)
 
             # ---- publish state for the GUI --------------------------------
             remaining = oc.max_iter - it - 1
             status = st.Status(
                 state="running", iteration=it, max_iter=oc.max_iter,
-                volume_fraction=vf, sigma_max=r.sigma_max,
-                sigma_allow=cfg.constraints.sigma_allow, disp=r.disp,
+                volume_fraction=vf, sigma_max=sigma_max,
+                sigma_allow=cfg.constraints.sigma_allow, disp=disp,
                 d_allow=cfg.constraints.d_allow, feasible=feasible,
                 elements_alive=int(alive.sum()),
                 elements_total=deck.n_design_elements,
@@ -212,20 +280,20 @@ def run_optimization(cfg: Config, resume: bool = False,
             st.write_status(work, status)
             st.append_history(work, {
                 "iteration": it, "volume_fraction": round(vf, 6),
-                "sigma_max": round(r.sigma_max, 4), "disp": round(r.disp, 6),
+                "sigma_max": round(sigma_max, 4), "disp": round(disp, 6),
                 "elements_alive": int(alive.sum()), "feasible": feasible,
                 "iter_wall_s": round(iter_wall, 1), "or_termination": res.message})
-            raw = opt.raw_sensitivity(r, deck.elem_ids, alive)
             sens = opt.filter_history(raw, sens_prev)
             st.write_topology(work, deck.node_xyz, mesh.conn_rows, alive,
                               fields={"sensitivity": sens,
-                                      "vonmises": _scatter(r, deck.elem_ids)},
+                                      "vonmises": _scatter_max(case_results,
+                                                               deck.elem_ids)},
                               iteration=it)
             if oc.archive_iterations:
-                _archive_iteration(solve_dir, work, stem, it,
+                _archive_iteration(primary_solve, work, stem, it,
                                    keep_restart=oc.archive_restart)
-            log(f"[oropt] iter {it}: sigma_max={r.sigma_max:.2f}/"
-                f"{cfg.constraints.sigma_allow} disp={r.disp:.4f}/"
+            log(f"[oropt] iter {it}: sigma_max={sigma_max:.2f}/"
+                f"{cfg.constraints.sigma_allow} disp={disp:.4f}/"
                 f"{cfg.constraints.d_allow} feasible={feasible} "
                 f"({iter_wall:.0f}s)")
 
@@ -257,11 +325,11 @@ def run_optimization(cfg: Config, resume: bool = False,
             status.state = "stopped"
         st.write_status(work, status)
         # Post-run: best-effort OpenRadioss anim -> LS-Dyna d3plot of the final
-        # design. Done while the run still owns the pid (so the GUI stays
-        # 'running' and won't recycle solve/ mid-conversion); never let
-        # post-processing affect the run's result/state.
+        # design (the primary load case's final state). Done while the run still
+        # owns the pid (so the GUI stays 'running' and won't recycle solve/
+        # mid-conversion); never let post-processing affect the run's result/state.
         try:
-            convert_final(cfg, solve_dir, work, log)
+            convert_final(cfg, primary_solve, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] d3plot: unexpected error during conversion: {exc}")
         try:
@@ -279,4 +347,13 @@ def _scatter(results, elem_ids: np.ndarray) -> np.ndarray:
     valid = (pos < elem_ids.size) & \
         (elem_ids[np.clip(pos, 0, elem_ids.size - 1)] == results.element_ids)
     out[pos[valid]] = results.vonmises[valid]
+    return out
+
+
+def _scatter_max(results_list, elem_ids: np.ndarray) -> np.ndarray:
+    """Per-element worst (max) von-Mises across load cases, on the full element
+    array. With one case this is exactly :func:`_scatter` of that case."""
+    out = _scatter(results_list[0], elem_ids)
+    for results in results_list[1:]:
+        out = np.maximum(out, _scatter(results, elem_ids))
     return out
