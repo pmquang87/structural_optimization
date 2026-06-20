@@ -43,7 +43,8 @@ oropt/
   status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
   loop.py     solve (every load case) -> extract -> rank -> delete -> repeat; resumable; constraint feasibility gate
   run.py      CLI entry point
-  gui/app.py  Streamlit dashboard (input / constraints / live monitor) — reads status files only
+  gui/app.py  Streamlit dashboard (input + load-case table / constraints / live monitor) — reads status files only
+  gui/cases.py  Streamlit-free helpers: load-case table rows <-> LoadCase config objects
 ```
 
 ## Install
@@ -134,6 +135,9 @@ blank-`work_dir` default), or type an explicit path to override it.
   Leave `load_cases` empty for the classic single-solve run (behaviour is
   byte-identical). All cases must share the same design-part element ids (only the
   load differs); the post-run d3plot/smoothing use the primary (first) case.
+  Editable as a **Load cases** table on the GUI's *Input* tab (add/remove rows;
+  blank optional cells inherit defaults); the *Monitor* tab then flags that
+  σ_max/disp are the worst across all cases.
 * **Keep-out / non-design regions** — `model.freeze_group_ids` (e.g. `[99999999]`,
   any `/GRNOD/NODE` set in the deck) and `model.freeze_node_ids`: every design
   element touching those nodes is frozen and never deleted. Boundary-condition,

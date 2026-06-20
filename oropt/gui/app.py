@@ -21,6 +21,8 @@ import streamlit as st
 
 from oropt import status as st_io
 from oropt.config import Config, DEFAULT_WORK_SUBDIR
+from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
+                             records_from_load_cases)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CFG = PROJECT_ROOT / "configs" / "elevator_linkage.yaml"
@@ -113,6 +115,44 @@ with tab_in:
         "BC node-group id", value=cfg.model.bc_group_id, step=1))
     st.caption(f"OpenRadioss root: `{cfg.or_paths.root}`  ·  np={cfg.run.np} "
                f"nt={cfg.run.nt}  ·  starter `{cfg.model.starter().name}`")
+
+    st.subheader("Load cases")
+    st.caption(
+        "Optimise the part against several loads (the linkage pulled in "
+        "different directions) by minimising a **weighted-sum compliance**. "
+        "Each row is a separate deck pair in the case directory that shares the "
+        "same mesh — only its load differs. **Leave the table empty for a "
+        "classic single-load run.** Blank *stem* → the model deck stem above; "
+        "blank *disp/σ/d* cells inherit the model & constraints defaults.")
+    lc_df = pd.DataFrame(records_from_load_cases(cfg.load_cases),
+                         columns=CASE_COLUMNS)
+    lc_edited = st.data_editor(
+        lc_df, num_rows="dynamic", use_container_width=True,
+        key="load_cases_editor", column_config={
+            "name": st.column_config.TextColumn(
+                "Name", help="Label for the load case, e.g. pull_z."),
+            "stem": st.column_config.TextColumn(
+                "Deck stem", help="<stem>_0000.rad / _0001.rad in the case "
+                                  "directory. Blank → the model deck stem."),
+            "weight": st.column_config.NumberColumn(
+                "Weight", min_value=0.0, step=0.1, format="%.3f",
+                help="wᵢ in s_e = Σ wᵢ·(energyᵢ / max energyᵢ). Blank → 1."),
+            "disp_node_id": st.column_config.NumberColumn(
+                "Disp node id", step=1, format="%d",
+                help="Constrained node for this case. Blank → model disp node."),
+            "sigma_allow": st.column_config.NumberColumn(
+                "σ_allow [MPa]", min_value=0.0, step=1.0,
+                help="Per-case stress limit. Blank → the global constraint."),
+            "d_allow": st.column_config.NumberColumn(
+                "d_allow [mm]", min_value=0.0, step=0.1,
+                help="Per-case displacement limit. Blank → the global constraint."),
+        })
+    cfg.load_cases = load_cases_from_records(lc_edited.to_dict("records"))
+    if cfg.load_cases:
+        st.caption(f"▶ {len(cfg.load_cases)} load case(s): every iteration solves "
+                   "all of them (≈ N× a single-case run, each under "
+                   "`solve/case_<i>/`); the design is feasible only when **every** "
+                   "case is.")
 
     st.subheader("Solver backend")
     cfg.docker.enabled = st.checkbox(
@@ -295,6 +335,11 @@ with tab_mon:
         eta = status.eta_s / 60 if status.eta_s == status.eta_s else float("nan")
         k[3].metric("ETA [min]", "—" if eta != eta else f"{eta:.0f}",
                     f"elapsed {status.elapsed_s/60:.0f} min", delta_color="off")
+        if len(cfg.load_cases) > 1:
+            st.caption(f"σ_max and disp are the **worst across "
+                       f"{len(cfg.load_cases)} load cases**; the design is "
+                       "feasible only when every case is. Each case's animation "
+                       "is under `solve/case_<i>/`.")
 
         hist = st_io.read_history(work)
         if hist:
