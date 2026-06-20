@@ -21,6 +21,7 @@ from .deck import Deck, prepare_engine
 from .levelset import LevelSet
 from .manufacturing import apply_manufacturing, manufacturing_active
 from .mesh import Mesh
+from .report import write_report
 from .results import extract
 from .runner import run_solver
 from .smoothing import smooth_final
@@ -339,6 +340,12 @@ def run_optimization(cfg: Config, resume: bool = False,
             smooth_final(cfg, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] smooth: unexpected error during smoothing: {exc}")
+        # Automatic post-run summary (report.html/report.md) from the status &
+        # history this run wrote. Read-only and best-effort; never affects the run.
+        try:
+            write_report(cfg, work, log)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[oropt] report: unexpected error during report: {exc}")
         st.clear_pid(work)
     return status
 
