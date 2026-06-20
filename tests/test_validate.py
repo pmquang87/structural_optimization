@@ -1,0 +1,231 @@
+"""Fail-fast config validation: one test per error class, plus a clean pass.
+
+All hermetic -- decks and solver executables are tiny tmp files, the Docker image
+probe is off by default, so nothing here touches a real solver or daemon.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from oropt.config import Config, LoadCase
+from oropt.runner import backend_problems, run_solver
+from oropt.validate import (ERROR, WARNING, Problem, check_config, has_errors,
+                            validate_config)
+
+
+def _good_cfg(tmp_path: Path, sub: str = "g") -> Config:
+    """A fully valid single-case config: real decks + fake solver exes, no MPI.
+
+    Everything lives under ``tmp_path/sub`` so a single test can build several
+    independent good configs.
+    """
+    root = tmp_path / sub
+    case = root / "case"
+    case.mkdir(parents=True)
+    (case / "demo_0000.rad").write_text("starter", encoding="utf-8")
+    (case / "demo_0001.rad").write_text("engine", encoding="utf-8")
+    exec_dir = root / "or" / "exec"
+    exec_dir.mkdir(parents=True)
+    (exec_dir / "starter_win64.exe").write_text("x", encoding="utf-8")
+    (exec_dir / "engine_win64_impi.exe").write_text("x", encoding="utf-8")
+
+    cfg = Config()
+    cfg.model.case_dir = str(case)
+    cfg.model.stem = "demo"
+    cfg.or_paths.root = str(root / "or")
+    cfg.run.use_mpi = False          # native backend, no mpiexec needed
+    return cfg
+
+
+def _errors(cfg: Config) -> list[str]:
+    return [p.message for p in check_config(cfg) if p.severity == ERROR]
+
+
+def _warnings(cfg: Config) -> list[str]:
+    return [p.message for p in check_config(cfg) if p.severity == WARNING]
+
+
+# ---- the happy path --------------------------------------------------------
+def test_well_formed_config_is_clean(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    assert validate_config(cfg) == []
+    assert check_config(cfg) == []
+    assert has_errors(check_config(cfg)) is False
+
+
+@pytest.mark.parametrize("name", ["beso", "levelset", "tobs", "BESO", "  Tobs "])
+def test_valid_optimizers_accepted(tmp_path, name):
+    cfg = _good_cfg(tmp_path)
+    cfg.optimizer = name
+    assert validate_config(cfg) == []
+
+
+# ---- optimiser selector ----------------------------------------------------
+def test_bad_optimizer_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.optimizer = "genetic"
+    errs = _errors(cfg)
+    assert any("optimizer must be one of" in e and "genetic" in e for e in errs)
+    assert has_errors(check_config(cfg))
+
+
+# ---- decks / model directory ----------------------------------------------
+def test_missing_decks_reported_by_full_path(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.model.stem = "absent"            # no absent_0000/_0001 in the case dir
+    errs = _errors(cfg)
+    base = Path(cfg.model.case_dir).resolve()
+    assert any(str(base / "absent_0000.rad") in e for e in errs)
+    assert any(str(base / "absent_0001.rad") in e for e in errs)
+
+
+def test_blank_stem_and_no_load_cases_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.model.stem = ""
+    cfg.load_cases = []
+    assert any("model.stem is blank" in e for e in _errors(cfg))
+
+
+def test_missing_case_dir_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.model.case_dir = str(tmp_path / "nope")
+    assert any("model.case_dir does not exist" in e for e in _errors(cfg))
+
+
+def test_run_folder_under_a_file_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")        # a file, not a directory
+    cfg.work_dir = str(blocker / "sub" / "work")     # an ancestor is a file
+    assert any("run folder is not creatable" in e for e in _errors(cfg))
+
+
+# ---- numeric sanity --------------------------------------------------------
+@pytest.mark.parametrize("tvf", [0.0, -0.1, 1.5, 2.0])
+def test_target_volume_fraction_out_of_range_is_error(tmp_path, tvf):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.target_volume_fraction = tvf
+    assert any("target_volume_fraction must be in (0, 1]" in e for e in _errors(cfg))
+
+
+def test_target_volume_fraction_one_is_warning_not_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.target_volume_fraction = 1.0
+    assert _errors(cfg) == []
+    assert any("no material will be removed" in w for w in _warnings(cfg))
+
+
+@pytest.mark.parametrize("er", [0.0, -0.5])
+def test_nonpositive_evolution_rate_is_error(tmp_path, er):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.evolution_rate = er
+    assert any("evolution_rate must be > 0" in e for e in _errors(cfg))
+
+
+def test_negative_filter_radius_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.filter_radius = -1.0
+    assert any("filter_radius must be >= 0" in e for e in _errors(cfg))
+
+
+def test_zero_filter_radius_is_allowed(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.filter_radius = 0.0
+    assert _errors(cfg) == []
+
+
+def test_numeric_sanity_follows_selected_optimizer(tmp_path):
+    # the active (tobs) block is validated...
+    cfg = _good_cfg(tmp_path)
+    cfg.optimizer = "tobs"
+    cfg.tobs.target_volume_fraction = 0.0
+    assert any("target_volume_fraction" in e for e in _errors(cfg))
+    # ...and the inactive (beso) block is ignored.
+    cfg2 = _good_cfg(tmp_path, "h")
+    cfg2.optimizer = "tobs"
+    cfg2.beso.target_volume_fraction = 5.0
+    assert _errors(cfg2) == []
+
+
+# ---- per-case weights & feasibility limits --------------------------------
+def test_negative_load_case_weight_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases = [LoadCase(name="a", stem="demo", weight=-1.0),
+                      LoadCase(name="b", stem="demo", weight=2.0)]
+    errs = _errors(cfg)
+    assert any("weight must be >= 0" in e for e in errs)
+    assert not any("all load-case weights are zero" in e for e in errs)
+
+
+def test_all_zero_weights_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases = [LoadCase(name="a", stem="demo", weight=0.0),
+                      LoadCase(name="b", stem="demo", weight=0.0)]
+    assert any("all load-case weights are zero" in e for e in _errors(cfg))
+
+
+def test_nonpositive_sigma_allow_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.constraints.sigma_allow = 0.0
+    assert any("sigma_allow must be > 0" in e for e in _errors(cfg))
+
+
+def test_nonpositive_d_allow_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.constraints.d_allow = -1.0
+    assert any("d_allow must be > 0" in e for e in _errors(cfg))
+
+
+# ---- solver backend --------------------------------------------------------
+def test_docker_enabled_but_cli_missing_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.docker.enabled = True
+    cfg.docker.docker_exe = "definitely-not-a-real-docker-xyz"
+    errs = _errors(cfg)
+    assert any("docker CLI not found" in e for e in errs)
+
+
+def test_native_missing_solver_exes_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.or_paths.root = str(tmp_path / "no_such_or")     # starter+engine vanish
+    assert sum("executable not found" in e for e in _errors(cfg)) == 2
+
+
+def test_native_mpiexec_missing_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.run.use_mpi = True
+    cfg.or_paths.intel_mpi_root = str(tmp_path / "no_mpi")
+    assert any("mpiexec not found" in e for e in _errors(cfg))
+
+
+def test_native_np_not_one_is_warning(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.run.np = 2
+    assert _errors(cfg) == []
+    assert any("requires np=1" in w for w in _warnings(cfg))
+
+
+def test_runner_setup_uses_shared_backend_problems(tmp_path):
+    # The refactor: run_solver's pre-flight is exactly backend_problems(), joined.
+    cfg = _good_cfg(tmp_path)
+    cfg.or_paths.root = str(tmp_path / "absent")
+    res = run_solver(cfg, tmp_path)
+    assert res.ok is False and res.stage == "setup"
+    assert res.message == "; ".join(backend_problems(cfg))
+
+
+# ---- public API shape ------------------------------------------------------
+def test_validate_config_returns_severity_prefixed_strings(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.optimizer = "nope"               # an error
+    cfg.run.np = 2                       # a warning
+    msgs = validate_config(cfg)
+    assert all(isinstance(m, str) for m in msgs)
+    assert any(m.startswith("error:") for m in msgs)
+    assert any(m.startswith("warning:") for m in msgs)
+
+
+def test_problem_str_is_severity_prefixed():
+    assert str(Problem(ERROR, "boom")) == "error: boom"
