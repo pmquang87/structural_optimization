@@ -108,6 +108,8 @@ def test_app_renders_with_load_case_editor(tmp_path):
     at = AppTest.from_file(str(app_file), default_timeout=30)
     at.run()                                            # default config first
     assert not at.exception
+    # the load-case editor is its own tab (compare in-memory; labels carry emoji)
+    assert any("Load cases" in t.label for t in at.tabs)
     # repoint at our multi-case config and rerun
     at.sidebar.text_input[0].set_value(str(cfg_path)).run()
     assert not at.exception

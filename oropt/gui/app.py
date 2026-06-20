@@ -92,7 +92,8 @@ refresh_s = int(st.sidebar.number_input(
     "Refresh interval (s)", min_value=1, max_value=3600, value=60, step=5,
     help="How often the Monitor tab re-reads the run's status files."))
 
-tab_in, tab_con, tab_mon = st.tabs(["📥 Input", "🎚 Constraints / BC", "📊 Monitor"])
+tab_in, tab_lc, tab_con, tab_mon = st.tabs(
+    ["📥 Input", "🔀 Load cases", "🎚 Constraints / BC", "📊 Monitor"])
 
 # ---- Input tab -------------------------------------------------------------
 with tab_in:
@@ -116,14 +117,34 @@ with tab_in:
     st.caption(f"OpenRadioss root: `{cfg.or_paths.root}`  ·  np={cfg.run.np} "
                f"nt={cfg.run.nt}  ·  starter `{cfg.model.starter().name}`")
 
+    st.subheader("Solver backend")
+    cfg.docker.enabled = st.checkbox(
+        "Run OpenRadioss via Docker (MUMPS implicit — no Intel MPI needed)",
+        value=cfg.docker.enabled,
+        help="Use the Dockerised OpenRadioss build instead of the native Windows "
+             "binaries (works on AMD or Intel). Requires Docker Desktop running "
+             "and the image loaded; outputs are written into the run folder, "
+             "exactly like the native backend.")
+    if cfg.docker.enabled:
+        dk = st.columns([2, 1, 1])
+        cfg.docker.image = dk[0].text_input("Docker image", cfg.docker.image)
+        cfg.docker.np = int(dk[1].number_input(
+            "MPI np", value=int(cfg.docker.np), min_value=1, step=1))
+        cfg.docker.nt = int(dk[2].number_input(
+            "Threads nt", value=int(cfg.docker.nt), min_value=1, step=1))
+        st.caption("Keep np × nt ≤ CPU cores. The container bind-mounts the run "
+                   "folder to /data and writes results back there.")
+
+# ---- Load cases tab --------------------------------------------------------
+with tab_lc:
     st.subheader("Load cases")
     st.caption(
         "Optimise the part against several loads (the linkage pulled in "
         "different directions) by minimising a **weighted-sum compliance**. "
         "Each row is a separate deck pair in the case directory that shares the "
         "same mesh — only its load differs. **Leave the table empty for a "
-        "classic single-load run.** Blank *stem* → the model deck stem above; "
-        "blank *disp/σ/d* cells inherit the model & constraints defaults.")
+        "classic single-load run.** Blank *stem* → the model deck stem (Input "
+        "tab); blank *disp/σ/d* cells inherit the model & constraints defaults.")
     lc_df = pd.DataFrame(records_from_load_cases(cfg.load_cases),
                          columns=CASE_COLUMNS)
     lc_edited = st.data_editor(
@@ -149,28 +170,14 @@ with tab_in:
         })
     cfg.load_cases = load_cases_from_records(lc_edited.to_dict("records"))
     if cfg.load_cases:
-        st.caption(f"▶ {len(cfg.load_cases)} load case(s): every iteration solves "
-                   "all of them (≈ N× a single-case run, each under "
-                   "`solve/case_<i>/`); the design is feasible only when **every** "
-                   "case is.")
-
-    st.subheader("Solver backend")
-    cfg.docker.enabled = st.checkbox(
-        "Run OpenRadioss via Docker (MUMPS implicit — no Intel MPI needed)",
-        value=cfg.docker.enabled,
-        help="Use the Dockerised OpenRadioss build instead of the native Windows "
-             "binaries (works on AMD or Intel). Requires Docker Desktop running "
-             "and the image loaded; outputs are written into the run folder, "
-             "exactly like the native backend.")
-    if cfg.docker.enabled:
-        dk = st.columns([2, 1, 1])
-        cfg.docker.image = dk[0].text_input("Docker image", cfg.docker.image)
-        cfg.docker.np = int(dk[1].number_input(
-            "MPI np", value=int(cfg.docker.np), min_value=1, step=1))
-        cfg.docker.nt = int(dk[2].number_input(
-            "Threads nt", value=int(cfg.docker.nt), min_value=1, step=1))
-        st.caption("Keep np × nt ≤ CPU cores. The container bind-mounts the run "
-                   "folder to /data and writes results back there.")
+        st.success(
+            f"{len(cfg.load_cases)} load case(s): every iteration solves all of "
+            "them (≈ N× a single-case run, each under `solve/case_<i>/`); the "
+            "design is feasible only when **every** case is. Save the config "
+            "(Constraints / BC tab) or ▶ Start to apply.")
+    else:
+        st.info("No load cases — the run uses the single model deck (classic "
+                "single-load BESO). Add a row above to optimise several loads.")
 
 # ---- Constraints / BC tab --------------------------------------------------
 with tab_con:
