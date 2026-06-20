@@ -249,6 +249,24 @@ class SmoothOpts:
 
 
 @dataclass
+class ReportOpts:
+    """Automatic post-run summary report of the optimisation.
+
+    When enabled (default — it's cheap and read-only), after a run finishes a
+    human-readable summary is written into the run folder: ``report.html`` (a
+    self-contained file with the convergence charts and a render of the final
+    design embedded) and ``report.md``. It only *reads* the artefacts the loop
+    already wrote (``status.json``, ``history.csv``, ``topology_latest.vtu``), so
+    it never touches the run. Best-effort: a missing/failing matplotlib (charts)
+    or pyvista (topology render) degrades gracefully to file links and is logged,
+    never fatal. See :mod:`oropt.report`.
+    """
+    enabled: bool = True
+    charts: bool = True              # matplotlib convergence charts (vf, sigma, disp)
+    render_topology: bool = True     # off-screen pyvista render of the final design
+
+
+@dataclass
 class ManufacturingOpts:
     """Additive-manufacturing (AM) printability constraints applied to the alive
     mask each iteration, *after* the optimiser's own update (so they work for
@@ -337,6 +355,7 @@ class Config:
     manufacturing: ManufacturingOpts = field(default_factory=ManufacturingOpts)
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     smooth: SmoothOpts = field(default_factory=SmoothOpts)
+    report: ReportOpts = field(default_factory=ReportOpts)
     # Multiple load cases (optional). Leave empty for the classic single-case run
     # (one implicit case == the ``model`` deck, weight 1) — behaviour is then
     # byte-identical to before. List ``LoadCase`` entries to minimise a
@@ -377,6 +396,7 @@ class Config:
             manufacturing=build(ManufacturingOpts, data.get("manufacturing")),
             d3plot=build(D3plotOpts, data.get("d3plot")),
             smooth=build(SmoothOpts, data.get("smooth")),
+            report=build(ReportOpts, data.get("report")),
             load_cases=[build(LoadCase, lc) for lc in (data.get("load_cases") or [])],
             optimizer=(data.get("optimizer") or "beso"),
             work_dir=data.get("work_dir") or "",

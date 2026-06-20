@@ -58,6 +58,7 @@ oropt/
   simp.py     EXPERIMENTAL SIMP/OC prototype — offline maths only, not wired into the loop (see docs/simp_spike.md)
   manufacturing.py additive-manufacturing constraints on the alive mask: min member size (open), symmetry, overhang
   smoothing.py / d3plot.py  post-run: smoothed-surface (STL/VTP) export; OpenRadioss anim -> LS-Dyna d3plot
+  report.py   post-run: auto summary report (report.html/report.md) — charts + final-design render from status/history
   status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
   loop.py     build_optimizer(cfg) -> solve (every load case) -> extract -> update -> repeat; resumable; feasibility gate
   run.py      CLI entry point
@@ -205,6 +206,16 @@ blank-`work_dir` default), or type an explicit path to override it.
   write `topology_smoothed.<ext>` (`output_format: stl|vtp|both`) to the run
   folder — a clean deliverable for CAD / 3D-print / review. Best-effort. Exposed
   under **Post-processing — Surface smoothing** in the GUI.
+* `report` — automatic post-run **summary report** (`report.enabled: true` by
+  default — it's cheap and read-only). On finish, oropt summarises the run from
+  the `status.json`/`history.csv` it already wrote into `report.html` (a
+  self-contained page with the convergence charts and a render of the final
+  design embedded) and `report.md`: optimiser, start→final volume fraction and %
+  mass removed, final σ_max/displacement vs their limits, feasibility,
+  iteration count and total wall time. Charts need matplotlib and the final-design
+  render an off-screen pyvista; both are best-effort — if either is unavailable
+  the report still writes and links the files instead. Set `report.charts: false`
+  or `report.render_topology: false` to skip those pieces.
 * `docker` — optionally run the solver via the **Dockerised OpenRadioss MUMPS
   build** instead of the native Windows binaries (no Intel oneAPI/MKL/MPI; works
   on AMD or Intel). Set `docker.enabled: true` with the loaded `image`
@@ -236,6 +247,12 @@ animation is converted to an LS-Dyna d3plot and written to
 `work_dir/d3plot/<stem>.d3plot` (+ its `.d3plotNN` state files). When
 **`smooth.enabled: true`**, the final design's surface is extracted, smoothed and
 written to `work_dir/topology_smoothed.<ext>` (STL/VTP).
+
+Unless **`report.enabled: false`**, the run also writes a summary report —
+`work_dir/report.html` (self-contained: convergence charts + a final-design
+render embedded) and `work_dir/report.md`, alongside the `report_*.png` charts —
+recapping optimiser, start→final volume fraction and % mass removed, final
+σ_max/displacement vs limits, feasibility, iteration count and total wall time.
 
 > **Disk cost.** Archiving is off by default because it adds up: tens of MB per
 > iteration (deck + animation), so a 50–150 iteration run can reach several GB.
