@@ -1,12 +1,18 @@
-# oropt — OpenRadioss-coupled topology optimisation (BESO)
+# oropt — OpenRadioss-coupled topology optimisation (BESO · level-set · TOBS)
 
 Lightweight structural **topology optimisation** that drives the real
-**OpenRadioss** implicit nonlinear model in the loop. It implements **BESO**
-(Bi-directional Evolutionary Structural Optimisation): each iteration solves the
-deck, ranks elements by the internal-energy density OpenRadioss already writes to
-`/ANIM/ELEM/ENER`, **deletes** the least-important ones (with bi-directional
-add-back), and re-solves — removing material while the high-fidelity solver still
-reports peak von-Mises stress and a chosen node's displacement within limits.
+**OpenRadioss** implicit nonlinear model in the loop. Its default optimiser is
+**BESO** (Bi-directional Evolutionary Structural Optimisation): each iteration
+solves the deck, ranks elements by the internal-energy density OpenRadioss already
+writes to `/ANIM/ELEM/ENER`, **deletes** the least-important ones (with
+bi-directional add-back), and re-solves — removing material while the
+high-fidelity solver still reports peak von-Mises stress and a chosen node's
+displacement within limits.
+
+Three discrete optimisers plug into this same solve → delete → re-solve loop and
+are picked with a single `optimizer:` key — **BESO** (default), a nodal
+**level-set** (smoother boundaries), and **TOBS** (integer-linear-programming
+binary flips) — all reusing the `/ANIM/ELEM/ENER` energy as their sensitivity.
 
 Built for the AlSi10Mg additively-manufactured elevator linkage (575k TET4,
 6 kN pull through rigid cylinders via contact, implicit nonlinear quasi-static).
@@ -28,20 +34,30 @@ also keeps the implicit stiffness well-conditioned, and:
   make the implicit tangent singular, so a `/GRNOD/NODE` + `/BCS` fixing them is
   injected before `/END` (the converter's free-node guard, generalised).
 
+A 2026 research spike re-examined density-based **SIMP** for this model and still
+lands on **no-go**: the compliance sensitivity *is* recoverable from
+`/ANIM/ELEM/ENER`, but OpenRadioss has no per-element modulus (so the deck rewrite
+turns invasive and breaks `/SURF/PART/EXT` contact regeneration) and the
+nonlinear plastic-contact solve mismatches SIMP's linear-elastic theory — full
+argument and an offline OC prototype in [`docs/simp_spike.md`](docs/simp_spike.md).
+
 ## Architecture
 
 ```
 oropt/
-  config.py   YAML-backed Config (OR paths, run opts, model, constraints, BESO knobs)
-  runner.py   run starter + mpiexec engine (np=1) with the proven env; termination checks
+  config.py   YAML-backed Config (OR paths, run/docker opts, model, constraints, per-optimiser knobs, load cases)
+  runner.py   run starter + engine (native np=1, or the Docker MUMPS backend); termination checks
   results.py  anim_to_vtk -> pyvista: per-element energy & von-Mises, loaded-node displacement
   deck.py     parse /NODE + /TETRA4 once; verbatim filtered re-write; free-node pinning; engine trim
   mesh.py     centroids, volumes, sensitivity-filter matrix, connectivity, protected/keep-out regions
   beso.py     sensitivity -> filter + history average -> volume-target threshold + add-back + connectivity
   levelset.py nodal level-set alternative: energy -> nodal velocity -> phi evolution + smoothing -> bisected threshold
+  tobs.py     binary-ILP alternative: per-iteration element flips chosen by an integer linear program (scipy HiGHS)
+  simp.py     EXPERIMENTAL SIMP/OC prototype — offline maths only, not wired into the loop (see docs/simp_spike.md)
   manufacturing.py additive-manufacturing constraints on the alive mask: min member size (open), symmetry, overhang
+  smoothing.py / d3plot.py  post-run: smoothed-surface (STL/VTP) export; OpenRadioss anim -> LS-Dyna d3plot
   status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
-  loop.py     solve (every load case) -> extract -> rank -> delete -> repeat; resumable; constraint feasibility gate
+  loop.py     build_optimizer(cfg) -> solve (every load case) -> extract -> update -> repeat; resumable; feasibility gate
   run.py      CLI entry point
   gui/app.py  Streamlit dashboard (input / load cases / constraints / live monitor) — reads status files only
   gui/cases.py  Streamlit-free helpers: load-case table rows <-> LoadCase config objects
@@ -97,13 +113,25 @@ blank-`work_dir` default), or type an explicit path to override it.
   enforced on OpenRadioss's high-fidelity values each iteration.
 * `beso.evolution_rate`, `target_volume_fraction`, `filter_radius`,
   `history_weight`, `sensitivity` (`energy`|`vonmises`|`blend`).
-* `optimizer` (default `beso`) — selects the topology optimiser. Set to
-  `levelset` to drive the run with the **nodal level-set** optimiser instead
-  (smoother boundaries than BESO's element-by-element removal). Its knobs live
-  under `levelset:` and mirror the shared BESO ones (`target_volume_fraction`,
-  `evolution_rate`, `filter_radius`, `history_weight`, `max_iter`, `convergence_*`,
-  `protect_*`, `archive_*`) plus level-set specifics `levelset.dt`,
-  `levelset.smoothing_passes`, `levelset.band_width`.
+* `optimizer` (default `beso`) — selects the discrete topology optimiser. All
+  three share the `/ANIM/ELEM/ENER` energy sensitivity, the element-deletion deck
+  path, and the multi-load / AM-constraint / connectivity machinery; only the
+  per-iteration update differs:
+  * `beso` — the default bi-directional evolutionary scheme (`beso:` knobs).
+  * `levelset` — a **nodal level-set** (smoother boundaries than BESO's
+    element-by-element removal): energy → nodal velocity → φ evolution +
+    smoothing → bisected volume-target threshold. Specifics under `levelset:`:
+    `dt`, `smoothing_passes`, `band_width`.
+  * `tobs` — **TOBS** (Topology Optimisation of Binary Structures): each
+    iteration's element flips are chosen by an integer linear program
+    (`scipy.optimize.milp` / HiGHS) with a formal move limit and a linearised,
+    ε-relaxed volume constraint, instead of a heuristic threshold. Specifics
+    under `tobs:`: `flip_limit` (β, max fraction of elements flipped per step)
+    and `constraint_relaxation` (ε volume band).
+
+  Each optimiser's `<name>:` block also mirrors the shared knobs
+  (`target_volume_fraction`, `evolution_rate`, `filter_radius`, `history_weight`,
+  `max_iter`, `convergence_*`, `protect_*`, `archive_*`). Selectable on the GUI.
 * **Additive-manufacturing constraints** (`manufacturing:`, all OFF by default) —
   applied to the alive mask each iteration after the optimiser update, for parts
   printed by powder-bed fusion (e.g. AlSi10Mg). `min_member_layers` (morphological
@@ -146,7 +174,6 @@ blank-`work_dir` default), or type an explicit path to override it.
   optimiser only ever removes the remaining design material — note that an
   over-large keep-out caps how much mass can be removed (if it already exceeds
   `target_volume_fraction`, no removal is possible).
-  symmetry and contact regions are protected automatically.
 * `beso.protect_bc_nodes` (default `true`) — whether elements touching the BC
   node-group (`model.bc_group_id`) are frozen. Set it `false` to **allow the
   optimiser to delete material at the BC nodes** too; those nodes stay fixed via
@@ -220,8 +247,10 @@ written to `work_dir/topology_smoothed.<ext>` (STL/VTP).
   weight; start conservative and watch the mass / σ / displacement traces.
 * **Cost** — ~13 min/solve × 50–150 iterations ≈ 11–33 h. Per-iteration
   checkpoints make runs resumable; develop on a coarse proxy mesh.
-* **np = 1 only** — SPMD implicit + solid contact segfaults (documented upstream
-  limitation), so there is no domain parallelism.
+* **np = 1 on the native backend** — SPMD implicit + solid contact segfaults
+  (documented upstream limitation) on the Intel/Windows build, so the native path
+  has no domain parallelism. The Docker MUMPS backend (`docker.enabled`) does
+  support real MPI (`np > 1`).
 * **Self-contact** (`/INTER/TYPE7/90001`) may see newly-exposed cavity faces after
   deletion; usually harmless (interior cavities contact nothing) but worth a look
   after the first deletions.
@@ -234,11 +263,16 @@ written to `work_dir/topology_smoothed.<ext>` (STL/VTP).
   (σ_max = 308.305 MPa, disp = 1.229 mm, NORMAL TERMINATION).
 * A hand-deletion (−16 % volume, 16 352 freed nodes auto-pinned) produces a deck
   that OpenRadioss solves to NORMAL TERMINATION.
-* `pytest` covers deck round-trip/pinning, mesh geometry/connectivity/protection,
-  BESO ranking/threshold, the level-set bisected volume targeting / protected /
-  phi-thresholding self-consistency / connectivity / optimiser selection,
-  status/checkpoint round-trips, VTK extraction, per-iteration snapshot/archive
-  file-writing, and the run-folder fallback + source-deck isolation.
+* `pytest` (124 tests, all hermetic — no OpenRadioss needed) covers deck
+  round-trip/pinning, mesh geometry/connectivity/protection, BESO ranking/threshold,
+  the **level-set** (bisected volume targeting / protected / φ-thresholding /
+  connectivity) and **TOBS** (ILP feasibility / move-limit / volume targeting /
+  protected) updates and optimiser selection, the **multi-load** weighted-sum and
+  worst-case feasibility aggregation, the **additive-manufacturing** constraints,
+  the **Docker** command construction, **d3plot**/**surface-smoothing** post-processing,
+  the offline **SIMP** OC/bisection/projection prototype, status/checkpoint
+  round-trips, VTK extraction, per-iteration snapshot/archive file-writing, and the
+  run-folder fallback + source-deck isolation.
 
 This project consumes decks produced by the sibling `k_to_rad_converter`
 (LS-DYNA → OpenRadioss); see that project for the conversion step.
