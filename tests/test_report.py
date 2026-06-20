@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import numpy as np
 
+import oropt.report as report
 from oropt import status as st
 from oropt.config import Config, ReportOpts
-from oropt.report import _summarise, write_report
+from oropt.report import _render_topology, _summarise, write_report
 
 
 def _write_topology(work):
@@ -88,7 +89,9 @@ def test_summarise_numbers():
 # --- end-to-end ------------------------------------------------------------- #
 def test_write_report_creates_files_with_key_numbers(tmp_path):
     _make_run(tmp_path)
-    out = write_report(_cfg("beso"), tmp_path, lambda *_: None)
+    cfg = _cfg("beso")
+    cfg.report.render_topology = False     # the render is covered separately; keep
+    out = write_report(cfg, tmp_path, lambda *_: None)   # this assertion GL-free
     assert out is not None and out.name == "report.html"
 
     html = (tmp_path / "report.html").read_text(encoding="utf-8")
@@ -105,7 +108,9 @@ def test_write_report_creates_files_with_key_numbers(tmp_path):
 def test_write_report_charts_written(tmp_path):
     # matplotlib is a core dependency, so the convergence charts must be produced.
     _make_run(tmp_path)
-    write_report(_cfg("beso"), tmp_path, lambda *_: None)
+    cfg = _cfg("beso")
+    cfg.report.render_topology = False     # exercise charts only (no GL needed)
+    write_report(cfg, tmp_path, lambda *_: None)
     assert (tmp_path / "report_volume_fraction.png").is_file()
     assert (tmp_path / "report_sigma.png").is_file()
     assert (tmp_path / "report_disp.png").is_file()
@@ -158,3 +163,27 @@ def test_write_report_infeasible_badge(tmp_path):
     write_report(cfg, tmp_path, lambda *_: None)
     html = (tmp_path / "report.html").read_text(encoding="utf-8")
     assert "INFEASIBLE" in html
+
+
+# --- topology render (isolated subprocess) ---------------------------------- #
+def test_render_topology_is_contained(tmp_path):
+    # The real off-screen render runs in an isolated subprocess: where a GL
+    # context exists it yields the PNG, and on a headless box (e.g. CI) the
+    # subprocess fails/crashes and we get None — but never an exception here.
+    _write_topology(tmp_path)
+    out = _render_topology(tmp_path, 120.0, lambda *_: None)
+    assert out is None or out.is_file()
+
+
+def test_render_failure_falls_back_to_link(tmp_path, monkeypatch):
+    # Force the render subprocess to exit non-zero without producing a PNG (stands
+    # in for a GL/driver crash): the report must still be written and link the
+    # topology files instead of embedding an image.
+    _make_run(tmp_path)
+    monkeypatch.setattr(report, "_RENDER_RUNNER", "import sys; sys.exit(3)")
+    logs: list[str] = []
+    write_report(_cfg("beso"), tmp_path, logs.append)
+    assert not (tmp_path / "report_topology.png").exists()
+    assert any("render failed" in m for m in logs)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert "topology_latest.vtu" in html

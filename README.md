@@ -213,9 +213,11 @@ blank-`work_dir` default), or type an explicit path to override it.
   design embedded) and `report.md`: optimiser, start→final volume fraction and %
   mass removed, final σ_max/displacement vs their limits, feasibility,
   iteration count and total wall time. Charts need matplotlib and the final-design
-  render an off-screen pyvista; both are best-effort — if either is unavailable
-  the report still writes and links the files instead. Set `report.charts: false`
-  or `report.render_topology: false` to skip those pieces.
+  render an off-screen pyvista (run in an **isolated subprocess**, so even a hard
+  GL/driver crash on a headless box can't abort the run); both are best-effort —
+  if either is unavailable the report still writes and links the files instead.
+  Set `report.charts: false` or `report.render_topology: false` to skip those
+  pieces.
 * `docker` — optionally run the solver via the **Dockerised OpenRadioss MUMPS
   build** instead of the native Windows binaries (no Intel oneAPI/MKL/MPI; works
   on AMD or Intel). Set `docker.enabled: true` with the loaded `image`

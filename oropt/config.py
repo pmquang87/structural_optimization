@@ -259,11 +259,14 @@ class ReportOpts:
     already wrote (``status.json``, ``history.csv``, ``topology_latest.vtu``), so
     it never touches the run. Best-effort: a missing/failing matplotlib (charts)
     or pyvista (topology render) degrades gracefully to file links and is logged,
-    never fatal. See :mod:`oropt.report`.
+    never fatal. The render runs in an *isolated subprocess* (like ``d3plot``) so
+    even a hard GL/driver crash on a headless box is contained and never aborts
+    the run. See :mod:`oropt.report`.
     """
     enabled: bool = True
     charts: bool = True              # matplotlib convergence charts (vf, sigma, disp)
     render_topology: bool = True     # off-screen pyvista render of the final design
+    render_timeout_s: float = 120.0  # cap on the isolated render subprocess
 
 
 @dataclass

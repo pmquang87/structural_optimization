@@ -21,6 +21,8 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import math
+import subprocess
+import sys
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -32,6 +34,20 @@ from .config import Config
 REPORT_HTML = "report.html"
 REPORT_MD = "report.md"
 TOPOLOGY_PNG = "report_topology.png"
+
+# Run by an isolated subprocess (same interpreter, which already has pyvista) so a
+# hard VTK/OpenGL crash on a headless box can never bring the run down — it shows
+# up here only as a non-zero exit code. argv -> [vtu_in, png_out].
+_RENDER_RUNNER = (
+    "import sys, pyvista as pv; "
+    "pv.OFF_SCREEN = True; "
+    "g = pv.read(sys.argv[1]); "
+    "s = 'sensitivity' if 'sensitivity' in g.cell_data else None; "
+    "p = pv.Plotter(window_size=[900, 600], off_screen=True); "
+    "p.add_mesh(g, scalars=s, cmap='viridis', show_edges=False); "
+    "p.view_isometric(); p.background_color = 'white'; "
+    "p.screenshot(sys.argv[2]); p.close()"
+)
 _CHART_FILES = {
     "vf": "report_volume_fraction.png",
     "sigma": "report_sigma.png",
@@ -241,37 +257,40 @@ def _charts(history: list[dict], s: Summary, work: Path,
 # --------------------------------------------------------------------------- #
 # final-topology render (off-screen pyvista, best-effort)
 # --------------------------------------------------------------------------- #
-def _render_topology(cfg: Config, work: Path,
+def _render_topology(work: Path, timeout_s: float,
                      log: Callable[[str], None]) -> Optional[Path]:
     """Off-screen render of the final design to ``report_topology.png``.
 
-    Mirrors the GUI's off-screen pyvista view of ``topology_latest.vtu``. Returns
-    the PNG path, or ``None`` (reason logged) when disabled, there is nothing to
-    render, or pyvista/the GL backend is unavailable.
+    Renders ``topology_latest.vtu`` exactly like the GUI's off-screen pyvista
+    view, but in an *isolated subprocess* so a hard VTK/OpenGL crash on a headless
+    machine (no GL context) can never abort the run — it just shows up as a
+    non-zero exit code and we fall back to linking the topology files. Returns the
+    PNG path, or ``None`` (reason logged) when there is nothing to render or the
+    render subprocess fails/times out/crashes.
     """
     src = Path(work) / st.TOPOLOGY
     if not src.is_file():
         log(f"[oropt] report: no {st.TOPOLOGY} to render - topology image skipped")
         return None
-    try:
-        import pyvista as pv
-    except Exception as exc:  # noqa: BLE001
-        log(f"[oropt] report: pyvista unavailable: {exc} - topology image skipped")
-        return None
     dest = Path(work) / TOPOLOGY_PNG
+    dest.unlink(missing_ok=True)        # don't mistake a stale PNG for a fresh one
+    cmd = [sys.executable, "-c", _RENDER_RUNNER, str(src), str(dest)]
     try:
-        grid = pv.read(str(src))
-        scal = "sensitivity" if "sensitivity" in grid.cell_data else None
-        pl = pv.Plotter(window_size=[900, 600], off_screen=True)
-        pl.add_mesh(grid, scalars=scal, cmap="viridis", show_edges=False)
-        pl.view_isometric()
-        pl.background_color = "white"
-        pl.screenshot(str(dest))
-        pl.close()
-    except Exception as exc:  # noqa: BLE001
-        log(f"[oropt] report: off-screen render failed: {exc} - linking files")
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        log(f"[oropt] report: topology render timed out after {timeout_s:.0f}s "
+            "- linking files")
         return None
-    return dest if dest.is_file() else None
+    except OSError as exc:
+        log(f"[oropt] report: could not launch renderer: {exc} - linking files")
+        return None
+    if proc.returncode == 0 and dest.is_file():
+        return dest
+    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    log(f"[oropt] report: off-screen render failed (rc={proc.returncode}): "
+        f"{detail[-1] if detail else 'no output'} - linking files")
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -473,7 +492,9 @@ def write_report(cfg: Config, work: Path,
         s = _summarise(cfg, status, history)
         charts = (_charts(history, s, work, log)
                   if (opts is None or getattr(opts, "charts", True)) else {})
-        topo = (_render_topology(cfg, work, log)
+        topo = (_render_topology(
+                    work, float(getattr(opts, "render_timeout_s", 120.0)
+                                if opts is not None else 120.0), log)
                 if (opts is None or getattr(opts, "render_topology", True))
                 else None)
 
