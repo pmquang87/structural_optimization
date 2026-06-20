@@ -18,6 +18,7 @@ from .config import Config
 from .d3plot import convert_final
 from .deck import Deck, prepare_engine
 from .levelset import LevelSet
+from .manufacturing import apply_manufacturing, manufacturing_active
 from .mesh import Mesh
 from .results import extract
 from .runner import run_solver
@@ -241,6 +242,12 @@ def run_optimization(cfg: Config, resume: bool = False,
             sens_prev = sens
             target_vf = opt.next_target_vf(vf, feasible)
             alive = opt.update(alive, sens, target_vf)
+            # Additive-manufacturing printability constraints (min member size,
+            # symmetry, overhang) on the fresh alive mask; re-drop islands a
+            # constraint may have created. No-op unless configured.
+            if manufacturing_active(cfg.manufacturing):
+                alive = apply_manufacturing(alive, mesh, cfg.manufacturing, protected)
+                alive = mesh.keep_connected(alive, anchor)
             st.save_checkpoint(work, it + 1, alive, sens_prev)
         else:
             status.state = "converged" if status.state == "running" else status.state

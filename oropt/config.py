@@ -203,6 +203,38 @@ class SmoothOpts:
 
 
 @dataclass
+class ManufacturingOpts:
+    """Additive-manufacturing (AM) printability constraints applied to the alive
+    mask each iteration, *after* the optimiser's own update (so they work for
+    BESO and the level-set alike). The target part is powder-bed-fusion printed
+    (e.g. AlSi10Mg), so these keep the evolving topology manufacturable.
+
+    All fields default to OFF, so existing runs are byte-identical. Applied in
+    order by :func:`oropt.manufacturing.apply_manufacturing`:
+
+    1. **Minimum member size** — a morphological *open* (erode then dilate over
+       shared-node element adjacency) deletes thin features / single-element
+       slivers thinner than the structuring element. ``min_member_layers`` is the
+       number of erode/dilate hops (0 = off; 1-2 is typical).
+    2. **Symmetry planes** — force the design symmetric across each plane. Rule:
+       *either alive ⇒ both alive* (an element is kept if it or its mirror is
+       alive), so symmetry is enforced without over-removing and volume control
+       catches up over iterations. Each entry is a mapping
+       ``{"axis": "x"|"y"|"z", "offset": <plane coordinate>}``.
+    3. **Overhang / self-support** — along ``build_direction`` forbid any alive
+       element that has no solid support within a downward cone of half-angle
+       ``max_overhang_angle`` degrees (measured from the build direction); the
+       lowest layer rests on the build plate. ``build_direction = None`` or
+       ``max_overhang_angle <= 0`` turns it off.
+    """
+    min_member_layers: int = 0
+    # list of {"axis": "x"|"y"|"z", "offset": float}
+    symmetry_planes: list = field(default_factory=list)
+    build_direction: Optional[list] = None   # [x, y, z]; None -> overhang off
+    max_overhang_angle: float = 0.0          # cone half-angle [deg] from build dir; 0 -> off
+
+
+@dataclass
 class Config:
     or_paths: ORPaths = field(default_factory=ORPaths)
     run: RunOpts = field(default_factory=RunOpts)
@@ -211,6 +243,7 @@ class Config:
     constraints: Constraints = field(default_factory=Constraints)
     beso: Beso = field(default_factory=Beso)
     levelset: LevelSet = field(default_factory=LevelSet)
+    manufacturing: ManufacturingOpts = field(default_factory=ManufacturingOpts)
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     smooth: SmoothOpts = field(default_factory=SmoothOpts)
     # Which topology optimiser to drive the loop: "beso" (default, bi-directional
@@ -243,6 +276,7 @@ class Config:
             constraints=build(Constraints, data.get("constraints")),
             beso=build(Beso, data.get("beso")),
             levelset=build(LevelSet, data.get("levelset")),
+            manufacturing=build(ManufacturingOpts, data.get("manufacturing")),
             d3plot=build(D3plotOpts, data.get("d3plot")),
             smooth=build(SmoothOpts, data.get("smooth")),
             optimizer=(data.get("optimizer") or "beso"),
