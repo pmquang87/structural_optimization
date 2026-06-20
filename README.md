@@ -41,7 +41,7 @@ oropt/
   levelset.py nodal level-set alternative: energy -> nodal velocity -> phi evolution + smoothing -> bisected threshold
   manufacturing.py additive-manufacturing constraints on the alive mask: min member size (open), symmetry, overhang
   status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
-  loop.py     solve -> extract -> rank -> delete -> repeat; resumable; constraint feasibility gate
+  loop.py     solve (every load case) -> extract -> rank -> delete -> repeat; resumable; constraint feasibility gate
   run.py      CLI entry point
   gui/app.py  Streamlit dashboard (input / constraints / live monitor) — reads status files only
 ```
@@ -110,6 +110,30 @@ blank-`work_dir` default), or type an explicit path to override it.
   `{axis: x|y|z, offset: <coord>}`, mirrored *either-alive ⇒ both-alive*), and
   overhang self-support via `build_direction` (`[x,y,z]`, `null` = off) +
   `max_overhang_angle` (cone half-angle in degrees from the build direction).
+* **Multiple load cases** (`load_cases:`, empty by default) — optimise one
+  structure against several loads (the elevator linkage pulled in different
+  directions) by minimising a **weighted-sum compliance**. Each entry is a
+  separate deck pair sharing the same mesh, differing only in its applied-load
+  cards:
+
+  ```yaml
+  load_cases:
+    - {name: pull_z, stem: implicit_pull_z, weight: 1.0}
+    - {name: pull_x, stem: implicit_pull_x, weight: 0.5, sigma_allow: 480.0}
+    - {name: side,   stem: implicit_side,   weight: 0.5, disp_node_id: 10021400}
+  ```
+
+  Every iteration solves **all** cases sequentially (each under
+  `solve/case_<i>/`, so runtime is N× a single-case run) and extracts per-element
+  energy for each. The BESO/level-set sensitivity is the per-case-normalised
+  weighted sum `s_e = Σ_i wᵢ·energy_eⁱ` (normalising each case by its own peak
+  makes the weights comparable across loads); the design is **feasible only when
+  every case is** (status reports the worst-case `sigma_max`/`disp`). Blank
+  per-case fields inherit the single-case defaults — `stem` → `model.stem`,
+  `disp_node_id` → `model.disp_node_id`, `sigma_allow`/`d_allow` → `constraints`.
+  Leave `load_cases` empty for the classic single-solve run (behaviour is
+  byte-identical). All cases must share the same design-part element ids (only the
+  load differs); the post-run d3plot/smoothing use the primary (first) case.
 * **Keep-out / non-design regions** — `model.freeze_group_ids` (e.g. `[99999999]`,
   any `/GRNOD/NODE` set in the deck) and `model.freeze_node_ids`: every design
   element touching those nodes is frozen and never deleted. Boundary-condition,
