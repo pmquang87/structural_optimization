@@ -59,6 +59,33 @@ def build_env(cfg: Config) -> dict:
     return env
 
 
+def backend_problems(cfg: Config) -> list[str]:
+    """Solver executables/CLI that are required but missing on this machine.
+
+    The single source of truth shared by :func:`run_solver`'s pre-flight and
+    :func:`oropt.validate.validate_config`, so the fast config check and the real
+    run agree on what "the backend is installed" means. Returns one human-readable
+    message per missing piece; an empty list means the backend is ready.
+
+    Docker backend -> the ``docker`` CLI must resolve; native backend -> the
+    OpenRadioss starter & engine (and ``mpiexec`` when ``run.use_mpi``) must exist.
+    """
+    problems: list[str] = []
+    if cfg.docker.enabled:
+        exe = cfg.docker.docker_exe
+        if shutil.which(exe) is None and not Path(exe).exists():
+            problems.append(f"docker CLI not found: {exe} "
+                            "(install/start Docker Desktop, or set docker.docker_exe)")
+    else:
+        for attr in ("starter", "engine"):
+            exe_path = cfg.or_paths.abs(attr)
+            if not exe_path.exists():
+                problems.append(f"executable not found: {exe_path}")
+        if cfg.run.use_mpi and not cfg.or_paths.mpiexec().exists():
+            problems.append(f"mpiexec not found: {cfg.or_paths.mpiexec()}")
+    return problems
+
+
 def _docker_base(cfg: Config, run_dir: Path) -> list[str]:
     """``docker run`` prefix that bind-mounts *run_dir* to ``/data`` (forward-slash
     path so Docker Desktop accepts the Windows drive), up to the image name."""
@@ -151,21 +178,11 @@ def run_solver(cfg: Config, run_dir: str | Path) -> RunResult:
     stem = cfg.model.stem
 
     # --- backend pre-flight + environment ---
-    if cfg.docker.enabled:
-        exe = cfg.docker.docker_exe
-        if shutil.which(exe) is None and not Path(exe).exists():
-            return RunResult(False, "setup", f"docker CLI not found: {exe} "
-                             "(install/start Docker Desktop, or set docker.docker_exe)")
-        env = dict(os.environ)        # the container carries its own OR runtime
-    else:
-        starter = cfg.or_paths.abs("starter")
-        engine = cfg.or_paths.abs("engine")
-        for exe_path in (starter, engine):
-            if not exe_path.exists():
-                return RunResult(False, "setup", f"executable not found: {exe_path}")
-        if cfg.run.use_mpi and not cfg.or_paths.mpiexec().exists():
-            return RunResult(False, "setup", f"mpiexec not found: {cfg.or_paths.mpiexec()}")
-        env = build_env(cfg)
+    problems = backend_problems(cfg)
+    if problems:
+        return RunResult(False, "setup", "; ".join(problems))
+    # the container carries its own OR runtime; native needs the OR env vars/PATH
+    env = dict(os.environ) if cfg.docker.enabled else build_env(cfg)
 
     # --- starter ---
     starter_log = run_dir / f"{stem}_starter.log"

@@ -1,0 +1,169 @@
+"""Fast, side-effect-free validation of a :class:`~oropt.config.Config`.
+
+A bad config used to surface only deep into a run -- a missing deck after the
+~13-min starter+engine solve, a nonsensical volume target hours into an 11-33 h
+loop. :func:`validate_config` catches those in ~1 s *before* anything launches,
+classifying each problem as a hard ``error`` (the run cannot or must not start)
+or a soft ``warning`` (it will run, but probably not as intended).
+
+Wired into both entry points: ``python -m oropt.run`` prints the problems and
+exits non-zero on any error before the loop starts, and the Streamlit GUI shows
+them and blocks its Start button on errors. The backend-executable checks are
+shared verbatim with :func:`oropt.runner.run_solver` (see
+:func:`oropt.runner.backend_problems`) so the fast check and the real run agree.
+"""
+from __future__ import annotations
+
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+from .config import Config
+from .runner import backend_problems
+
+ERROR = "error"
+WARNING = "warning"
+
+VALID_OPTIMIZERS = ("beso", "levelset", "tobs")
+
+
+@dataclass(frozen=True)
+class Problem:
+    """One validation finding: its *severity* (``error``/``warning``) and message."""
+    severity: str
+    message: str
+
+    def __str__(self) -> str:
+        return f"{self.severity}: {self.message}"
+
+
+def has_errors(problems: Iterable[Problem]) -> bool:
+    """True if any problem is a hard error (the run must not launch)."""
+    return any(p.severity == ERROR for p in problems)
+
+
+def _creatable(path: Path) -> bool:
+    """Whether *path* could be created with ``mkdir(parents=True)``.
+
+    True iff the nearest already-existing ancestor is a directory (so a fresh
+    sub-tree can be made under it); False if that ancestor is a file, or if no
+    ancestor exists at all (e.g. a non-existent drive letter on Windows).
+    """
+    path = path.resolve()
+    for anc in (path, *path.parents):
+        if anc.exists():
+            return anc.is_dir()
+    return False
+
+
+def _docker_image_present(cfg: Config) -> bool | None:
+    """Best-effort check that the Docker image exists locally.
+
+    Returns True/False, or ``None`` when it cannot be determined (docker CLI
+    absent, timeout, any error) -- callers treat ``None`` as "cannot verify, stay
+    quiet" so validation never blocks on a flaky/slow daemon.
+    """
+    exe = cfg.docker.docker_exe
+    if shutil.which(exe) is None and not Path(exe).exists():
+        return None
+    try:
+        cp = subprocess.run([exe, "image", "inspect", cfg.docker.image],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return cp.returncode == 0
+
+
+def check_config(cfg: Config, *, probe_docker_image: bool = False) -> list[Problem]:
+    """Structured validation of *cfg* -- the engine behind :func:`validate_config`.
+
+    Pure and fast (no solver, no file writes). The only optional side effect is a
+    short ``docker image inspect`` when *probe_docker_image* is set and the Docker
+    backend is selected; it is off by default so the check stays hermetic.
+    """
+    problems: list[Problem] = []
+
+    def err(msg: str) -> None:
+        problems.append(Problem(ERROR, msg))
+
+    def warn(msg: str) -> None:
+        problems.append(Problem(WARNING, msg))
+
+    # --- optimiser selector ---
+    if cfg.optimizer_name() not in VALID_OPTIMIZERS:
+        err(f"optimizer must be one of {', '.join(VALID_OPTIMIZERS)} "
+            f"(got {cfg.optimizer!r})")
+
+    # --- model directory / decks ---
+    m = cfg.model
+    if not (m.stem or "").strip() and not cfg.load_cases:
+        err("model.stem is blank and no load_cases are defined -- nothing to solve")
+
+    case_dir = Path(m.case_dir).resolve()
+    if not case_dir.exists():
+        err(f"model.case_dir does not exist: {case_dir}")
+    elif not case_dir.is_dir():
+        err(f"model.case_dir is not a directory: {case_dir}")
+
+    cases = cfg.load_case_list()                 # includes the single default case
+    for c in cases:
+        if not c.starter.exists():
+            err(f"load case {c.name!r}: starter deck not found: {c.starter}")
+        if not c.engine.exists():
+            err(f"load case {c.name!r}: engine deck not found: {c.engine}")
+
+    # --- run / output folder ---
+    run_folder = Path(cfg.run_folder())
+    if not _creatable(run_folder):
+        err(f"run folder is not creatable: {run_folder.resolve()}")
+
+    # --- solver backend (shared source of truth with runner.run_solver) ---
+    for msg in backend_problems(cfg):
+        err(msg)
+    if cfg.docker.enabled:
+        if probe_docker_image and _docker_image_present(cfg) is False:
+            warn(f"docker image not found locally: {cfg.docker.image} "
+                 "(it will be pulled on first run, or the run will fail)")
+    elif cfg.run.np != 1:
+        warn(f"run.np={cfg.run.np}: the native implicit + solid-contact solver "
+             "requires np=1 (it segfaults otherwise)")
+
+    # --- numeric sanity (knobs of the active optimiser block) ---
+    opt = cfg.active_opts()
+    tvf = opt.target_volume_fraction
+    if not (0 < tvf <= 1):
+        err(f"target_volume_fraction must be in (0, 1]: got {tvf}")
+    elif tvf == 1:
+        warn("target_volume_fraction is 1.0 -- no material will be removed")
+    if opt.evolution_rate <= 0:
+        err(f"evolution_rate must be > 0: got {opt.evolution_rate}")
+    if opt.filter_radius < 0:
+        err(f"filter_radius must be >= 0: got {opt.filter_radius}")
+
+    # --- per-case weights & feasibility limits ---
+    weights = [c.weight for c in cases]
+    for c in cases:
+        if c.weight < 0:
+            err(f"load case {c.name!r}: weight must be >= 0: got {c.weight}")
+    if weights and not any(w > 0 for w in weights):
+        err("all load-case weights are zero -- the sensitivity has no objective")
+    for c in cases:
+        if c.sigma_allow is not None and c.sigma_allow <= 0:
+            err(f"load case {c.name!r}: sigma_allow must be > 0: got {c.sigma_allow}")
+        if c.d_allow is not None and c.d_allow <= 0:
+            err(f"load case {c.name!r}: d_allow must be > 0: got {c.d_allow}")
+
+    return problems
+
+
+def validate_config(cfg: Config, *, probe_docker_image: bool = False) -> list[str]:
+    """Human-readable, severity-prefixed validation problems for *cfg*.
+
+    An empty list means the config is clean. Each string reads ``"error: ..."``
+    or ``"warning: ..."``; use :func:`check_config` when you need the structured
+    severities (e.g. to decide whether to block a launch).
+    """
+    return [str(p) for p in check_config(cfg, probe_docker_image=probe_docker_image)]

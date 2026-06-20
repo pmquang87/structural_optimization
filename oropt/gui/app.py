@@ -23,6 +23,7 @@ from oropt import status as st_io
 from oropt.config import Config, DEFAULT_WORK_SUBDIR
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
+from oropt.validate import ERROR, check_config, has_errors
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CFG = PROJECT_ROOT / "configs" / "elevator_linkage.yaml"
@@ -74,8 +75,23 @@ if not work.is_absolute():
 
 running = st_io.is_running(work)
 st.sidebar.markdown(f"**Run state:** {'🟢 running' if running else '⚪ idle'}")
+
+# Fail-fast config check: same validation the headless run does, surfaced before
+# launch. Hard errors block ▶ Start (the run could not or must not start anyway).
+problems = check_config(cfg)
+cfg_errors = has_errors(problems)
+if problems:
+    n_err = sum(1 for p in problems if p.severity == ERROR)
+    with st.sidebar.expander(
+            f"⚠ Config check: {n_err} error(s), {len(problems) - n_err} warning(s)",
+            expanded=cfg_errors):
+        for p in problems:
+            (st.error if p.severity == ERROR else st.warning)(p.message)
+        if cfg_errors:
+            st.caption("Fix the errors above to enable ▶ Start.")
+
 c1, c2, c3 = st.sidebar.columns(3)
-if c1.button("▶ Start", disabled=running, width="stretch"):
+if c1.button("▶ Start", disabled=running or cfg_errors, width="stretch"):
     cfg.to_yaml(cfg_path)
     launch_run(cfg_path, resume=False)
     st.sidebar.success("Launched.")

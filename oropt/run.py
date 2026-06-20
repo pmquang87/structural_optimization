@@ -10,6 +10,7 @@ import sys
 
 from .config import Config
 from .loop import run_optimization
+from .validate import check_config, has_errors
 
 
 def main(argv=None) -> int:
@@ -18,9 +19,23 @@ def main(argv=None) -> int:
     ap.add_argument("--config", required=True, help="path to a YAML config")
     ap.add_argument("--resume", action="store_true",
                     help="resume from checkpoint.npz in work_dir")
+    ap.add_argument("--skip-validate", action="store_true",
+                    help="skip the fail-fast config check (launch even on errors)")
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
+
+    # Fail fast: a bad config is caught here in ~1 s, not after a 13-min solve or
+    # hours into the loop. Errors abort before launch; warnings are printed only.
+    if not args.skip_validate:
+        problems = check_config(cfg, probe_docker_image=True)
+        for p in problems:
+            print(f"[oropt] {p}", flush=True)
+        if has_errors(problems):
+            print("[oropt] config has errors -- aborting before launch "
+                  "(use --skip-validate to override)", flush=True)
+            return 2
+
     status = run_optimization(cfg, resume=args.resume,
                               log=lambda s: print(s, flush=True))
     print(f"[oropt] finished: state={status.state} iter={status.iteration} "
