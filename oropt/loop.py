@@ -17,10 +17,28 @@ from .beso import Beso
 from .config import Config
 from .d3plot import convert_final
 from .deck import Deck, prepare_engine
+from .levelset import LevelSet
 from .mesh import Mesh
 from .results import extract
 from .runner import run_solver
 from .smoothing import smooth_final
+
+
+def build_optimizer(cfg: Config, mesh: Mesh, protected: np.ndarray,
+                    anchor: np.ndarray | None = None):
+    """Construct the optimiser selected by ``cfg.optimizer``.
+
+    Both optimisers share the same interface (``volume_fraction``,
+    ``raw_sensitivity``, ``filter_history``, ``next_target_vf``, ``update``,
+    ``V0``), so the loop drives whichever is returned identically.
+    """
+    name = cfg.optimizer_name()
+    if name == "levelset":
+        return LevelSet(mesh, cfg.levelset, protected, anchor=anchor)
+    if name == "beso":
+        return Beso(mesh, cfg.beso, protected, anchor=anchor)
+    raise ValueError(
+        f"unknown optimizer {cfg.optimizer!r} (expected 'beso' or 'levelset')")
 
 
 def collect_protect_nodes(deck: Deck, model, include_bc: bool = True) -> np.ndarray:
@@ -93,19 +111,24 @@ def run_optimization(cfg: Config, resume: bool = False,
     if should_stop is None:                          # GUI "Stop" drops a stop.flag
         should_stop = lambda: (work / "stop.flag").exists()
 
+    # Run-level knobs shared by both optimisers (protect_*, archive_*, max_iter,
+    # convergence_*, target_volume_fraction) come from the selected optimiser's
+    # config block, keeping the loop optimiser-agnostic.
+    oc = cfg.active_opts()
+
     log(f"[oropt] loading deck {m.starter()}")
     deck = Deck.load(m.starter(), m.design_part_id, m.design_node_min)
     mesh = Mesh.from_deck(deck)
     bc_nodes = deck.group_nodes(m.bc_group_id)
     no_pin = set(int(v) for v in bc_nodes)            # already kinematically constrained
-    protect_bc = getattr(cfg.beso, "protect_bc_nodes", True)
+    protect_bc = getattr(oc, "protect_bc_nodes", True)
     frozen_nodes = collect_protect_nodes(deck, m, include_bc=protect_bc)  # BC frozen unless opted out
     log(f"[oropt] {deck.n_design_elements} design elements; "
         f"{bc_nodes.size} BC nodes ({'frozen' if protect_bc else 'deletable'}); "
         f"{frozen_nodes.size} frozen seed nodes; building protected set + filter ...")
     protected = mesh.protected_mask(deck, frozen_nodes,
-                                    contact_dist=cfg.beso.contact_protect_dist,
-                                    layers=cfg.beso.protect_layers)
+                                    contact_dist=oc.contact_protect_dist,
+                                    layers=oc.protect_layers)
     # The BC/load region always anchors connectivity (so floating islands are
     # still dropped sensibly) even when its elements are allowed to be deleted.
     if protect_bc:
@@ -113,11 +136,11 @@ def run_optimization(cfg: Config, resume: bool = False,
     else:
         anchor_nodes = collect_protect_nodes(deck, m, include_bc=True)
         anchor = mesh.protected_mask(deck, anchor_nodes,
-                                     contact_dist=cfg.beso.contact_protect_dist,
-                                     layers=cfg.beso.protect_layers)
-    beso = Beso(mesh, cfg.beso, protected, anchor=anchor)
-    log(f"[oropt] protected elements: {int(protected.sum())} "
-        f"({100*protected.mean():.1f}%); V0={beso.V0:.3f}")
+                                     contact_dist=oc.contact_protect_dist,
+                                     layers=oc.protect_layers)
+    opt = build_optimizer(cfg, mesh, protected, anchor=anchor)
+    log(f"[oropt] optimizer={cfg.optimizer_name()}; protected elements: "
+        f"{int(protected.sum())} ({100*protected.mean():.1f}%); V0={opt.V0:.3f}")
 
     # ---- initial / resumed state ------------------------------------------
     alive = np.ones(deck.n_design_elements, dtype=bool)
@@ -129,10 +152,10 @@ def run_optimization(cfg: Config, resume: bool = False,
             alive = ckpt["alive_mask"]; sens_prev = ckpt["sens_prev"]
             start_iter = ckpt["iteration"]
             log(f"[oropt] resumed at iteration {start_iter}, "
-                f"vf={beso.volume_fraction(alive):.3f}")
+                f"vf={opt.volume_fraction(alive):.3f}")
 
     pid = st.write_pid(work)
-    status = st.Status(state="running", max_iter=cfg.beso.max_iter,
+    status = st.Status(state="running", max_iter=oc.max_iter,
                        elements_total=deck.n_design_elements,
                        sigma_allow=cfg.constraints.sigma_allow,
                        d_allow=cfg.constraints.d_allow, pid=pid)
@@ -141,7 +164,7 @@ def run_optimization(cfg: Config, resume: bool = False,
     vfs: list[float] = []
     elapsed = 0.0
     try:
-        for it in range(start_iter, cfg.beso.max_iter):
+        for it in range(start_iter, oc.max_iter):
             if should_stop and should_stop():
                 status.state = "stopped"; status.message = "stop requested"
                 break
@@ -151,7 +174,7 @@ def run_optimization(cfg: Config, resume: bool = False,
             prepare_engine(m.engine(), solve_dir / f"{stem}_0001.rad",
                            anim_dt=cfg.run.anim_dt)
 
-            log(f"[oropt] iter {it}: vf={beso.volume_fraction(alive):.3f} "
+            log(f"[oropt] iter {it}: vf={opt.volume_fraction(alive):.3f} "
                 f"alive={int(alive.sum())} -> solving ...")
             t0 = time.time()
             res = run_solver(cfg, solve_dir)
@@ -167,15 +190,15 @@ def run_optimization(cfg: Config, resume: bool = False,
                 break
 
             r = extract(cfg, solve_dir)
-            vf = beso.volume_fraction(alive)
+            vf = opt.volume_fraction(alive)
             feasible = bool(r.sigma_max <= cfg.constraints.sigma_allow
                             and r.disp <= cfg.constraints.d_allow)
             vfs.append(vf)
 
             # ---- publish state for the GUI --------------------------------
-            remaining = cfg.beso.max_iter - it - 1
+            remaining = oc.max_iter - it - 1
             status = st.Status(
-                state="running", iteration=it, max_iter=cfg.beso.max_iter,
+                state="running", iteration=it, max_iter=oc.max_iter,
                 volume_fraction=vf, sigma_max=r.sigma_max,
                 sigma_allow=cfg.constraints.sigma_allow, disp=r.disp,
                 d_allow=cfg.constraints.d_allow, feasible=feasible,
@@ -191,23 +214,23 @@ def run_optimization(cfg: Config, resume: bool = False,
                 "sigma_max": round(r.sigma_max, 4), "disp": round(r.disp, 6),
                 "elements_alive": int(alive.sum()), "feasible": feasible,
                 "iter_wall_s": round(iter_wall, 1), "or_termination": res.message})
-            raw = beso.raw_sensitivity(r, deck.elem_ids, alive)
-            sens = beso.filter_history(raw, sens_prev)
+            raw = opt.raw_sensitivity(r, deck.elem_ids, alive)
+            sens = opt.filter_history(raw, sens_prev)
             st.write_topology(work, deck.node_xyz, mesh.conn_rows, alive,
                               fields={"sensitivity": sens,
                                       "vonmises": _scatter(r, deck.elem_ids)},
                               iteration=it)
-            if cfg.beso.archive_iterations:
+            if oc.archive_iterations:
                 _archive_iteration(solve_dir, work, stem, it,
-                                   keep_restart=cfg.beso.archive_restart)
+                                   keep_restart=oc.archive_restart)
             log(f"[oropt] iter {it}: sigma_max={r.sigma_max:.2f}/"
                 f"{cfg.constraints.sigma_allow} disp={r.disp:.4f}/"
                 f"{cfg.constraints.d_allow} feasible={feasible} "
                 f"({iter_wall:.0f}s)")
 
             # ---- convergence ----------------------------------------------
-            if _converged(vfs, feasible, cfg.beso.target_volume_fraction,
-                          cfg.beso.convergence_window, cfg.beso.convergence_tol):
+            if _converged(vfs, feasible, oc.target_volume_fraction,
+                          oc.convergence_window, oc.convergence_tol):
                 status.state = "converged"
                 status.message = "converged at target volume, feasible"
                 st.write_status(work, status)
@@ -216,8 +239,8 @@ def run_optimization(cfg: Config, resume: bool = False,
 
             # ---- next design ----------------------------------------------
             sens_prev = sens
-            target_vf = beso.next_target_vf(vf, feasible)
-            alive = beso.update(alive, sens, target_vf)
+            target_vf = opt.next_target_vf(vf, feasible)
+            alive = opt.update(alive, sens, target_vf)
             st.save_checkpoint(work, it + 1, alive, sens_prev)
         else:
             status.state = "converged" if status.state == "running" else status.state

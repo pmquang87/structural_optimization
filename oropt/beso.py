@@ -18,6 +18,44 @@ from .mesh import Mesh
 from .results import Results
 
 
+# ---- shared sensitivity helpers (reused by other optimisers, e.g. level-set) --
+def map_sensitivity(results: Results, elem_ids: np.ndarray,
+                    sensitivity: str = "energy",
+                    blend_weight: float = 0.5) -> np.ndarray:
+    """Map per-element OpenRadioss fields onto a full (N,) sensitivity array.
+
+    ``elem_ids`` is the deck's full design element-id list (mesh order, sorted
+    ascending). Elements with no result (dead/absent) get 0 and are pulled up only
+    by the spatial filter. ``sensitivity`` is ``"energy"`` | ``"vonmises"`` |
+    ``"blend"`` (``blend_weight`` weights von-Mises in the blend).
+    """
+    n = elem_ids.size
+    raw = np.zeros(n, dtype=float)
+    pos = np.searchsorted(elem_ids, results.element_ids)
+    valid = (pos < n) & (elem_ids[np.clip(pos, 0, n - 1)] == results.element_ids)
+    pos = pos[valid]
+    if sensitivity == "vonmises":
+        val = results.vonmises[valid]
+    elif sensitivity == "blend":
+        en = results.energy[valid]; vm = results.vonmises[valid]
+        en = en / en.max() if en.max() > 0 else en
+        vm = vm / vm.max() if vm.max() > 0 else vm
+        val = blend_weight * vm + (1 - blend_weight) * en
+    else:  # "energy" (default): internal-energy density
+        val = results.energy[valid]
+    raw[pos] = val
+    return raw
+
+
+def blend_history(W, raw: np.ndarray, sens_prev: np.ndarray | None,
+                  history_weight: float) -> np.ndarray:
+    """Spatially filter (``W @ raw``), then average with the previous iteration."""
+    filt = W @ raw
+    if sens_prev is None or sens_prev.shape != filt.shape:
+        return filt
+    return history_weight * filt + (1.0 - history_weight) * sens_prev
+
+
 class Beso:
     def __init__(self, mesh: Mesh, cfg: BesoCfg, protected_mask: np.ndarray,
                  anchor: np.ndarray | None = None):
@@ -43,37 +81,16 @@ class Beso:
                         alive_mask: np.ndarray) -> np.ndarray:
         """Map per-element OpenRadioss fields onto a full (N,) sensitivity array.
 
-        ``elem_ids`` is the deck's full design element-id list (mesh order, sorted
-        ascending). Dead elements get 0 and are pulled up only by the filter, which
-        is what makes them eligible for bi-directional add-back.
+        Dead elements get 0 and are pulled up only by the filter, which is what
+        makes them eligible for bi-directional add-back.
         """
-        n = elem_ids.size
-        raw = np.zeros(n, dtype=float)
-        pos = np.searchsorted(elem_ids, results.element_ids)
-        valid = (pos < n) & (elem_ids[np.clip(pos, 0, n - 1)] == results.element_ids)
-        pos = pos[valid]
-
-        crit = self.cfg.sensitivity
-        if crit == "vonmises":
-            val = results.vonmises[valid]
-        elif crit == "blend":
-            en = results.energy[valid]; vm = results.vonmises[valid]
-            en = en / en.max() if en.max() > 0 else en
-            vm = vm / vm.max() if vm.max() > 0 else vm
-            val = self.cfg.blend_weight * vm + (1 - self.cfg.blend_weight) * en
-        else:  # "energy" (default): internal-energy density
-            val = results.energy[valid]
-        raw[pos] = val
-        return raw
+        return map_sensitivity(results, elem_ids, self.cfg.sensitivity,
+                               self.cfg.blend_weight)
 
     def filter_history(self, raw: np.ndarray,
                        sens_prev: np.ndarray | None) -> np.ndarray:
         """Spatially filter, then average with the previous iteration."""
-        filt = self._W @ raw
-        if sens_prev is None or sens_prev.shape != filt.shape:
-            return filt
-        h = self.cfg.history_weight
-        return h * filt + (1.0 - h) * sens_prev
+        return blend_history(self._W, raw, sens_prev, self.cfg.history_weight)
 
     # ---- target volume & constraint gate -----------------------------------
     def next_target_vf(self, current_vf: float, feasible: bool) -> float:

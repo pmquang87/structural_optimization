@@ -126,6 +126,44 @@ class Beso:
 
 
 @dataclass
+class LevelSet:
+    """Discrete nodal level-set optimiser knobs (a config-selectable alternative
+    to BESO that yields smoother boundaries than ragged element removal).
+
+    The structure is represented by a nodal level-set field phi; an element is
+    alive iff its nodes' mean phi >= 0. Each iteration scatters the filtered
+    per-element energy onto nodes (a "velocity" Vn), evolves
+    ``phi <- phi + dt*(Vn - lambda)`` with ``lambda`` found by bisection so the
+    thresholded volume hits the per-iteration target, then runs a few Laplacian
+    smoothing passes (reaction-diffusion-style regularisation) for smooth
+    boundaries and clamps phi to +/-``band_width`` to stay bounded.
+
+    The first block mirrors the BESO knobs of the same name (so a level-set run is
+    fully specified by its own config block, the way ``run``/``docker`` each carry
+    their own ``np``/``nt``); the second block is level-set specific.
+    """
+    # --- shared semantics with BESO ---
+    evolution_rate: float = 0.02     # ER: target volume fraction removed per iteration
+    filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm]
+    history_weight: float = 0.5      # blend of current & previous-iteration sensitivity
+    target_volume_fraction: float = 0.5  # stop reducing once this volume fraction remains
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
+    max_iter: int = 150
+    convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
+    convergence_window: int = 5
+    protect_layers: int = 2          # element layers around protected nodes to freeze
+    contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid node
+    protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
+    archive_iterations: bool = False   # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/
+    archive_restart: bool = False      # when archiving, also copy the restart (.rst)
+    # --- level-set specific ---
+    dt: float = 1.0                  # pseudo-time step for the phi evolution
+    smoothing_passes: int = 3        # Laplacian/Jacobi smoothing passes per iteration (regularisation)
+    band_width: float = 3.0          # clamp |phi| to this after each step to keep the field bounded
+
+
+@dataclass
 class D3plotOpts:
     """Optional post-run conversion of the final OpenRadioss animation into an
     LS-Dyna ``d3plot`` (viewable in LS-PrePost etc.).
@@ -172,8 +210,14 @@ class Config:
     model: Model = field(default_factory=Model)
     constraints: Constraints = field(default_factory=Constraints)
     beso: Beso = field(default_factory=Beso)
+    levelset: LevelSet = field(default_factory=LevelSet)
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     smooth: SmoothOpts = field(default_factory=SmoothOpts)
+    # Which topology optimiser to drive the loop: "beso" (default, bi-directional
+    # element removal) or "levelset" (nodal level-set, smoother boundaries). The
+    # active block's shared knobs (target_volume_fraction, max_iter, convergence,
+    # protect_*, archive_*) are read via ``active_opts()``.
+    optimizer: str = "beso"
     # Run/output folder: per-iteration scratch + checkpoints + status files. Leave
     # blank to default to a ``work/`` sub-folder *inside* the input deck folder
     # (``model.case_dir``); set a path (e.g. ``runs/run01``) to put outputs
@@ -198,8 +242,10 @@ class Config:
             model=build(Model, data.get("model")),
             constraints=build(Constraints, data.get("constraints")),
             beso=build(Beso, data.get("beso")),
+            levelset=build(LevelSet, data.get("levelset")),
             d3plot=build(D3plotOpts, data.get("d3plot")),
             smooth=build(SmoothOpts, data.get("smooth")),
+            optimizer=(data.get("optimizer") or "beso"),
             work_dir=data.get("work_dir") or "",
         )
 
@@ -208,6 +254,18 @@ class Config:
             yaml.safe_dump(asdict(self), sort_keys=False, default_flow_style=False),
             encoding="utf-8",
         )
+
+    # ---- optimiser selection ----------------------------------------------
+    def optimizer_name(self) -> str:
+        """Normalised optimiser selector: ``"beso"`` or ``"levelset"``."""
+        return (self.optimizer or "beso").strip().lower()
+
+    def active_opts(self):
+        """The config block for the selected optimiser. The loop reads the
+        run-level knobs shared by both optimisers (target_volume_fraction,
+        max_iter, convergence_*, protect_*, archive_*) from here so it stays
+        optimiser-agnostic."""
+        return self.levelset if self.optimizer_name() == "levelset" else self.beso
 
     def run_folder(self) -> str:
         """The configured run/output folder *as written* (may be relative).
