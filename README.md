@@ -38,6 +38,7 @@ oropt/
   deck.py     parse /NODE + /TETRA4 once; verbatim filtered re-write; free-node pinning; engine trim
   mesh.py     centroids, volumes, sensitivity-filter matrix, connectivity, protected/keep-out regions
   beso.py     sensitivity -> filter + history average -> volume-target threshold + add-back + connectivity
+  levelset.py nodal level-set alternative: energy -> nodal velocity -> phi evolution + smoothing -> bisected threshold
   status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
   loop.py     solve -> extract -> rank -> delete -> repeat; resumable; constraint feasibility gate
   run.py      CLI entry point
@@ -94,6 +95,13 @@ blank-`work_dir` default), or type an explicit path to override it.
   enforced on OpenRadioss's high-fidelity values each iteration.
 * `beso.evolution_rate`, `target_volume_fraction`, `filter_radius`,
   `history_weight`, `sensitivity` (`energy`|`vonmises`|`blend`).
+* `optimizer` (default `beso`) — selects the topology optimiser. Set to
+  `levelset` to drive the run with the **nodal level-set** optimiser instead
+  (smoother boundaries than BESO's element-by-element removal). Its knobs live
+  under `levelset:` and mirror the shared BESO ones (`target_volume_fraction`,
+  `evolution_rate`, `filter_radius`, `history_weight`, `max_iter`, `convergence_*`,
+  `protect_*`, `archive_*`) plus level-set specifics `levelset.dt`,
+  `levelset.smoothing_passes`, `levelset.band_width`.
 * **Keep-out / non-design regions** — `model.freeze_group_ids` (e.g. `[99999999]`,
   any `/GRNOD/NODE` set in the deck) and `model.freeze_node_ids`: every design
   element touching those nodes is frozen and never deleted. Boundary-condition,
@@ -191,9 +199,10 @@ written to `work_dir/topology_smoothed.<ext>` (STL/VTP).
 * A hand-deletion (−16 % volume, 16 352 freed nodes auto-pinned) produces a deck
   that OpenRadioss solves to NORMAL TERMINATION.
 * `pytest` covers deck round-trip/pinning, mesh geometry/connectivity/protection,
-  BESO ranking/threshold, status/checkpoint round-trips, VTK extraction,
-  per-iteration snapshot/archive file-writing, and the run-folder fallback +
-  source-deck isolation.
+  BESO ranking/threshold, the level-set bisected volume targeting / protected /
+  phi-thresholding self-consistency / connectivity / optimiser selection,
+  status/checkpoint round-trips, VTK extraction, per-iteration snapshot/archive
+  file-writing, and the run-folder fallback + source-deck isolation.
 
 This project consumes decks produced by the sibling `k_to_rad_converter`
 (LS-DYNA → OpenRadioss); see that project for the conversion step.
