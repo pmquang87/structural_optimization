@@ -1,5 +1,7 @@
 # oropt — OpenRadioss-coupled topology optimisation (BESO · level-set · TOBS)
 
+[![CI](https://github.com/pmquang87/structural_optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/pmquang87/structural_optimization/actions/workflows/ci.yml)
+
 Lightweight structural **topology optimisation** that drives the real
 **OpenRadioss** implicit nonlinear model in the loop. Its default optimiser is
 **BESO** (Bi-directional Evolutionary Structural Optimisation): each iteration
