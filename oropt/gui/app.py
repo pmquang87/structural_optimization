@@ -75,14 +75,14 @@ if not work.is_absolute():
 running = st_io.is_running(work)
 st.sidebar.markdown(f"**Run state:** {'🟢 running' if running else '⚪ idle'}")
 c1, c2, c3 = st.sidebar.columns(3)
-if c1.button("▶ Start", disabled=running, use_container_width=True):
+if c1.button("▶ Start", disabled=running, width="stretch"):
     cfg.to_yaml(cfg_path)
     launch_run(cfg_path, resume=False)
     st.sidebar.success("Launched.")
-if c2.button("⏸ Stop", disabled=not running, use_container_width=True):
+if c2.button("⏸ Stop", disabled=not running, width="stretch"):
     request_stop(work)
     st.sidebar.info("Stop requested (after current solve).")
-if c3.button("↻ Resume", disabled=running, use_container_width=True):
+if c3.button("↻ Resume", disabled=running, width="stretch"):
     launch_run(cfg_path, resume=True)
     st.sidebar.success("Resumed.")
 if st.sidebar.button("⏹ Force kill", disabled=not running):
@@ -148,7 +148,7 @@ with tab_lc:
     lc_df = pd.DataFrame(records_from_load_cases(cfg.load_cases),
                          columns=CASE_COLUMNS)
     lc_edited = st.data_editor(
-        lc_df, num_rows="dynamic", use_container_width=True,
+        lc_df, num_rows="dynamic", width="stretch",
         key="load_cases_editor", column_config={
             "name": st.column_config.TextColumn(
                 "Name", help="Label for the load case, e.g. pull_z."),
