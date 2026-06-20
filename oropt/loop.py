@@ -24,23 +24,26 @@ from .mesh import Mesh
 from .results import extract
 from .runner import run_solver
 from .smoothing import smooth_final
+from .tobs import Tobs
 
 
 def build_optimizer(cfg: Config, mesh: Mesh, protected: np.ndarray,
                     anchor: np.ndarray | None = None):
     """Construct the optimiser selected by ``cfg.optimizer``.
 
-    Both optimisers share the same interface (``volume_fraction``,
+    All optimisers share the same interface (``volume_fraction``,
     ``raw_sensitivity``, ``filter_history``, ``next_target_vf``, ``update``,
     ``V0``), so the loop drives whichever is returned identically.
     """
     name = cfg.optimizer_name()
     if name == "levelset":
         return LevelSet(mesh, cfg.levelset, protected, anchor=anchor)
+    if name == "tobs":
+        return Tobs(mesh, cfg.tobs, protected, anchor=anchor)
     if name == "beso":
         return Beso(mesh, cfg.beso, protected, anchor=anchor)
     raise ValueError(
-        f"unknown optimizer {cfg.optimizer!r} (expected 'beso' or 'levelset')")
+        f"unknown optimizer {cfg.optimizer!r} (expected 'beso', 'levelset' or 'tobs')")
 
 
 def collect_protect_nodes(deck: Deck, model, include_bc: bool = True) -> np.ndarray:

@@ -164,6 +164,52 @@ class LevelSet:
 
 
 @dataclass
+class TobsOpts:
+    """TOBS (Topology Optimisation of Binary Structures) optimiser knobs — a
+    config-selectable alternative to BESO (Sivapuram & Picelli, *Finite Elements
+    in Analysis and Design* 139:49-61, 2018).
+
+    The design variables are the same binary alive/void element flags as BESO, but
+    each iteration the *flips* ``dx_e in {-1,0,+1}`` are chosen by solving a small
+    0/1 integer linear program (``scipy.optimize.milp`` / HiGHS) rather than by a
+    sensitivity threshold:
+
+    * **objective** — maximise ``sum_e s_e * dx_e`` (keep high-, drop
+      low-sensitivity elements), with ``s_e`` the filtered/​history-averaged
+      strain-energy density shared with BESO;
+    * **move limit** — at most a fraction ``flip_limit`` of all elements may flip
+      per iteration (``sum_e |dx_e| <= flip_limit * N``);
+    * **volume constraint** — the element-volume-weighted volume is stepped toward
+      the per-iteration target (``evolution_rate``/``target_volume_fraction``, same
+      gate as BESO) as a linearised constraint relaxed by ``constraint_relaxation``
+      so the binary subproblem is always feasible.
+
+    Protected elements are forced to stay alive and disconnected islands are
+    dropped, exactly like BESO. The first block mirrors the BESO/level-set shared
+    knobs (so a TOBS run is fully specified by its own config block); the second
+    block is TOBS specific.
+    """
+    # --- shared semantics with BESO ---
+    evolution_rate: float = 0.02     # ER: target volume fraction removed per iteration
+    filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm]
+    history_weight: float = 0.5      # blend of current & previous-iteration sensitivity
+    target_volume_fraction: float = 0.5  # stop reducing once this volume fraction remains
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
+    max_iter: int = 150
+    convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
+    convergence_window: int = 5
+    protect_layers: int = 2          # element layers around protected nodes to freeze
+    contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid node
+    protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
+    archive_iterations: bool = False   # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/
+    archive_restart: bool = False      # when archiving, also copy the restart (.rst)
+    # --- TOBS specific ---
+    flip_limit: float = 0.05         # beta: max fraction of elements flipped per ILP step (Sum|dx| <= beta*N)
+    constraint_relaxation: float = 0.01  # epsilon: relaxation band (x V0) on the linearised volume constraint
+
+
+@dataclass
 class D3plotOpts:
     """Optional post-run conversion of the final OpenRadioss animation into an
     LS-Dyna ``d3plot`` (viewable in LS-PrePost etc.).
@@ -287,6 +333,7 @@ class Config:
     constraints: Constraints = field(default_factory=Constraints)
     beso: Beso = field(default_factory=Beso)
     levelset: LevelSet = field(default_factory=LevelSet)
+    tobs: TobsOpts = field(default_factory=TobsOpts)
     manufacturing: ManufacturingOpts = field(default_factory=ManufacturingOpts)
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     smooth: SmoothOpts = field(default_factory=SmoothOpts)
@@ -296,9 +343,10 @@ class Config:
     # weighted-sum compliance over several loads. See :class:`LoadCase`.
     load_cases: list = field(default_factory=list)
     # Which topology optimiser to drive the loop: "beso" (default, bi-directional
-    # element removal) or "levelset" (nodal level-set, smoother boundaries). The
-    # active block's shared knobs (target_volume_fraction, max_iter, convergence,
-    # protect_*, archive_*) are read via ``active_opts()``.
+    # element removal), "levelset" (nodal level-set, smoother boundaries) or "tobs"
+    # (binary ILP flips, Sivapuram & Picelli 2018). The active block's shared knobs
+    # (target_volume_fraction, max_iter, convergence, protect_*, archive_*) are read
+    # via ``active_opts()``.
     optimizer: str = "beso"
     # Run/output folder: per-iteration scratch + checkpoints + status files. Leave
     # blank to default to a ``work/`` sub-folder *inside* the input deck folder
@@ -325,6 +373,7 @@ class Config:
             constraints=build(Constraints, data.get("constraints")),
             beso=build(Beso, data.get("beso")),
             levelset=build(LevelSet, data.get("levelset")),
+            tobs=build(TobsOpts, data.get("tobs")),
             manufacturing=build(ManufacturingOpts, data.get("manufacturing")),
             d3plot=build(D3plotOpts, data.get("d3plot")),
             smooth=build(SmoothOpts, data.get("smooth")),
@@ -341,15 +390,20 @@ class Config:
 
     # ---- optimiser selection ----------------------------------------------
     def optimizer_name(self) -> str:
-        """Normalised optimiser selector: ``"beso"`` or ``"levelset"``."""
+        """Normalised optimiser selector: ``"beso"``, ``"levelset"`` or ``"tobs"``."""
         return (self.optimizer or "beso").strip().lower()
 
     def active_opts(self):
         """The config block for the selected optimiser. The loop reads the
-        run-level knobs shared by both optimisers (target_volume_fraction,
+        run-level knobs shared by the optimisers (target_volume_fraction,
         max_iter, convergence_*, protect_*, archive_*) from here so it stays
         optimiser-agnostic."""
-        return self.levelset if self.optimizer_name() == "levelset" else self.beso
+        name = self.optimizer_name()
+        if name == "levelset":
+            return self.levelset
+        if name == "tobs":
+            return self.tobs
+        return self.beso
 
     def load_case_list(self) -> list[ResolvedCase]:
         """Resolve :attr:`load_cases` into concrete cases with fallbacks applied.

@@ -188,6 +188,23 @@ with tab_con:
     cfg.constraints.d_allow = b.number_input(
         "Max displacement d_allow [mm]", value=float(cfg.constraints.d_allow))
 
+    st.subheader("Optimiser")
+    _opts = ["beso", "levelset", "tobs"]
+    _opt_labels = {"beso": "BESO — bi-directional element removal",
+                   "levelset": "Level-set — smoother boundaries",
+                   "tobs": "TOBS — binary ILP flips (Sivapuram & Picelli 2018)"}
+    opt_name = st.selectbox(
+        "Topology optimiser", _opts,
+        index=_opts.index(cfg.optimizer_name()) if cfg.optimizer_name() in _opts else 0,
+        format_func=lambda k: _opt_labels[k],
+        help="Which algorithm drives the loop. All share the sensitivity pipeline "
+             "(filter + Huang-Xie history) and volume/feasibility bookkeeping; only "
+             "the per-iteration design update differs.")
+    cfg.optimizer = opt_name
+    # The active block carries the shared knobs below (so a level-set / TOBS run is
+    # fully specified by its own block); for BESO this is cfg.beso — unchanged.
+    aopt = cfg.active_opts()
+
     st.subheader("Keep-out / non-design regions")
     st.caption("Design elements touching these nodes are frozen (never deleted).")
     fg = st.text_input("Freeze /GRNOD/NODE group ids (comma-sep, e.g. 99999999)",
@@ -198,37 +215,69 @@ with tab_con:
     cfg.model.freeze_node_ids = [int(x) for x in fn.replace(" ", "").split(",") if x]
     allow_del_bc = st.checkbox(
         "Allow deleting elements at BC nodes",
-        value=not cfg.beso.protect_bc_nodes,
+        value=not aopt.protect_bc_nodes,
         help="By default the BC node-group (model.bc_group_id) is frozen. Enable "
              "this to let the optimiser remove material there too — the BC nodes "
              "stay fixed via their /BCS and still anchor connectivity.")
-    cfg.beso.protect_bc_nodes = not allow_del_bc
+    aopt.protect_bc_nodes = not allow_del_bc
 
-    st.subheader("BESO parameters")
+    _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS"}
+    st.subheader(f"{_opt_short[opt_name]} parameters")
     g = st.columns(3)
-    cfg.beso.evolution_rate = g[0].number_input(
-        "Evolution rate (vol/iter)", value=float(cfg.beso.evolution_rate),
-        step=0.005, format="%.3f")
-    cfg.beso.target_volume_fraction = g[1].number_input(
-        "Target volume fraction", value=float(cfg.beso.target_volume_fraction),
-        min_value=0.05, max_value=1.0, step=0.05)
-    cfg.beso.filter_radius = g[2].number_input(
-        "Filter radius [mm]", value=float(cfg.beso.filter_radius), step=0.5)
+    aopt.evolution_rate = g[0].number_input(
+        "Evolution rate (vol/iter)", value=float(aopt.evolution_rate),
+        step=0.005, format="%.3f", key=f"evo_{opt_name}")
+    aopt.target_volume_fraction = g[1].number_input(
+        "Target volume fraction", value=float(aopt.target_volume_fraction),
+        min_value=0.05, max_value=1.0, step=0.05, key=f"tvf_{opt_name}")
+    aopt.filter_radius = g[2].number_input(
+        "Filter radius [mm]", value=float(aopt.filter_radius), step=0.5,
+        key=f"fr_{opt_name}")
     h = st.columns(3)
-    cfg.beso.history_weight = h[0].slider(
-        "History weight", 0.0, 1.0, float(cfg.beso.history_weight))
-    cfg.beso.max_iter = int(h[1].number_input(
-        "Max iterations", value=int(cfg.beso.max_iter), step=10))
-    cfg.beso.sensitivity = h[2].selectbox(
+    aopt.history_weight = h[0].slider(
+        "History weight", 0.0, 1.0, float(aopt.history_weight), key=f"hw_{opt_name}")
+    aopt.max_iter = int(h[1].number_input(
+        "Max iterations", value=int(aopt.max_iter), step=10, key=f"mi_{opt_name}"))
+    aopt.sensitivity = h[2].selectbox(
         "Sensitivity", ["energy", "vonmises", "blend"],
-        index=["energy", "vonmises", "blend"].index(cfg.beso.sensitivity))
+        index=["energy", "vonmises", "blend"].index(aopt.sensitivity),
+        key=f"sens_{opt_name}")
+
+    # ---- optimiser-specific knobs -----------------------------------------
+    if opt_name == "tobs":
+        t = st.columns(2)
+        cfg.tobs.flip_limit = t[0].number_input(
+            "Flip move-limit β (frac/iter)", value=float(cfg.tobs.flip_limit),
+            min_value=0.005, max_value=0.5, step=0.005, format="%.3f",
+            help="Max fraction of elements the ILP may flip per iteration "
+                 "(Σ|Δx| ≤ β·N). 0.01–0.05 is typical.")
+        cfg.tobs.constraint_relaxation = t[1].number_input(
+            "Constraint relaxation ε", value=float(cfg.tobs.constraint_relaxation),
+            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
+            help="Relaxation band (×V0) on the linearised volume constraint so the "
+                 "binary ILP is always feasible (the paper's ε).")
+    elif opt_name == "levelset":
+        t = st.columns(3)
+        cfg.levelset.dt = t[0].number_input(
+            "Level-set dt", value=float(cfg.levelset.dt), step=0.1,
+            help="Pseudo-time step for the φ evolution.")
+        cfg.levelset.smoothing_passes = int(t[1].number_input(
+            "Smoothing passes", value=int(cfg.levelset.smoothing_passes),
+            min_value=0, step=1,
+            help="Laplacian/Jacobi regularisation passes per iteration."))
+        cfg.levelset.band_width = t[2].number_input(
+            "Band width", value=float(cfg.levelset.band_width), step=0.5,
+            help="Clamp |φ| to this each step to keep the field bounded.")
+
     arch = st.columns(2)
-    cfg.beso.archive_iterations = arch[0].checkbox(
-        "Archive each iteration", value=cfg.beso.archive_iterations,
+    aopt.archive_iterations = arch[0].checkbox(
+        "Archive each iteration", value=aopt.archive_iterations,
+        key=f"arch_{opt_name}",
         help="Copy each iteration's deck, animation and listing into "
              "<run_folder>/iter_NNNN/ before solve/ is recycled.")
-    cfg.beso.archive_restart = arch[1].checkbox(
-        "…incl. restart (~345 MB/iter)", value=cfg.beso.archive_restart,
+    aopt.archive_restart = arch[1].checkbox(
+        "…incl. restart (~345 MB/iter)", value=aopt.archive_restart,
+        key=f"archr_{opt_name}",
         help="Also copy the restart file, preserving the full solver state for "
              "every iteration. Applies only when 'Archive each iteration' is on.")
 
