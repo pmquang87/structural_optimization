@@ -30,6 +30,7 @@ from oropt.config import Config
 from oropt.gui import queue_store as qs
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
+from oropt.gui.runstate import find_active_run
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
                              records_from_custom_views)
 from oropt.validate import ERROR, check_config, has_errors
@@ -407,9 +408,11 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
 def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
     @st.fragment(run_every=refresh_s)
     def monitor():
+        st.caption(f"📂 monitoring `{work}`")     # which run folder this view reads
         status = st_io.read_status(work)
         if status is None:
-            st.info("No run yet. Configure on the other tabs, then ▶ Start.")
+            st.info("No run here yet. Configure on the other tabs, then ▶ Start "
+                    "(or start the queue).")
             return
 
         feas = "✅ feasible" if status.feasible else "⚠️ infeasible"
@@ -615,12 +618,25 @@ if not cfg_path.exists():
     st.stop()
 cfg_raw = Config.read_yaml_dict(cfg_path)   # kept for unrecognised-key validation
 cfg = Config.from_dict(cfg_raw)
-work = Path(cfg.run_folder())          # work_dir, or <case_dir>/work when blank
+work = Path(cfg.run_folder())          # work_dir, or the case dir when blank
 if not work.is_absolute():
     work = PROJECT_ROOT / work
 
-running = st_io.is_running(work)
-st.sidebar.markdown(f"**Run state:** {'🟢 running' if running else '⚪ idle'}")
+# Run state follows whatever run is actually live — the selected config's own
+# folder, or a queued run in its (possibly de-duplicated) reserved folder — so the
+# sidebar and Monitor stay in sync with the queue instead of showing idle.
+queue = qs.load_queue(QUEUE_PATH)
+active = find_active_run(work, queue)
+running = active is not None
+live_dir = active[0] if active else work    # the folder the Monitor should follow
+
+if active is None:
+    run_state = "⚪ idle"
+elif active[0] == work:
+    run_state = "🟢 running"
+else:
+    run_state = f"🟢 running — {active[1]} (via queue)"
+st.sidebar.markdown(f"**Run state:** {run_state}")
 
 # Fail-fast config check: same validation the headless run does, surfaced before
 # launch. Hard errors block ▶ Start (the run could not or must not start anyway).
@@ -641,14 +657,16 @@ if c1.button("▶ Start", disabled=running or cfg_errors, width="stretch"):
     cfg.to_yaml(cfg_path)
     launch_run(cfg_path, resume=False)
     st.sidebar.success("Launched.")
+# Stop / Force kill target the live run's folder (the selected config's, or the
+# queued run's reserved one), so they act on whatever Run state shows as running.
 if c2.button("⏸ Stop", disabled=not running, width="stretch"):
-    request_stop(work)
+    request_stop(live_dir)
     st.sidebar.info("Stop requested (after current solve).")
 if c3.button("↻ Resume", disabled=running, width="stretch"):
     launch_run(cfg_path, resume=True)
     st.sidebar.success("Resumed.")
 if st.sidebar.button("⏹ Force kill", disabled=not running):
-    force_kill(work)
+    force_kill(live_dir)
 
 refresh_s = int(st.sidebar.number_input(
     "Refresh interval (s)", min_value=1, max_value=3600, value=60, step=5,
@@ -657,8 +675,8 @@ refresh_s = int(st.sidebar.number_input(
 # ---- sidebar: run queue (serial) ------------------------------------------
 # Quick add/start/pause; full management lives in the 🧮 Queue tab. The queue is
 # additive — it reuses the same detached-run launch path one run at a time and
-# never touches the single ▶ Start flow above.
-queue = qs.load_queue(QUEUE_PATH)
+# never touches the single ▶ Start flow above. (`queue` was loaded above for the
+# run-state sync.)
 runner_alive = bool(queue.runner_pid) and st_io.pid_alive(queue.runner_pid)
 qcounts = qs.counts(queue)
 st.sidebar.markdown("---")
@@ -690,6 +708,6 @@ with tab_lc:
 with tab_con:
     render_constraints_tab(cfg, cfg_path)
 with tab_mon:
-    render_monitor_tab(cfg, work, refresh_s)
+    render_monitor_tab(cfg, live_dir, refresh_s)   # follow the live run's folder
 with tab_q:
     render_queue_tab(cfg_path)
