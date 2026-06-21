@@ -108,8 +108,14 @@ GUI (configure, launch, and live-monitor; safe to close mid-run):
 The Monitor tab auto-refreshes from the status files on a fixed interval
 (default 60 s); adjust it with the **Refresh interval (s)** control in the
 sidebar. The **Run / output folder** field on the Input tab is editable; leave it
-blank to use a `work/` sub-folder inside the case directory (matching the
-blank-`work_dir` default), or type an explicit path to override it.
+blank to write into the case directory itself (matching the blank-`work_dir`
+default), or type an explicit path to override it.
+
+In the **🧮 Queue** tab each run's folder is shown and **`✏` edits** a pending
+entry's config / run folder / resume flag in place. When you enqueue runs whose
+folders would collide, the queue automatically gives each its own folder
+(`…_2`, `…_3`, …) and launches every run there (via `oropt.run --work-dir`), so
+queued runs never overwrite each other's status/results.
 
 ## Configuration highlights (`configs/elevator_linkage.yaml`)
 
@@ -180,10 +186,11 @@ blank-`work_dir` default), or type an explicit path to override it.
   connectivity, so floating islands are still dropped. Exposed as **Allow
   deleting elements at BC nodes** on the GUI's *Constraints / BC* tab.
 * `work_dir` — the run/output folder for scratch, checkpoints and status files.
-  **Leave it blank to default to a `work/` sub-folder inside the input deck folder
-  (`model.case_dir/work`)**, so a run writes its artefacts right next to the deck
-  it optimises without cluttering the source folder; set an explicit path
-  (e.g. `runs/run01`) to put outputs elsewhere. The mutated deck always lives in
+  **Leave it blank to default to the input deck folder (`model.case_dir`)
+  itself**, so a run writes its artefacts right next to the deck it optimises;
+  set an explicit path (e.g. `runs/run01`) to put outputs elsewhere, or pass
+  `oropt.run --work-dir <dir>` to override it for one run (what the queue uses to
+  give colliding runs their own folder). The mutated deck always lives in
   the `solve/` sub-folder (`<run_folder>/solve/<stem>_0000.rad`), so the source
   decks in `model.case_dir` are never overwritten.
 * `beso.archive_iterations` / `beso.archive_restart` (both default `true`) — see *Outputs* below.
@@ -304,7 +311,7 @@ collapses to exactly the original single-solve behaviour (byte-identical).
 
 ## Outputs
 
-Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir/work`):
+Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir` when blank):
 
 * `status.json` / `history.csv` — live scalar state + one row per iteration.
 * `topology_latest.vtu` — the current alive mesh (overwritten), for the GUI.

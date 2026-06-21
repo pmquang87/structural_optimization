@@ -19,12 +19,18 @@ def main(argv=None) -> int:
     ap.add_argument("--config", required=True, help="path to a YAML config")
     ap.add_argument("--resume", action="store_true",
                     help="resume from checkpoint.npz in work_dir")
+    ap.add_argument("--work-dir", default=None,
+                    help="override the config's run/output folder for this run "
+                         "(the queue uses this to give colliding runs their own "
+                         "folder without editing the shared config)")
     ap.add_argument("--skip-validate", action="store_true",
                     help="skip the fail-fast config check (launch even on errors)")
     args = ap.parse_args(argv)
 
     raw = Config.read_yaml_dict(args.config)
     cfg = Config.from_dict(raw)
+    if args.work_dir:                       # CLI override wins over the config's
+        cfg.work_dir = args.work_dir        # work_dir (and its blank->case_dir default)
 
     # Fail fast: a bad config is caught here in ~1 s, not after a 13-min solve or
     # hours into the loop. Errors abort before launch; warnings (incl. unrecognised

@@ -52,10 +52,13 @@ def spawn_runner(queue_path: str | Path, project_root: str | Path) -> subprocess
     return spawn_detached(cmd, project_root)
 
 
-def run_argv(config_path: str | Path, resume: bool) -> list[str]:
+def run_argv(config_path: str | Path, resume: bool,
+             work_dir: str | Path | None = None) -> list[str]:
     cmd = [sys.executable, "-m", "oropt.run", "--config", str(config_path)]
     if resume:
         cmd.append("--resume")
+    if work_dir:                       # the entry's (possibly de-duplicated) folder
+        cmd += ["--work-dir", str(work_dir)]
     return cmd
 
 
@@ -135,7 +138,9 @@ def _process_next(queue_path: str | Path, project_root: str | Path) -> bool:
         e = qs.next_pending(q)
         if e is None:
             return None
-        work = qs.resolve_work_dir(e.config, project_root)
+        # Prefer the entry's own (possibly de-duplicated / user-edited) folder;
+        # only fall back to resolving it from the config when it was never set.
+        work = e.work_dir or qs.resolve_work_dir(e.config, project_root)
         e.work_dir = work
         if not Path(e.config).exists():
             e.state, e.message = qs.SKIPPED, "config file not found"
@@ -155,7 +160,10 @@ def _process_next(queue_path: str | Path, project_root: str | Path) -> bool:
     while work and st_io.is_running(work):
         time.sleep(POLL_S)
 
-    proc = spawn_detached(run_argv(config, resume), project_root)
+    # Pass the entry's folder as --work-dir so the run writes exactly where the
+    # queue reserved (its own de-duplicated folder), not wherever the shared
+    # config's work_dir points.
+    proc = spawn_detached(run_argv(config, resume, work_dir=work), project_root)
     # The child writes its own PID once the loop starts; waiting on the handle we
     # own means we resume only after the run (incl. post-processing) fully ends.
     returncode = proc.wait()

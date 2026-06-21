@@ -44,14 +44,46 @@ def test_next_pending_counts_and_clear():
     assert [e.id for e in q.entries] == [b.id]          # only the running one stays
 
 
-def test_duplicate_work_dirs_ignores_finished():
+def test_add_dedupes_colliding_work_dir():
+    """Adding a run whose folder is already taken by an active entry gets its own
+    suffixed folder, so queued runs never overwrite each other's results."""
     q = qs.RunQueue()
-    qs.add(q, "a", work_dir="/x/work")
-    qs.add(q, "b", work_dir="/x/work")          # collides with a (both active)
-    done = qs.add(q, "c", work_dir="/x/work")
-    qs.mark(q, done.id, qs.DONE)                # finished -> excluded
-    qs.add(q, "d", work_dir="/y/work")          # unique
+    a = qs.add(q, "a", work_dir="/x/work")
+    b = qs.add(q, "b", work_dir="/x/work")      # collides with a -> suffixed
+    c = qs.add(q, "c", work_dir="/x/work")      # collides with a & b -> next suffix
+    assert a.work_dir == "/x/work"
+    assert b.work_dir == "/x/work_2"
+    assert c.work_dir == "/x/work_3"
+    # a finished entry's folder is free to reuse (only active entries reserve one)
+    qs.mark(q, a.id, qs.DONE)
+    d = qs.add(q, "d", work_dir="/x/work")
+    assert d.work_dir == "/x/work"              # a is done -> /x/work is free again
+    # a blank work_dir (unknown folder) is never suffixed
+    assert qs.add(q, "e").work_dir == ""
+
+
+def test_duplicate_work_dirs_ignores_finished():
+    # duplicate_work_dirs guards against collisions add() can't prevent (e.g. a
+    # user editing an entry's folder), so build them directly rather than via add().
+    q = qs.RunQueue(entries=[
+        qs.QueueEntry(id="a", config="a", work_dir="/x/work"),
+        qs.QueueEntry(id="b", config="b", work_dir="/x/work"),     # collides (active)
+        qs.QueueEntry(id="c", config="c", work_dir="/x/work", state=qs.DONE),
+        qs.QueueEntry(id="d", config="d", work_dir="/y/work"),     # unique
+    ])
     assert qs.duplicate_work_dirs(q) == {"/x/work"}
+
+
+def test_update_entry_edits_config_folder_and_resume():
+    q = qs.RunQueue()
+    e = qs.add(q, "a.yaml", work_dir="/x/work")
+    qs.update_entry(q, e.id, config="b.yaml", work_dir="/y/work", resume=True)
+    assert (e.config, e.work_dir, e.resume) == ("b.yaml", "/y/work", True)
+    # only the fields passed change; a no-op id is ignored
+    qs.update_entry(q, e.id, resume=False)
+    assert e.config == "b.yaml" and e.resume is False
+    qs.update_entry(q, "missing", config="z")    # unknown id -> no raise, no change
+    assert e.config == "b.yaml"
 
 
 # ---- persistence -----------------------------------------------------------
@@ -100,10 +132,10 @@ def _write_cfg(tmp_path, name="cfg.yaml", work_dir_sub="w"):
 def test_resolve_work_dir_blank_and_relative(tmp_path):
     cfg = Config()
     cfg.model.case_dir = str(tmp_path)
-    cfg.work_dir = ""                                   # blank -> <case_dir>/work
+    cfg.work_dir = ""                                   # blank -> the case dir itself
     p = tmp_path / "c.yaml"
     cfg.to_yaml(p)
-    assert qs.resolve_work_dir(p, tmp_path) == str((tmp_path / "work").resolve())
+    assert qs.resolve_work_dir(p, tmp_path) == str(tmp_path.resolve())
     cfg.work_dir = "runs/r1"                             # relative -> vs project_root
     cfg.to_yaml(p)
     assert qs.resolve_work_dir(p, tmp_path) == str((tmp_path / "runs" / "r1").resolve())
@@ -170,6 +202,40 @@ def test_runner_drains_queue_one_at_a_time(tmp_path, monkeypatch):
     q = qs.load_queue(qpath)
     assert [e.state for e in q.entries] == [qs.DONE, qs.DONE]
     assert q.runner_pid == 0                            # released on exit
+
+
+def test_run_argv_includes_work_dir_override():
+    base = qr.run_argv("cfg.yaml", resume=False)
+    assert "--work-dir" not in base                     # omitted when no override
+    cmd = qr.run_argv("cfg.yaml", resume=True, work_dir="/x/run_2")
+    assert cmd[cmd.index("--config") + 1] == "cfg.yaml"
+    assert "--resume" in cmd
+    assert cmd[cmd.index("--work-dir") + 1] == "/x/run_2"
+
+
+def test_runner_launches_run_in_its_own_reserved_folder(tmp_path, monkeypatch):
+    """Two queued configs whose folders collide are de-duplicated by add(), and
+    the runner hands each its reserved folder via --work-dir so they never
+    overwrite each other."""
+    qpath = tmp_path / "q.json"
+    c1 = _write_cfg(tmp_path, "a.yaml", "shared")       # both resolve to <tmp>/shared
+    c2 = _write_cfg(tmp_path, "b.yaml", "shared")
+    for c in (c1, c2):
+        qs.mutate(qpath, lambda q, c=c: qs.add(
+            q, str(c), work_dir=qs.resolve_work_dir(c, tmp_path)))
+
+    work_dirs: list[str] = []
+
+    def fake_spawn(cmd, cwd):
+        work_dirs.append(cmd[cmd.index("--work-dir") + 1])
+        return _FakeProc(cmd[cmd.index("--work-dir") + 1])
+
+    monkeypatch.setattr(qr, "spawn_detached", fake_spawn)
+    monkeypatch.setattr(qr.st_io, "is_running", lambda w: False)
+    assert qr.main([str(qpath), "--project-root", str(tmp_path)]) == 0
+    # second run was given its own suffixed folder, not the shared one
+    assert len(work_dirs) == 2 and work_dirs[0] != work_dirs[1]
+    assert work_dirs[1].endswith("_2")
 
 
 def test_runner_skips_missing_config(tmp_path, monkeypatch):
