@@ -9,6 +9,10 @@ The GUI is fully decoupled from the solver: it edits the YAML config, starts
 status files the loop writes (``status.json`` / ``history.csv`` /
 ``topology_latest.vtu``). Closing the browser never stops the run; reopening
 re-attaches to it.
+
+The page is laid out as a sidebar (config selection + run/queue control) and five
+tabs; each tab's body lives in its own ``render_*_tab`` function below so this
+script stays readable as orchestration rather than one long top-level block.
 """
 from __future__ import annotations
 
@@ -41,14 +45,11 @@ st.set_page_config(page_title="oropt — OpenRadioss BESO", layout="wide")
 
 # ---- run control -----------------------------------------------------------
 def launch_run(cfg_path: Path, resume: bool) -> None:
-    cmd = [sys.executable, "-m", "oropt.run", "--config", str(cfg_path)]
-    if resume:
-        cmd.append("--resume")
-    flags = 0
-    if sys.platform == "win32":
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), creationflags=flags,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Reuse the queue runner's detached-launch helpers so the single ▶ Start and a
+    # queued run share one definition of "launch oropt.run detached" (same command,
+    # same CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS flags) — no drift.
+    queue_runner.spawn_detached(
+        queue_runner.run_argv(cfg_path, resume), PROJECT_ROOT)
 
 
 def request_stop(work: Path) -> None:
@@ -69,84 +70,8 @@ def force_kill(work: Path) -> None:
             pass
 
 
-# ---- sidebar: config selection --------------------------------------------
-st.sidebar.title("oropt")
-st.sidebar.caption("OpenRadioss-coupled BESO topology optimisation")
-cfg_path = Path(st.sidebar.text_input("Config file", str(DEFAULT_CFG)))
-if not cfg_path.exists():
-    st.sidebar.error("Config not found.")
-    st.stop()
-cfg = Config.from_yaml(cfg_path)
-work = Path(cfg.run_folder())          # work_dir, or <case_dir>/work when blank
-if not work.is_absolute():
-    work = PROJECT_ROOT / work
-
-running = st_io.is_running(work)
-st.sidebar.markdown(f"**Run state:** {'🟢 running' if running else '⚪ idle'}")
-
-# Fail-fast config check: same validation the headless run does, surfaced before
-# launch. Hard errors block ▶ Start (the run could not or must not start anyway).
-problems = check_config(cfg)
-cfg_errors = has_errors(problems)
-if problems:
-    n_err = sum(1 for p in problems if p.severity == ERROR)
-    with st.sidebar.expander(
-            f"⚠ Config check: {n_err} error(s), {len(problems) - n_err} warning(s)",
-            expanded=cfg_errors):
-        for p in problems:
-            (st.error if p.severity == ERROR else st.warning)(p.message)
-        if cfg_errors:
-            st.caption("Fix the errors above to enable ▶ Start.")
-
-c1, c2, c3 = st.sidebar.columns(3)
-if c1.button("▶ Start", disabled=running or cfg_errors, width="stretch"):
-    cfg.to_yaml(cfg_path)
-    launch_run(cfg_path, resume=False)
-    st.sidebar.success("Launched.")
-if c2.button("⏸ Stop", disabled=not running, width="stretch"):
-    request_stop(work)
-    st.sidebar.info("Stop requested (after current solve).")
-if c3.button("↻ Resume", disabled=running, width="stretch"):
-    launch_run(cfg_path, resume=True)
-    st.sidebar.success("Resumed.")
-if st.sidebar.button("⏹ Force kill", disabled=not running):
-    force_kill(work)
-
-refresh_s = int(st.sidebar.number_input(
-    "Refresh interval (s)", min_value=1, max_value=3600, value=60, step=5,
-    help="How often the Monitor tab re-reads the run's status files."))
-
-# ---- sidebar: run queue (serial) ------------------------------------------
-# Quick add/start/pause; full management lives in the 🧮 Queue tab. The queue is
-# additive — it reuses the same detached-run launch path one run at a time and
-# never touches the single ▶ Start flow above.
-queue = qs.load_queue(QUEUE_PATH)
-runner_alive = bool(queue.runner_pid) and st_io.pid_alive(queue.runner_pid)
-qcounts = qs.counts(queue)
-st.sidebar.markdown("---")
-queue_state = ("🟢 runner active" if runner_alive
-               else "⏸ paused" if queue.paused else "⚪ idle")
-st.sidebar.markdown(f"**Run queue:** {qcounts['pending']} pending · {queue_state}")
-if st.sidebar.button("➕ Add current config to queue", width="stretch"):
-    qs.mutate(QUEUE_PATH, lambda q: qs.add(
-        q, str(cfg_path), resume=False,
-        work_dir=qs.resolve_work_dir(cfg_path, PROJECT_ROOT)))
-    st.rerun()
-qcol = st.sidebar.columns(2)
-if qcol[0].button("▶ Start queue", width="stretch",
-                  disabled=runner_alive or qcounts["pending"] == 0):
-    qs.mutate(QUEUE_PATH, lambda q: qs.set_paused(q, False))
-    queue_runner.spawn_runner(QUEUE_PATH, PROJECT_ROOT)
-    st.rerun()
-if qcol[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive):
-    qs.mutate(QUEUE_PATH, lambda q: qs.set_paused(q, True))
-    st.rerun()
-
-tab_in, tab_lc, tab_con, tab_mon, tab_q = st.tabs(
-    ["📥 Input", "🔀 Load cases", "🎚 Constraints / BC", "📊 Monitor", "🧮 Queue"])
-
 # ---- Input tab -------------------------------------------------------------
-with tab_in:
+def render_input_tab(cfg: Config) -> None:
     st.subheader("Model")
     cfg.model.case_dir = st.text_input("Case directory", cfg.model.case_dir)
     cfg.model.stem = st.text_input("Deck stem", cfg.model.stem)
@@ -185,8 +110,9 @@ with tab_in:
         st.caption("Keep np × nt ≤ CPU cores. The container bind-mounts the run "
                    "folder to /data and writes results back there.")
 
+
 # ---- Load cases tab --------------------------------------------------------
-with tab_lc:
+def render_load_cases_tab(cfg: Config) -> None:
     st.subheader("Load cases")
     st.caption(
         "Optimise the part against several loads (the linkage pulled in "
@@ -229,8 +155,9 @@ with tab_lc:
         st.info("No load cases — the run uses the single model deck (classic "
                 "single-load BESO). Add a row above to optimise several loads.")
 
+
 # ---- Constraints / BC tab --------------------------------------------------
-with tab_con:
+def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     st.subheader("Constraints")
     a, b = st.columns(2)
     cfg.constraints.sigma_allow = a.number_input(
@@ -389,10 +316,11 @@ with tab_con:
     cfg.d3plot.tool_root = dc[0].text_input(
         "Vortex-Radioss tool root", cfg.d3plot.tool_root,
         help="Folder containing the `vortex_radioss` package "
-             "(the openradioss_tools repo root).")
+             "(the openradioss_tools repo root). Blank → the OROPT_VORTEX_ROOT "
+             "environment variable.")
     cfg.d3plot.python_exe = dc[1].text_input(
         "Converter Python (optional)", cfg.d3plot.python_exe,
-        placeholder=str(Path(cfg.d3plot.tool_root) / ".venv" / "Scripts" / "python.exe"),
+        placeholder=str(Path(cfg.d3plot.tool_root or ".") / ".venv" / "Scripts" / "python.exe"),
         help="Interpreter with lasso-python + tqdm installed. Blank → the tool "
              "root's .venv if present, else the oropt interpreter.")
 
@@ -476,7 +404,7 @@ with tab_con:
 
 
 # ---- Monitor tab -----------------------------------------------------------
-with tab_mon:
+def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
     @st.fragment(run_every=refresh_s)
     def monitor():
         status = st_io.read_status(work)
@@ -561,7 +489,7 @@ with tab_mon:
 
 
 # ---- Queue tab -------------------------------------------------------------
-with tab_q:
+def render_queue_tab(cfg_path: Path) -> None:
     st.subheader("Run queue (serial)")
     st.caption(
         "Enqueue several runs; a detached **queue runner** executes them strictly "
@@ -644,3 +572,92 @@ with tab_q:
         if row[4].button("✖", key=f"q_rm_{e.id}", help="Remove from queue"):
             qs.mutate(QUEUE_PATH, lambda q, _id=e.id: qs.remove(q, _id))
             st.rerun()
+
+
+# ---- sidebar: config selection --------------------------------------------
+st.sidebar.title("oropt")
+st.sidebar.caption("OpenRadioss-coupled BESO topology optimisation")
+cfg_path = Path(st.sidebar.text_input("Config file", str(DEFAULT_CFG)))
+if not cfg_path.exists():
+    st.sidebar.error("Config not found.")
+    st.stop()
+cfg_raw = Config.read_yaml_dict(cfg_path)   # kept for unrecognised-key validation
+cfg = Config.from_dict(cfg_raw)
+work = Path(cfg.run_folder())          # work_dir, or <case_dir>/work when blank
+if not work.is_absolute():
+    work = PROJECT_ROOT / work
+
+running = st_io.is_running(work)
+st.sidebar.markdown(f"**Run state:** {'🟢 running' if running else '⚪ idle'}")
+
+# Fail-fast config check: same validation the headless run does, surfaced before
+# launch. Hard errors block ▶ Start (the run could not or must not start anyway).
+problems = check_config(cfg, raw=cfg_raw)
+cfg_errors = has_errors(problems)
+if problems:
+    n_err = sum(1 for p in problems if p.severity == ERROR)
+    with st.sidebar.expander(
+            f"⚠ Config check: {n_err} error(s), {len(problems) - n_err} warning(s)",
+            expanded=cfg_errors):
+        for p in problems:
+            (st.error if p.severity == ERROR else st.warning)(p.message)
+        if cfg_errors:
+            st.caption("Fix the errors above to enable ▶ Start.")
+
+c1, c2, c3 = st.sidebar.columns(3)
+if c1.button("▶ Start", disabled=running or cfg_errors, width="stretch"):
+    cfg.to_yaml(cfg_path)
+    launch_run(cfg_path, resume=False)
+    st.sidebar.success("Launched.")
+if c2.button("⏸ Stop", disabled=not running, width="stretch"):
+    request_stop(work)
+    st.sidebar.info("Stop requested (after current solve).")
+if c3.button("↻ Resume", disabled=running, width="stretch"):
+    launch_run(cfg_path, resume=True)
+    st.sidebar.success("Resumed.")
+if st.sidebar.button("⏹ Force kill", disabled=not running):
+    force_kill(work)
+
+refresh_s = int(st.sidebar.number_input(
+    "Refresh interval (s)", min_value=1, max_value=3600, value=60, step=5,
+    help="How often the Monitor tab re-reads the run's status files."))
+
+# ---- sidebar: run queue (serial) ------------------------------------------
+# Quick add/start/pause; full management lives in the 🧮 Queue tab. The queue is
+# additive — it reuses the same detached-run launch path one run at a time and
+# never touches the single ▶ Start flow above.
+queue = qs.load_queue(QUEUE_PATH)
+runner_alive = bool(queue.runner_pid) and st_io.pid_alive(queue.runner_pid)
+qcounts = qs.counts(queue)
+st.sidebar.markdown("---")
+queue_state = ("🟢 runner active" if runner_alive
+               else "⏸ paused" if queue.paused else "⚪ idle")
+st.sidebar.markdown(f"**Run queue:** {qcounts['pending']} pending · {queue_state}")
+if st.sidebar.button("➕ Add current config to queue", width="stretch"):
+    qs.mutate(QUEUE_PATH, lambda q: qs.add(
+        q, str(cfg_path), resume=False,
+        work_dir=qs.resolve_work_dir(cfg_path, PROJECT_ROOT)))
+    st.rerun()
+qcol = st.sidebar.columns(2)
+if qcol[0].button("▶ Start queue", width="stretch",
+                  disabled=runner_alive or qcounts["pending"] == 0):
+    qs.mutate(QUEUE_PATH, lambda q: qs.set_paused(q, False))
+    queue_runner.spawn_runner(QUEUE_PATH, PROJECT_ROOT)
+    st.rerun()
+if qcol[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive):
+    qs.mutate(QUEUE_PATH, lambda q: qs.set_paused(q, True))
+    st.rerun()
+
+# ---- tabs (each body lives in a render_*_tab function above) ---------------
+tab_in, tab_lc, tab_con, tab_mon, tab_q = st.tabs(
+    ["📥 Input", "🔀 Load cases", "🎚 Constraints / BC", "📊 Monitor", "🧮 Queue"])
+with tab_in:
+    render_input_tab(cfg)
+with tab_lc:
+    render_load_cases_tab(cfg)
+with tab_con:
+    render_constraints_tab(cfg, cfg_path)
+with tab_mon:
+    render_monitor_tab(cfg, work, refresh_s)
+with tab_q:
+    render_queue_tab(cfg_path)
