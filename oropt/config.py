@@ -121,8 +121,8 @@ class Beso:
     protect_layers: int = 2          # element layers around protected nodes to freeze (never delete)
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid (cylinder) node
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group (model.bc_group_id). False -> they may be deleted; the BC nodes stay fixed via their /BCS and still anchor connectivity
-    archive_iterations: bool = False   # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (see README disk cost)
-    archive_restart: bool = False      # when archiving, also copy the ~345 MB restart (<stem>*.rst) into iter_NNNN/ -> full per-iteration solver state
+    archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default; see README disk cost)
+    archive_restart: bool = True       # when archiving, also copy the ~345 MB restart (<stem>*.rst) into iter_NNNN/ -> full per-iteration solver state (on by default; large)
 
 
 @dataclass
@@ -155,8 +155,8 @@ class LevelSet:
     protect_layers: int = 2          # element layers around protected nodes to freeze
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid node
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
-    archive_iterations: bool = False   # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/
-    archive_restart: bool = False      # when archiving, also copy the restart (.rst)
+    archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
+    archive_restart: bool = True       # when archiving, also copy the restart (.rst) (on by default; large)
     # --- level-set specific ---
     dt: float = 1.0                  # pseudo-time step for the phi evolution
     smoothing_passes: int = 3        # Laplacian/Jacobi smoothing passes per iteration (regularisation)
@@ -202,8 +202,8 @@ class TobsOpts:
     protect_layers: int = 2          # element layers around protected nodes to freeze
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid node
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
-    archive_iterations: bool = False   # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/
-    archive_restart: bool = False      # when archiving, also copy the restart (.rst)
+    archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
+    archive_restart: bool = True       # when archiving, also copy the restart (.rst) (on by default; large)
     # --- TOBS specific ---
     flip_limit: float = 0.05         # beta: max fraction of elements flipped per ILP step (Sum|dx| <= beta*N)
     constraint_relaxation: float = 0.01  # epsilon: relaxation band (x V0) on the linearised volume constraint
@@ -220,7 +220,7 @@ class D3plotOpts:
     interpreter or a failed conversion is logged and skipped — it never aborts or
     fails the optimisation run.
     """
-    enabled: bool = False
+    enabled: bool = True
     # Folder containing the ``vortex_radioss`` package (the openradioss_tools repo
     # root); placed on the converter subprocess's ``sys.path``.
     tool_root: str = r"C:\Users\pmqua\PycharmProjects\openradioss_tools"
@@ -233,14 +233,16 @@ class D3plotOpts:
 
 @dataclass
 class SmoothOpts:
-    """Optional surface smoothing of the final optimised geometry.
+    """Surface smoothing of the optimised geometry (on by default).
 
     When enabled, after a run finishes the surface of the final design (the
     latest ``topology_latest.vtu``) is extracted, smoothed and written as
     ``topology_smoothed.<ext>`` in the run folder — a clean deliverable for
-    CAD / 3D-print / review. Best-effort: a failure is logged, never fatal.
+    CAD / 3D-print / review — and every per-iteration snapshot is smoothed too
+    (``topology_smoothed_iterNNNN.<ext>``). Best-effort: a failure is logged,
+    never fatal.
     """
-    enabled: bool = False
+    enabled: bool = True
     iterations: int = 20             # smoothing passes
     method: str = "taubin"           # "taubin" (volume-preserving) | "laplacian" (shrinks)
     pass_band: float = 0.1           # Taubin pass-band (smaller -> smoother)

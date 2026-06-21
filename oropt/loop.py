@@ -24,7 +24,7 @@ from .mesh import Mesh
 from .report import write_report
 from .results import extract
 from .runner import run_solver
-from .smoothing import smooth_final
+from .smoothing import smooth_all_iterations, smooth_final
 from .tobs import Tobs
 
 
@@ -161,7 +161,6 @@ def run_optimization(cfg: Config, resume: bool = False,
     cases = cfg.load_case_list()
     n_cases = len(cases)
     primary = cases[0]
-    primary_solve = _case_solve_dir(solve_root, n_cases, 0)
 
     log(f"[oropt] loading deck {primary.starter}"
         + (f" (+{n_cases - 1} more load case(s))" if n_cases > 1 else ""))
@@ -293,12 +292,20 @@ def run_optimization(cfg: Config, resume: bool = False,
                                                                deck.elem_ids)},
                               iteration=it)
             if oc.archive_iterations:
-                # Archive by the PRIMARY case's stem (== model.stem for a classic
+                # Archive EVERY load case's curated outputs (mutated deck +
+                # listing + animation state(s), plus the restart when
+                # archive_restart) into work/iter_NNNN/. Each case has its own
+                # stem and its own solve dir, so the files never collide in the
+                # shared iteration folder; a single-case run archives just the
+                # primary case, byte-identical to before.
+                # Archive by each case's own stem (== model.stem for a classic
                 # single-case run, but the real per-case stem when model.stem is
                 # blank in a multi-load-case config) so the deck/listing/anim are
                 # matched, not just the restart files.
-                _archive_iteration(primary_solve, work, primary.stem, it,
-                                   keep_restart=oc.archive_restart)
+                for i, case in enumerate(cases):
+                    _archive_iteration(_case_solve_dir(solve_root, n_cases, i),
+                                       work, case.stem, it,
+                                       keep_restart=oc.archive_restart)
             log(f"[oropt] iter {it}: sigma_max={sigma_max:.2f}/"
                 f"{cfg.constraints.sigma_allow} disp={disp:.4f}/"
                 f"{cfg.constraints.d_allow} feasible={feasible} "
@@ -332,21 +339,31 @@ def run_optimization(cfg: Config, resume: bool = False,
             status.state = "stopped"
         st.write_status(work, status)
         # Post-run: best-effort OpenRadioss anim -> LS-Dyna d3plot of the final
-        # design (the primary load case's final state). Done while the run still
-        # owns the pid (so the GUI stays 'running' and won't recycle solve/
-        # mid-conversion); never let post-processing affect the run's result/state.
-        try:
-            # Use a primary-case cfg so convert_final keys off the primary case's
-            # stem (== model.stem for a single-case run, but the real stem when
-            # model.stem is blank in a multi-load-case config) and so finds its
-            # <stem>A0* animation rather than nothing.
-            convert_final(_case_config(cfg, primary), primary_solve, work, log)
-        except Exception as exc:  # noqa: BLE001
-            log(f"[oropt] d3plot: unexpected error during conversion: {exc}")
+        # design, for EVERY load case (each in its own solve dir). Done while the
+        # run still owns the pid (so the GUI stays 'running' and won't recycle
+        # solve/ mid-conversion); never let post-processing affect the run's
+        # result/state.
+        for i, case in enumerate(cases):
+            try:
+                # Use a per-case cfg so convert_final keys off that case's stem
+                # (== model.stem for a single-case run, but the real stem when
+                # model.stem is blank in a multi-load-case config) and finds its
+                # <stem>A0* animation rather than nothing. Distinct stems -> the
+                # per-case d3plot files never collide in work/d3plot/.
+                convert_final(_case_config(cfg, case),
+                              _case_solve_dir(solve_root, n_cases, i), work, log)
+            except Exception as exc:  # noqa: BLE001
+                log(f"[oropt] d3plot: unexpected error during conversion: {exc}")
         try:
             smooth_final(cfg, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] smooth: unexpected error during smoothing: {exc}")
+        # Smooth every per-iteration snapshot too (topology_smoothed_iterNNNN.<ext>)
+        # so the smoothed shape evolution is reviewable, not just the final design.
+        try:
+            smooth_all_iterations(cfg, work, log)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[oropt] smooth: unexpected error during per-iteration smoothing: {exc}")
         # Automatic post-run summary (report.html/report.md) from the status &
         # history this run wrote. Read-only and best-effort; never affects the run.
         try:

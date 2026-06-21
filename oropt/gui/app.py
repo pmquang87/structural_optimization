@@ -348,8 +348,9 @@ with tab_con:
         "Convert final animation to d3plot when the run finishes",
         value=cfg.d3plot.enabled,
         help="Runs the external Vortex-Radioss Anim_to_D3plot tool on the final "
-             "design's OpenRadioss animation, writing <work>/d3plot/<stem>.d3plot. "
-             "Best-effort — a missing tool or dependency never fails the run.")
+             "design's OpenRadioss animation, writing <work>/d3plot/<stem>.d3plot "
+             "(one per load case). Best-effort — a missing tool or dependency "
+             "never fails the run.")
     dc = st.columns(2)
     cfg.d3plot.tool_root = dc[0].text_input(
         "Vortex-Radioss tool root", cfg.d3plot.tool_root,
@@ -365,8 +366,9 @@ with tab_con:
     cfg.smooth.enabled = st.checkbox(
         "Smooth the final geometry surface when the run finishes",
         value=cfg.smooth.enabled,
-        help="Extracts and smooths the final design's surface, writing "
-             "<work>/topology_smoothed.<ext> — a clean mesh for CAD / 3D-print / review.")
+        help="Extracts and smooths the design surface, writing "
+             "<work>/topology_smoothed.<ext> — a clean mesh for CAD / 3D-print / "
+             "review — plus one per iteration (topology_smoothed_iterNNNN.<ext>).")
     sc = st.columns(3)
     cfg.smooth.iterations = int(sc[0].number_input(
         "Smoothing passes", value=int(cfg.smooth.iterations), min_value=0, step=5))
