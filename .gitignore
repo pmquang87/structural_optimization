@@ -19,6 +19,10 @@ runs/
 *_0001.out
 *.h3d
 
+# GUI run-queue state (disk-backed serial queue + its lock)
+run_queue.json
+run_queue.json.*
+
 # scratch
 _probe.*
 _pdf_text.txt
