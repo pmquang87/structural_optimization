@@ -316,15 +316,19 @@ Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir/w
 OpenRadioss outputs under `work_dir/iter_NNNN/` before the `solve/` folder is
 recycled for the next iteration: the mutated `<stem>_0000.rad`, the final
 animation state(s) `<stem>A0*`, and the engine listing `<stem>_0001.out`.
-**`beso.archive_restart`** (also on by default) additionally copies the restart
+**`beso.archive_restart`** (**off by default**) additionally copies the restart
 (`<stem>*.rst`), preserving the *full* solver state of every iteration for
-replay/debug. With multiple load cases **every** case is archived into the same
-`iter_NNNN/` folder, keyed by its own stem (so the files never collide). Set
-either flag to `false` to save disk (see the note below).
+replay/debug — it is opt-in because the restart is ~345 MB/iteration (~50 GB over
+a 150-iteration run). With multiple load cases **every** case is archived into the
+same `iter_NNNN/` folder, keyed by its own stem (so the files never collide). Set
+`archive_iterations: false` to save disk entirely (see the note below).
 
 With **`d3plot.enabled`** (on by default), once the run finishes each load case's
 final animation is converted to an LS-Dyna d3plot and written to
 `work_dir/d3plot/<stem>.d3plot` (+ its `.d3plotNN` state files) — one per case.
+The converter lives outside oropt; point `d3plot.tool_root` at the
+`openradioss_tools` checkout (or set the `OROPT_VORTEX_ROOT` environment variable
+and leave `tool_root` blank). A missing tool just skips the conversion.
 With **`smooth.enabled`** (on by default), the design surface is extracted,
 smoothed and written to `work_dir/topology_smoothed.<ext>` (STL/VTP), and every
 per-iteration snapshot likewise into `work_dir/topology_smoothed_iterNNNN.<ext>`.

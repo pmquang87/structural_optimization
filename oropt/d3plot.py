@@ -8,6 +8,7 @@ abort or fail an optimisation run.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,18 @@ _RUNNER = (
 )
 
 
+def _resolve_tool_root(opts: D3plotOpts) -> str:
+    """Folder holding the ``vortex_radioss`` package and (optionally) its ``.venv``.
+
+    An explicit ``tool_root`` wins; otherwise fall back to the ``OROPT_VORTEX_ROOT``
+    environment variable so the shipped default config carries no hard-coded
+    per-user path. Blank when neither is set (the caller then logs and skips).
+    """
+    if opts.tool_root.strip():
+        return opts.tool_root.strip()
+    return os.environ.get("OROPT_VORTEX_ROOT", "").strip()
+
+
 def _resolve_python(opts: D3plotOpts) -> str:
     """Interpreter to run the converter with (one that has lasso-python/tqdm).
 
@@ -36,8 +49,9 @@ def _resolve_python(opts: D3plotOpts) -> str:
     """
     if opts.python_exe.strip():
         return opts.python_exe.strip()
-    venv = Path(opts.tool_root) / ".venv" / "Scripts" / "python.exe"
-    return str(venv) if venv.is_file() else sys.executable
+    tool_root = _resolve_tool_root(opts)
+    venv = Path(tool_root) / ".venv" / "Scripts" / "python.exe" if tool_root else None
+    return str(venv) if venv and venv.is_file() else sys.executable
 
 
 def convert_stem(stem_path: Path, opts: D3plotOpts,
@@ -56,11 +70,13 @@ def convert_stem(stem_path: Path, opts: D3plotOpts,
     if not Path(py).is_file():
         log(f"[oropt] d3plot: converter interpreter not found: {py} - skipped")
         return None
-    if not (Path(opts.tool_root) / "vortex_radioss").is_dir():
+    tool_root = _resolve_tool_root(opts)
+    if not tool_root or not (Path(tool_root) / "vortex_radioss").is_dir():
         log(f"[oropt] d3plot: no vortex_radioss package under tool root "
-            f"{opts.tool_root} - skipped")
+            f"{tool_root or '(unset; set d3plot.tool_root or OROPT_VORTEX_ROOT)'} "
+            "- skipped")
         return None
-    cmd = [py, "-c", _RUNNER, str(opts.tool_root), str(stem_path),
+    cmd = [py, "-c", _RUNNER, str(tool_root), str(stem_path),
            "1" if opts.show_rigidwall else "0"]
     log(f"[oropt] d3plot: converting {stem_path.name}A0* via {Path(py).name} ...")
     try:

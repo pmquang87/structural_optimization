@@ -23,12 +23,14 @@ def main(argv=None) -> int:
                     help="skip the fail-fast config check (launch even on errors)")
     args = ap.parse_args(argv)
 
-    cfg = Config.from_yaml(args.config)
+    raw = Config.read_yaml_dict(args.config)
+    cfg = Config.from_dict(raw)
 
     # Fail fast: a bad config is caught here in ~1 s, not after a 13-min solve or
-    # hours into the loop. Errors abort before launch; warnings are printed only.
+    # hours into the loop. Errors abort before launch; warnings (incl. unrecognised
+    # keys from `raw`) are printed only.
     if not args.skip_validate:
-        problems = check_config(cfg, probe_docker_image=True)
+        problems = check_config(cfg, raw=raw, probe_docker_image=True)
         for p in problems:
             print(f"[oropt] {p}", flush=True)
         if has_errors(problems):

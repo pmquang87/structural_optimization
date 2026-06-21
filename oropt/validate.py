@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .config import Config
+from .config import Config, unknown_keys
 from .runner import backend_problems
 
 ERROR = "error"
@@ -77,12 +77,18 @@ def _docker_image_present(cfg: Config) -> bool | None:
     return cp.returncode == 0
 
 
-def check_config(cfg: Config, *, probe_docker_image: bool = False) -> list[Problem]:
+def check_config(cfg: Config, *, raw: dict | None = None,
+                 probe_docker_image: bool = False) -> list[Problem]:
     """Structured validation of *cfg* -- the engine behind :func:`validate_config`.
 
     Pure and fast (no solver, no file writes). The only optional side effect is a
     short ``docker image inspect`` when *probe_docker_image* is set and the Docker
     backend is selected; it is off by default so the check stays hermetic.
+
+    Pass *raw* (the mapping the config was parsed from, e.g.
+    :meth:`Config.read_yaml_dict`) to also warn about unrecognised keys that
+    :meth:`Config.from_dict` silently dropped -- a typo'd or misplaced knob that
+    would otherwise revert to its default unnoticed.
     """
     problems: list[Problem] = []
 
@@ -91,6 +97,12 @@ def check_config(cfg: Config, *, probe_docker_image: bool = False) -> list[Probl
 
     def warn(msg: str) -> None:
         problems.append(Problem(WARNING, msg))
+
+    # --- unrecognised config keys (silently dropped by Config.from_dict) ---
+    if raw is not None:
+        for key in unknown_keys(raw):
+            warn(f"unrecognised config key {key!r} -- ignored (typo or wrong "
+                 "section?); its default is used")
 
     # --- optimiser selector ---
     if cfg.optimizer_name() not in VALID_OPTIMIZERS:
@@ -159,11 +171,13 @@ def check_config(cfg: Config, *, probe_docker_image: bool = False) -> list[Probl
     return problems
 
 
-def validate_config(cfg: Config, *, probe_docker_image: bool = False) -> list[str]:
+def validate_config(cfg: Config, *, raw: dict | None = None,
+                    probe_docker_image: bool = False) -> list[str]:
     """Human-readable, severity-prefixed validation problems for *cfg*.
 
     An empty list means the config is clean. Each string reads ``"error: ..."``
     or ``"warning: ..."``; use :func:`check_config` when you need the structured
     severities (e.g. to decide whether to block a launch).
     """
-    return [str(p) for p in check_config(cfg, probe_docker_image=probe_docker_image)]
+    return [str(p) for p in check_config(
+        cfg, raw=raw, probe_docker_image=probe_docker_image)]
