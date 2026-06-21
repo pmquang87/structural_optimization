@@ -157,10 +157,12 @@ blank-`work_dir` default), or type an explicit path to override it.
 
   Every iteration solves **all** cases sequentially (each under
   `solve/case_<i>/`, so runtime is N× a single-case run) and extracts per-element
-  energy for each. The BESO/level-set sensitivity is the per-case-normalised
+  energy for each. The sensitivity fed to the optimiser is the per-case-normalised
   weighted sum `s_e = Σ_i wᵢ·energy_eⁱ` (normalising each case by its own peak
   makes the weights comparable across loads); the design is **feasible only when
-  every case is** (status reports the worst-case `sigma_max`/`disp`). Blank
+  every case is** (status reports the worst-case `sigma_max`/`disp`). This
+  combining happens in the loop **above** the optimiser, so multiple load cases
+  work with **any** optimiser — `beso`, `levelset`, or `tobs` — unchanged. Blank
   per-case fields inherit the single-case defaults — `stem` → `model.stem`,
   `disp_node_id` → `model.disp_node_id`, `sigma_allow`/`d_allow` → `constraints`.
   Leave `load_cases` empty for the classic single-solve run (behaviour is
