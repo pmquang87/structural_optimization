@@ -104,7 +104,8 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
 
 
 def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int,
-                       keep_restart: bool = False) -> Path:
+                       keep_restart: bool = False,
+                       subdir: str | None = None) -> Path:
     """Copy iteration *it*'s key OpenRadioss outputs into ``work/iter_{it:04d}/``.
 
     Preserves the small, replay-worthy artefacts before ``solve_dir`` is wiped for
@@ -112,8 +113,15 @@ def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int,
     listing (``<stem>_0001.out``) and the final animation state(s) (``<stem>A0*``).
     The ~345 MB restart (``<stem>*.rst``) is skipped unless *keep_restart* is set,
     in which case the full solver state is kept too. Missing files are skipped
-    (e.g. after a failed solve)."""
+    (e.g. after a failed solve).
+
+    *subdir* nests the outputs one level deeper (``iter_{it:04d}/<subdir>/``) so a
+    multi-load-case run keeps each case's files in its own stem-named folder
+    instead of side by side; left ``None`` (the single-case path) the files land
+    directly in the iteration folder, byte-identical to a classic run."""
     dest = work / f"iter_{it:04d}"
+    if subdir:
+        dest = dest / subdir
     dest.mkdir(parents=True, exist_ok=True)
     for name in (f"{stem}_0000.rad", f"{stem}_0001.out"):
         src = solve_dir / name
@@ -296,10 +304,11 @@ def run_optimization(cfg: Config, resume: bool = False,
             if oc.archive_iterations:
                 # Archive EVERY load case's curated outputs (mutated deck +
                 # listing + animation state(s), plus the restart when
-                # archive_restart) into work/iter_NNNN/. Each case has its own
-                # stem and its own solve dir, so the files never collide in the
-                # shared iteration folder; a single-case run archives just the
-                # primary case, byte-identical to before.
+                # archive_restart) into work/iter_NNNN/. With multiple cases each
+                # case's files go into their own stem-named sub-folder
+                # (iter_NNNN/<stem>/) so a case's deck/listing/anim/restart stay
+                # grouped instead of intermixed; a single-case run archives
+                # straight into iter_NNNN/, byte-identical to before.
                 # Archive by each case's own stem (== model.stem for a classic
                 # single-case run, but the real per-case stem when model.stem is
                 # blank in a multi-load-case config) so the deck/listing/anim are
@@ -307,7 +316,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                 for i, case in enumerate(cases):
                     _archive_iteration(_case_solve_dir(solve_root, n_cases, i),
                                        work, case.stem, it,
-                                       keep_restart=oc.archive_restart)
+                                       keep_restart=oc.archive_restart,
+                                       subdir=case.stem if n_cases > 1 else None)
             log(f"[oropt] iter {it}: sigma_max={sigma_max:.2f}/"
                 f"{cfg.constraints.sigma_allow} disp={disp:.4f}/"
                 f"{cfg.constraints.d_allow} feasible={feasible} "

@@ -92,6 +92,25 @@ def test_archive_iteration_multiload_stem_copies_all_outputs(tmp_path):
         f"{MULTILOAD_STEM}_0000_0001.rst"}
 
 
+def test_archive_iteration_subdir_nests_outputs_by_stem(tmp_path):
+    """With *subdir* (the multi-load-case path) the curated outputs land in a
+    stem-named sub-folder of the iteration folder, keeping each case's files
+    grouped instead of side by side."""
+    solve_dir = tmp_path / "solve" / "case_0"
+    _fake_solve_outputs(solve_dir, MULTILOAD_STEM)
+
+    dest = _archive_iteration(solve_dir, tmp_path, MULTILOAD_STEM, it=5,
+                              keep_restart=True, subdir=MULTILOAD_STEM)
+
+    assert dest == tmp_path / "iter_0005" / MULTILOAD_STEM
+    assert {p.name for p in dest.iterdir()} == {
+        f"{MULTILOAD_STEM}_0000.rad", f"{MULTILOAD_STEM}_0001.out",
+        f"{MULTILOAD_STEM}A001", f"{MULTILOAD_STEM}A002",
+        f"{MULTILOAD_STEM}_0000_0001.rst"}
+    # the iteration folder itself holds only the per-case sub-folder
+    assert {p.name for p in (tmp_path / "iter_0005").iterdir()} == {MULTILOAD_STEM}
+
+
 def test_archive_uses_primary_case_stem_when_model_stem_blank(tmp_path):
     """Regression for the empty-stem trap: in a multi-load config ``model.stem``
     is blank and the real stems live per load case. The fixed call site archives

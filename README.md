@@ -318,10 +318,11 @@ recycled for the next iteration: the mutated `<stem>_0000.rad`, the final
 animation state(s) `<stem>A0*`, and the engine listing `<stem>_0001.out`.
 **`beso.archive_restart`** (**off by default**) additionally copies the restart
 (`<stem>*.rst`), preserving the *full* solver state of every iteration for
-replay/debug — it is opt-in because the restart is ~345 MB/iteration (~50 GB over
-a 150-iteration run). With multiple load cases **every** case is archived into the
-same `iter_NNNN/` folder, keyed by its own stem (so the files never collide). Set
-`archive_iterations: false` to save disk entirely (see the note below).
+replay/debug. With multiple load cases **every** case is archived under
+`iter_NNNN/`, each case in its own stem-named sub-folder
+(`iter_NNNN/<stem>/<stem>_0000.rad`, …) so its files stay grouped; a single-case
+run archives straight into `iter_NNNN/` (byte-identical to before). Set either
+flag to `false` to save disk (see the note below).
 
 With **`d3plot.enabled`** (on by default), once the run finishes each load case's
 final animation is converted to an LS-Dyna d3plot and written to
