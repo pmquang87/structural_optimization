@@ -44,7 +44,7 @@ class ORPaths:
 class RunOpts:
     """How to invoke the solver and how patient to be."""
     np: int = 1                # MUST be 1: SPMD implicit + solid contact segfaults (documented)
-    nt: int = 6                # OpenMP threads (i9-13900H livelock mitigation -> 6)
+    nt: int = 12               # OpenMP threads to solve with (np stays 1); livelock is mitigated by KMP_BLOCKTIME=0 / OMP_WAIT_POLICY=PASSIVE in runner.build_env, not by capping threads
     use_mpi: bool = True       # launch engine via mpiexec -np N (the bare engine fails to load its MPI DLLs)
     starter_timeout_s: float = 600.0
     engine_timeout_s: float = 3600.0
