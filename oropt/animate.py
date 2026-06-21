@@ -136,8 +136,14 @@ union = [b[:, 0].min(), b[:, 1].max(),
          b[:, 2].min(), b[:, 3].max(),
          b[:, 4].min(), b[:, 5].max()]
 
+opacity = float(spec.get("opacity", 1.0))
 p = pv.Plotter(off_screen=True, window_size=spec["window_size"])
 p.background_color = spec["background"]
+if opacity < 1.0:
+    try:
+        p.enable_depth_peeling(10)            # correct order-independent transparency
+    except Exception:
+        pass                                  # driver without it -> plain blending
 # Frame the camera ONCE on the union box (an invisible actor) so every frame
 # shares the same view and the shrinking design stays put instead of zooming.
 p.add_mesh(pv.Box(union), opacity=0.0)
@@ -161,7 +167,7 @@ p.clear()
 for surf, out, label in zip(surfaces, spec["pngs"], spec["labels"]):
     p.clear()
     p.add_mesh(surf, color=spec["color"], show_edges=spec["show_edges"],
-               smooth_shading=True, reset_camera=False)
+               opacity=opacity, smooth_shading=True, reset_camera=False)
     p.camera_position = cam
     if label:
         p.add_text(label, position="upper_left", font_size=12, color="black")
@@ -206,6 +212,7 @@ def _render_frames(frames: list[Path], opts: AnimateOpts, tmp: Path,
         "labels": [_label_for(f) if opts.show_labels else "" for f in frames],
         "window_size": [int(opts.window_w), int(opts.window_h)],
         "color": opts.color,
+        "opacity": max(0.0, min(1.0, float(opts.opacity))),
         "background": opts.background,
         "show_edges": bool(opts.show_edges),
         "view_method": view_method,
@@ -316,6 +323,8 @@ def main(argv=None) -> int:
     ap.add_argument("--elevation", type=float, default=None,
                     help="extra camera elevation rotation [deg] after the preset")
     ap.add_argument("--color", default=None, help="surface colour")
+    ap.add_argument("--opacity", type=float, default=None,
+                    help="surface opacity 0..1 (1 = solid, <1 = see-through)")
     ap.add_argument("--no-labels", action="store_true",
                     help="don't stamp 'iter N' on each frame")
     args = ap.parse_args(argv)
@@ -332,6 +341,8 @@ def main(argv=None) -> int:
         cfg.animate.elevation = args.elevation
     if args.color is not None:
         cfg.animate.color = args.color
+    if args.opacity is not None:
+        cfg.animate.opacity = args.opacity
     if args.no_labels:
         cfg.animate.show_labels = False
 
