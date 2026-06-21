@@ -20,9 +20,12 @@ import pandas as pd
 import streamlit as st
 
 from oropt import status as st_io
+from oropt.animate import VIEWS as _BUILTIN_VIEWS, selectable_views
 from oropt.config import Config, DEFAULT_WORK_SUBDIR
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
+from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
+                             records_from_custom_views)
 from oropt.validate import ERROR, check_config, has_errors
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -382,6 +385,54 @@ with tab_con:
         "Output format", _fmts,
         index=_fmts.index(cfg.smooth.output_format)
         if cfg.smooth.output_format in _fmts else 0)
+
+    st.markdown("**Evolution animation**")
+    cfg.animate.enabled = st.checkbox(
+        "Build a topology-evolution GIF when the run finishes",
+        value=cfg.animate.enabled,
+        help="Renders the per-iteration smoothed surfaces (raw snapshots as a "
+             "fallback) from one fixed camera into <work>/topology_evolution.gif — "
+             "a quick visual of the optimisation. Best-effort; never fails the run.")
+
+    st.caption("Custom camera angles — name your own viewpoints (a built-in base "
+               "+ azimuth/elevation offsets) to reuse them in the dropdown below.")
+    cv_df = pd.DataFrame(records_from_custom_views(cfg.animate.custom_views),
+                         columns=VIEW_COLUMNS)
+    cv_edited = st.data_editor(
+        cv_df, num_rows="dynamic", width="stretch",
+        key="custom_views_editor", column_config={
+            "name": st.column_config.TextColumn(
+                "name", help="Pick this angle by name in 'Camera angle'."),
+            "base": st.column_config.SelectboxColumn(
+                "base", options=list(_BUILTIN_VIEWS), default="iso",
+                help="Built-in preset this angle starts from."),
+            "azimuth": st.column_config.NumberColumn(
+                "azimuth [°]", step=15.0, help="Offset about the vertical."),
+            "elevation": st.column_config.NumberColumn(
+                "elevation [°]", step=15.0, help="Up/down tilt offset."),
+        })
+    cfg.animate.custom_views = custom_views_from_records(cv_edited.to_dict("records"))
+
+    ac = st.columns(3)
+    _views = selectable_views(cfg.animate)         # custom names + built-in presets
+    cfg.animate.view = ac[0].selectbox(
+        "Camera angle", _views,
+        index=_views.index(cfg.animate.view) if cfg.animate.view in _views else 0,
+        help="Viewpoint for every frame: a custom angle (above), iso (3D), or a "
+             "straight-on front/back/left/right/top/bottom. The azimuth/elevation "
+             "here are added on top as a final nudge.")
+    cfg.animate.azimuth = float(ac[1].number_input(
+        "Azimuth [°]", value=float(cfg.animate.azimuth), step=15.0,
+        help="Extra camera rotation about the vertical, applied after the preset."))
+    cfg.animate.elevation = float(ac[2].number_input(
+        "Elevation [°]", value=float(cfg.animate.elevation), step=15.0,
+        help="Extra camera tilt up/down, applied after the preset."))
+    ac2 = st.columns(2)
+    cfg.animate.fps = float(ac2[0].number_input(
+        "Frames per second", value=float(cfg.animate.fps),
+        min_value=0.5, step=1.0))
+    cfg.animate.show_labels = ac2[1].checkbox(
+        "Stamp 'iter N' on each frame", value=cfg.animate.show_labels)
 
     if st.button("💾 Save config"):
         cfg.to_yaml(cfg_path)

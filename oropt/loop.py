@@ -20,6 +20,7 @@ from .d3plot import convert_final
 from .deck import Deck, prepare_engine
 from .levelset import LevelSet
 from .manufacturing import apply_manufacturing, manufacturing_active
+from .animate import make_animation
 from .mesh import Mesh
 from .report import write_report
 from .results import extract
@@ -370,6 +371,13 @@ def run_optimization(cfg: Config, resume: bool = False,
             write_report(cfg, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] report: unexpected error during report: {exc}")
+        # Automatic topology-evolution GIF from the per-iteration smoothed surfaces
+        # (raw snapshots as fallback). Isolated off-screen render like the report's;
+        # best-effort, never affects the run.
+        try:
+            make_animation(cfg, work, log)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[oropt] animate: unexpected error during animation: {exc}")
         st.clear_pid(work)
     return status
 
