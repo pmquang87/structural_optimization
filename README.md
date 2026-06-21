@@ -117,6 +117,11 @@ folders would collide, the queue automatically gives each its own folder
 (`…_2`, `…_3`, …) and launches every run there (via `oropt.run --work-dir`), so
 queued runs never overwrite each other's status/results.
 
+The sidebar **Run state** and the Monitor tab follow whatever run is actually
+live — the selected config's, or a queued run in its own reserved folder — so
+they stay in sync with the queue instead of showing idle while a queued run is
+in progress.
+
 ## Configuration highlights (`configs/elevator_linkage.yaml`)
 
 * `constraints.sigma_allow`, `constraints.d_allow` — the mass-minimisation limits,
@@ -313,6 +318,8 @@ collapses to exactly the original single-solve behaviour (byte-identical).
 
 Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir` when blank):
 
+* `config_used.yaml` — a snapshot of the exact config this run used, written at
+  start-up so each result set is reproducible from its own folder.
 * `status.json` / `history.csv` — live scalar state + one row per iteration.
 * `topology_latest.vtu` — the current alive mesh (overwritten), for the GUI.
 * `topology_iterNNNN.vtu` — an **immutable per-iteration snapshot** of the alive
