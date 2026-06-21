@@ -167,12 +167,56 @@ def find(q: RunQueue, entry_id: str) -> QueueEntry | None:
     return next((e for e in q.entries if e.id == entry_id), None)
 
 
+def _unique_work_dir(base: str, taken: set[str]) -> str:
+    """A folder named like *base* that is not already in *taken* (compared
+    case-insensitively), suffixing ``_2`` / ``_3`` / … on collision. A blank
+    *base* (run folder unknown) is returned unchanged."""
+    if not base or os.path.normcase(base) not in taken:
+        return base
+    i = 2
+    while True:
+        cand = f"{base}_{i}"
+        if os.path.normcase(cand) not in taken:
+            return cand
+        i += 1
+
+
 def add(q: RunQueue, config: str, resume: bool = False,
         work_dir: str = "") -> QueueEntry:
+    """Append a run to the queue.
+
+    When *work_dir* would collide with another not-yet-finished entry's folder it
+    is auto-suffixed (``…_2`` / ``…_3`` …) so each queued run gets its own run
+    folder instead of overwriting another's status/results; the runner passes that
+    folder to the run via ``--work-dir``. Pass a unique *work_dir* (or leave it
+    blank when unknown) to opt out of the suffixing.
+    """
+    taken = {os.path.normcase(e.work_dir) for e in q.entries
+             if e.state in ACTIVE_STATES and e.work_dir}
     e = QueueEntry(id=new_id(), config=str(config), resume=bool(resume),
-                   work_dir=str(work_dir))
+                   work_dir=_unique_work_dir(str(work_dir), taken))
     q.entries.append(e)
     return e
+
+
+def update_entry(q: RunQueue, entry_id: str, *, config: str | None = None,
+                 resume: bool | None = None, work_dir: str | None = None) -> None:
+    """Edit a queued entry's config path / resume flag / run folder in place.
+
+    Only the fields passed (non-``None``) are changed. Intended for *pending*
+    entries — the GUI restricts editing to those so a live run's folder can't move
+    out from under it. The caller supplies the work_dir verbatim (no auto-suffix),
+    so a user-entered collision still surfaces via :func:`duplicate_work_dirs`.
+    """
+    e = find(q, entry_id)
+    if e is None:
+        return
+    if config is not None:
+        e.config = str(config)
+    if resume is not None:
+        e.resume = bool(resume)
+    if work_dir is not None:
+        e.work_dir = str(work_dir)
 
 
 def remove(q: RunQueue, entry_id: str) -> None:
