@@ -272,6 +272,71 @@ class ReportOpts:
 
 
 @dataclass
+class CustomView:
+    """A user-defined, reusable camera angle for the evolution animation.
+
+    A custom view is a built-in preset (``base``) plus ``azimuth`` / ``elevation``
+    offsets in degrees, saved under a ``name`` so it can be re-selected by that name
+    in :attr:`AnimateOpts.view` (and the GUI's angle dropdown). It lets a user dial
+    in a favourite three-quarter angle once and reuse it, instead of re-entering the
+    offsets each run. The global :attr:`AnimateOpts.azimuth` / ``elevation`` still
+    apply on top as a final nudge.
+    """
+    name: str = ""
+    base: str = "iso"        # built-in preset: iso|front|back|left|right|top|bottom
+    azimuth: float = 0.0     # azimuth offset [deg] from the base preset
+    elevation: float = 0.0   # elevation offset [deg] from the base preset
+
+
+@dataclass
+class AnimateOpts:
+    """Automatic post-run animation of the topology evolution (on by default).
+
+    When enabled, after a run finishes the per-iteration smoothed surfaces
+    (``topology_smoothed_iterNNNN.stl`` — produced by :class:`SmoothOpts`, falling
+    back to the raw ``topology_iterNNNN.vtu`` snapshots when smoothing is off) are
+    rendered from a *single fixed camera* and assembled into
+    ``topology_evolution.gif`` in the run folder — a quick visual of material being
+    removed across the optimisation. The camera angle is chosen with ``view``: a
+    built-in preset (``iso`` / ``front`` / ``back`` / ``left`` / ``right`` / ``top``
+    / ``bottom``) *or* the ``name`` of one of the user-defined :class:`CustomView`
+    entries in ``custom_views``. It is fine-tuned with ``azimuth`` / ``elevation``
+    offsets (degrees), so any viewpoint is reachable; whichever angle is picked it
+    stays *fixed* across every frame so the design loses material in place. Like the
+    report's topology render, the frames
+    are drawn by an *isolated off-screen pyvista subprocess* (so a hard GL/driver
+    crash on a headless box is contained and never aborts the run) and the GIF is
+    encoded with Pillow in-process. Best-effort: a missing/failing dependency or a
+    run with fewer than two snapshots is logged and skipped, never fatal. See
+    :mod:`oropt.animate`.
+    """
+    enabled: bool = True
+    fps: float = 4.0                 # frames per second of the output GIF
+    view: str = "iso"                # built-in preset name OR a custom_views name
+    azimuth: float = 0.0             # extra camera azimuth rotation [deg] after the preset
+    elevation: float = 0.0           # extra camera elevation rotation [deg] after the preset
+    window_w: int = 900              # render width  [px]
+    window_h: int = 600              # render height [px]
+    color: str = "lightsteelblue"    # solid surface colour of the design
+    background: str = "white"        # frame background colour
+    show_edges: bool = False         # draw mesh edges on the surface
+    show_labels: bool = True         # stamp "iter N" on each frame
+    hold_last: int = 6               # linger on the final design (×frame duration)
+    render_timeout_s: float = 300.0  # cap on the isolated render subprocess (all frames)
+    # User-defined named angles selectable via ``view``. Stored as CustomView, but
+    # coerced from plain dicts too so YAML round-trips and the GUI editor (which
+    # produces dict rows) both work without a special case in Config.from_dict.
+    custom_views: list = field(default_factory=list)
+
+    def __post_init__(self):
+        fields = {f.name for f in dataclasses.fields(CustomView)}
+        self.custom_views = [
+            v if isinstance(v, CustomView)
+            else CustomView(**{k: val for k, val in dict(v).items() if k in fields})
+            for v in (self.custom_views or [])]
+
+
+@dataclass
 class ManufacturingOpts:
     """Additive-manufacturing (AM) printability constraints applied to the alive
     mask each iteration, *after* the optimiser's own update (so they work for
@@ -361,6 +426,7 @@ class Config:
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     smooth: SmoothOpts = field(default_factory=SmoothOpts)
     report: ReportOpts = field(default_factory=ReportOpts)
+    animate: AnimateOpts = field(default_factory=AnimateOpts)
     # Multiple load cases (optional). Leave empty for the classic single-case run
     # (one implicit case == the ``model`` deck, weight 1) — behaviour is then
     # byte-identical to before. List ``LoadCase`` entries to minimise a
@@ -402,6 +468,7 @@ class Config:
             d3plot=build(D3plotOpts, data.get("d3plot")),
             smooth=build(SmoothOpts, data.get("smooth")),
             report=build(ReportOpts, data.get("report")),
+            animate=build(AnimateOpts, data.get("animate")),
             load_cases=[build(LoadCase, lc) for lc in (data.get("load_cases") or [])],
             optimizer=(data.get("optimizer") or "beso"),
             work_dir=data.get("work_dir") or "",

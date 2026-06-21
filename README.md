@@ -59,6 +59,7 @@ oropt/
   manufacturing.py additive-manufacturing constraints on the alive mask: min member size (open), symmetry, overhang
   smoothing.py / d3plot.py  post-run: smoothed-surface (STL/VTP) export; OpenRadioss anim -> LS-Dyna d3plot
   report.py   post-run: auto summary report (report.html/report.md) — charts + final-design render from status/history
+  animate.py  post-run: topology_evolution.gif from the per-iteration smoothed surfaces (fixed camera, isolated render)
   status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
   loop.py     build_optimizer(cfg) -> solve (every load case) -> extract -> update -> repeat; resumable; feasibility gate
   run.py      CLI entry point
@@ -216,6 +217,35 @@ blank-`work_dir` default), or type an explicit path to override it.
   if either is unavailable the report still writes and links the files instead.
   Set `report.charts: false` or `report.render_topology: false` to skip those
   pieces.
+* `animate` — automatic post-run **topology-evolution GIF** (`animate.enabled:
+  true` by default). On finish, oropt renders the per-iteration *smoothed*
+  surfaces (`topology_smoothed_iterNNNN.<ext>`, falling back to the raw
+  `topology_iterNNNN.vtu` snapshots when `smooth` is off) from a **single fixed
+  camera** — framed once on the union of all snapshots' bounds, so the part loses
+  material *in place* instead of rescaling — and assembles them into
+  `topology_evolution.gif` in the run folder. Frames are drawn by an **isolated
+  off-screen pyvista subprocess** (like the report's render, so a hard GL/driver
+  crash on a headless box can't abort the run) and encoded with Pillow.
+  Best-effort: a run with fewer than two snapshots, or a missing/failing
+  dependency, is logged and skipped. The camera angle is `animate.view` — a
+  built-in preset (`iso` / `front` / `back` / `left` / `right` / `top` /
+  `bottom`) **or the name of a user-defined angle** — nudged by `azimuth` /
+  `elevation` (degrees), so any viewpoint is reachable and it stays fixed across
+  the clip. Define reusable named angles under `animate.custom_views` (each a
+  `base` preset + `azimuth`/`elevation` offsets); they become selectable by name
+  (and appear in the GUI's *Camera angle* dropdown):
+  ```yaml
+  animate:
+    view: three_quarter            # built-in preset OR a custom name below
+    custom_views:
+      - {name: three_quarter, base: front, azimuth: 40, elevation: 25}
+  ```
+  Other tunables: `fps`, `color`, `show_labels`, `hold_last`,
+  `window_w`/`window_h`. The whole **Evolution animation** block — enable, custom
+  angles, camera angle, azimuth/elevation, fps, labels — is editable under
+  *Post-processing* in the GUI. Re-buildable for any existing run folder without
+  re-optimising via `python -m oropt.animate <run_dir>` (e.g.
+  `--view top --fps 8 --color orange`).
 * `docker` — optionally run the solver via the **Dockerised OpenRadioss MUMPS
   build** instead of the native Windows binaries (no Intel oneAPI/MKL/MPI; works
   on AMD or Intel). Set `docker.enabled: true` with the loaded `image`

@@ -13,6 +13,7 @@ dependencies = [
     "scipy>=1.10",
     "pyvista>=0.43",   # VTK-backed reader for anim_to_vtk output + topology export/viz
     "matplotlib>=3.7",
+    "pillow>=9.0",     # GIF encoding for the post-run topology-evolution animation
     "pyyaml>=6.0",
 ]
 
@@ -22,6 +23,7 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 oropt = "oropt.run:main"
+oropt-animate = "oropt.animate:main"
 
 [tool.setuptools]
 packages = ["oropt", "oropt.gui"]
