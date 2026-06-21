@@ -19,9 +19,11 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from oropt import queue_runner
 from oropt import status as st_io
 from oropt.animate import VIEWS as _BUILTIN_VIEWS, selectable_views
 from oropt.config import Config, DEFAULT_WORK_SUBDIR
+from oropt.gui import queue_store as qs
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
@@ -30,6 +32,9 @@ from oropt.validate import ERROR, check_config, has_errors
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CFG = PROJECT_ROOT / "configs" / "elevator_linkage.yaml"
+QUEUE_PATH = qs.default_queue_path(PROJECT_ROOT)
+QUEUE_BADGE = {qs.PENDING: "⏳ pending", qs.RUNNING: "🟢 running",
+               qs.DONE: "✅ done", qs.FAILED: "❌ failed", qs.SKIPPED: "⤳ skipped"}
 
 st.set_page_config(page_title="oropt — OpenRadioss BESO", layout="wide")
 
@@ -111,8 +116,34 @@ refresh_s = int(st.sidebar.number_input(
     "Refresh interval (s)", min_value=1, max_value=3600, value=60, step=5,
     help="How often the Monitor tab re-reads the run's status files."))
 
-tab_in, tab_lc, tab_con, tab_mon = st.tabs(
-    ["📥 Input", "🔀 Load cases", "🎚 Constraints / BC", "📊 Monitor"])
+# ---- sidebar: run queue (serial) ------------------------------------------
+# Quick add/start/pause; full management lives in the 🧮 Queue tab. The queue is
+# additive — it reuses the same detached-run launch path one run at a time and
+# never touches the single ▶ Start flow above.
+queue = qs.load_queue(QUEUE_PATH)
+runner_alive = bool(queue.runner_pid) and st_io.pid_alive(queue.runner_pid)
+qcounts = qs.counts(queue)
+st.sidebar.markdown("---")
+queue_state = ("🟢 runner active" if runner_alive
+               else "⏸ paused" if queue.paused else "⚪ idle")
+st.sidebar.markdown(f"**Run queue:** {qcounts['pending']} pending · {queue_state}")
+if st.sidebar.button("➕ Add current config to queue", width="stretch"):
+    qs.mutate(QUEUE_PATH, lambda q: qs.add(
+        q, str(cfg_path), resume=False,
+        work_dir=qs.resolve_work_dir(cfg_path, PROJECT_ROOT)))
+    st.rerun()
+qcol = st.sidebar.columns(2)
+if qcol[0].button("▶ Start queue", width="stretch",
+                  disabled=runner_alive or qcounts["pending"] == 0):
+    qs.mutate(QUEUE_PATH, lambda q: qs.set_paused(q, False))
+    queue_runner.spawn_runner(QUEUE_PATH, PROJECT_ROOT)
+    st.rerun()
+if qcol[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive):
+    qs.mutate(QUEUE_PATH, lambda q: qs.set_paused(q, True))
+    st.rerun()
+
+tab_in, tab_lc, tab_con, tab_mon, tab_q = st.tabs(
+    ["📥 Input", "🔀 Load cases", "🎚 Constraints / BC", "📊 Monitor", "🧮 Queue"])
 
 # ---- Input tab -------------------------------------------------------------
 with tab_in:
@@ -504,3 +535,112 @@ with tab_mon:
                 st.caption(f"(3D view unavailable: {exc})")
 
     monitor()
+
+    # Live read-only view of the serial run queue, on the same refresh tick (so a
+    # queued run's progress shows here even before its config is selected above).
+    @st.fragment(run_every=refresh_s)
+    def queue_monitor():
+        q = qs.load_queue(QUEUE_PATH)
+        if not q.entries:
+            return
+        st.markdown("---")
+        alive = bool(q.runner_pid) and st_io.pid_alive(q.runner_pid)
+        c = qs.counts(q)
+        state = ("🟢 runner active" if alive
+                 else "⏸ paused" if q.paused else "⚪ idle")
+        line = (f"**Run queue** — {state} · ⏳ {c['pending']} · 🟢 {c['running']} "
+                f"· ✅ {c['done']} · ❌ {c['failed']}")
+        if c["skipped"]:
+            line += f" · ⤳ {c['skipped']}"
+        st.markdown(line)
+        for e in q.entries:
+            st.caption(f"{QUEUE_BADGE.get(e.state, '•')} {Path(e.config).name}"
+                       + (f" — {e.message}" if e.message else ""))
+
+    queue_monitor()
+
+
+# ---- Queue tab -------------------------------------------------------------
+with tab_q:
+    st.subheader("Run queue (serial)")
+    st.caption(
+        "Enqueue several runs; a detached **queue runner** executes them strictly "
+        "one at a time (never two solver processes at once) and starts the next "
+        "automatically when the current finishes. The queue lives on disk and "
+        "keeps draining after you close the browser — just like a single run. "
+        "`is_running` stays the source of truth, so a run already live for a "
+        "config is waited on, never double-launched.")
+
+    queue = qs.load_queue(QUEUE_PATH)          # re-read (sidebar may have mutated)
+    runner_alive = bool(queue.runner_pid) and st_io.pid_alive(queue.runner_pid)
+
+    # ---- add a config -----------------------------------------------------
+    add_cols = st.columns([5, 1, 1])
+    new_cfg = add_cols[0].text_input("Config to enqueue", str(cfg_path),
+                                     key="queue_add_path")
+    add_resume = add_cols[1].checkbox("resume", value=False, key="queue_add_resume",
+                                      help="Enqueue this run with --resume.")
+    if add_cols[2].button("➕ Add", width="stretch"):
+        p = Path(new_cfg)
+        if not p.exists():
+            st.warning(f"Config not found: {new_cfg}")
+        else:
+            qs.mutate(QUEUE_PATH, lambda q: qs.add(
+                q, str(p), resume=add_resume,
+                work_dir=qs.resolve_work_dir(p, PROJECT_ROOT)))
+            st.rerun()
+
+    dups = qs.duplicate_work_dirs(queue)
+    if dups:
+        st.warning(
+            "Multiple queued runs share a run/output folder, so they would "
+            "overwrite each other's status and results (they still run serially, "
+            "never at once). Give each its own `work_dir` / case directory before "
+            "starting:\n" + "\n".join(f"- `{d}`" for d in sorted(dups)))
+
+    # ---- queue-wide controls ----------------------------------------------
+    ctl = st.columns(4)
+    if ctl[0].button("▶ Start queue", width="stretch",
+                     disabled=runner_alive or qs.counts(queue)["pending"] == 0):
+        qs.mutate(QUEUE_PATH, lambda q: qs.set_paused(q, False))
+        queue_runner.spawn_runner(QUEUE_PATH, PROJECT_ROOT)
+        st.rerun()
+    if ctl[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive,
+                     help="Stop after the current run finishes; doesn't kill it."):
+        qs.mutate(QUEUE_PATH, lambda q: qs.set_paused(q, True))
+        st.rerun()
+    if ctl[2].button("🧹 Clear finished", width="stretch"):
+        qs.mutate(QUEUE_PATH, qs.clear_finished)
+        st.rerun()
+    if ctl[3].button("🗑 Clear all", width="stretch",
+                     help="Remove every entry except one currently running."):
+        qs.mutate(QUEUE_PATH, qs.clear_all)
+        st.rerun()
+
+    # ---- the entries ------------------------------------------------------
+    if not queue.entries:
+        st.info("Queue is empty. Add a config above, or use the sidebar's "
+                "“➕ Add current config to queue”.")
+    last = len(queue.entries) - 1
+    for i, e in enumerate(queue.entries):
+        row = st.columns([6, 2, 1, 1, 1])
+        label = Path(e.config).name + (" · resume" if e.resume else "")
+        detail = f"`{e.config}`"
+        if e.work_dir:
+            detail += f"  \n↳ `{e.work_dir}`"
+        if e.message:
+            detail += f"  \n_{e.message}_"
+        row[0].markdown(f"**{label}**  \n{detail}")
+        row[1].markdown(QUEUE_BADGE.get(e.state, e.state))
+        # Capture e.id via default arg so the lambda binds this row, not the last.
+        if row[2].button("⬆", key=f"q_up_{e.id}", disabled=i == 0,
+                         help="Run earlier"):
+            qs.mutate(QUEUE_PATH, lambda q, _id=e.id: qs.move(q, _id, -1))
+            st.rerun()
+        if row[3].button("⬇", key=f"q_down_{e.id}", disabled=i == last,
+                         help="Run later"):
+            qs.mutate(QUEUE_PATH, lambda q, _id=e.id: qs.move(q, _id, +1))
+            st.rerun()
+        if row[4].button("✖", key=f"q_rm_{e.id}", help="Remove from queue"):
+            qs.mutate(QUEUE_PATH, lambda q, _id=e.id: qs.remove(q, _id))
+            st.rerun()
