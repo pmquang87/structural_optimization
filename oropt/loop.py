@@ -143,7 +143,6 @@ def run_optimization(cfg: Config, resume: bool = False,
                      should_stop: Optional[Callable[[], bool]] = None) -> st.Status:
     work = cfg.work()
     solve_root = work / "solve"
-    stem = cfg.model.stem
     m = cfg.model
 
     (work / "stop.flag").unlink(missing_ok=True)   # ignore any stale stop request
@@ -294,7 +293,11 @@ def run_optimization(cfg: Config, resume: bool = False,
                                                                deck.elem_ids)},
                               iteration=it)
             if oc.archive_iterations:
-                _archive_iteration(primary_solve, work, stem, it,
+                # Archive by the PRIMARY case's stem (== model.stem for a classic
+                # single-case run, but the real per-case stem when model.stem is
+                # blank in a multi-load-case config) so the deck/listing/anim are
+                # matched, not just the restart files.
+                _archive_iteration(primary_solve, work, primary.stem, it,
                                    keep_restart=oc.archive_restart)
             log(f"[oropt] iter {it}: sigma_max={sigma_max:.2f}/"
                 f"{cfg.constraints.sigma_allow} disp={disp:.4f}/"
@@ -333,7 +336,11 @@ def run_optimization(cfg: Config, resume: bool = False,
         # owns the pid (so the GUI stays 'running' and won't recycle solve/
         # mid-conversion); never let post-processing affect the run's result/state.
         try:
-            convert_final(cfg, primary_solve, work, log)
+            # Use a primary-case cfg so convert_final keys off the primary case's
+            # stem (== model.stem for a single-case run, but the real stem when
+            # model.stem is blank in a multi-load-case config) and so finds its
+            # <stem>A0* animation rather than nothing.
+            convert_final(_case_config(cfg, primary), primary_solve, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] d3plot: unexpected error during conversion: {exc}")
         try:
