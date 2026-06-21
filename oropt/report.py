@@ -309,6 +309,10 @@ def _artefacts(work: Path) -> list[tuple[str, str]]:
     snaps = sorted(work.glob("topology_iter*.vtu"))
     if snaps:
         out.append((f"Per-iteration snapshots ({len(snaps)})", snaps[0].name))
+    smoothed_snaps = sorted(work.glob("topology_smoothed_iter*.*"))
+    if smoothed_snaps:
+        out.append((f"Per-iteration smoothed surfaces ({len(smoothed_snaps)})",
+                    smoothed_snaps[0].name))
     if (work / "d3plot").is_dir():
         out.append(("LS-Dyna d3plot", "d3plot/"))
     return out

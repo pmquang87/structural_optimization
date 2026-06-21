@@ -155,22 +155,15 @@ blank-`work_dir` default), or type an explicit path to override it.
     - {name: side,   stem: implicit_side,   weight: 0.5, disp_node_id: 10021400}
   ```
 
-  Every iteration solves **all** cases sequentially (each under
-  `solve/case_<i>/`, so runtime is N× a single-case run) and extracts per-element
-  energy for each. The sensitivity fed to the optimiser is the per-case-normalised
-  weighted sum `s_e = Σ_i wᵢ·energy_eⁱ` (normalising each case by its own peak
-  makes the weights comparable across loads); the design is **feasible only when
-  every case is** (status reports the worst-case `sigma_max`/`disp`). This
-  combining happens in the loop **above** the optimiser, so multiple load cases
-  work with **any** optimiser — `beso`, `levelset`, or `tobs` — unchanged. Blank
-  per-case fields inherit the single-case defaults — `stem` → `model.stem`,
+  Blank per-case fields inherit the single-case defaults — `stem` → `model.stem`,
   `disp_node_id` → `model.disp_node_id`, `sigma_allow`/`d_allow` → `constraints`.
-  Leave `load_cases` empty for the classic single-solve run (behaviour is
-  byte-identical). All cases must share the same design-part element ids (only the
-  load differs); the post-run d3plot/smoothing use the primary (first) case.
-  Editable on the GUI's dedicated **Load cases** tab (add/remove rows; blank
-  optional cells inherit defaults); the *Monitor* tab then flags that σ_max/disp
-  are the worst across all cases.
+  All cases must share the same design-part element ids (only the load differs).
+  Leave `load_cases` empty for the classic single-solve run (byte-identical
+  behaviour). Editable on the GUI's dedicated **Load cases** tab (add/remove rows;
+  blank optional cells inherit defaults); the *Monitor* tab then flags that
+  σ_max/disp are the worst across all cases. See
+  **[How multiple load cases work](#how-multiple-load-cases-work)** below for the
+  per-iteration solve → combine → update flow.
 * **Keep-out / non-design regions** — `model.freeze_group_ids` (e.g. `[99999999]`,
   any `/GRNOD/NODE` set in the deck) and `model.freeze_node_ids`: every design
   element touching those nodes is frozen and never deleted. Boundary-condition,
@@ -192,9 +185,10 @@ blank-`work_dir` default), or type an explicit path to override it.
   (e.g. `runs/run01`) to put outputs elsewhere. The mutated deck always lives in
   the `solve/` sub-folder (`<run_folder>/solve/<stem>_0000.rad`), so the source
   decks in `model.case_dir` are never overwritten.
-* `beso.archive_iterations` / `beso.archive_restart` (both default `false`) — see *Outputs* below.
-* `d3plot` — optional post-run conversion of the final OpenRadioss animation into
-  an LS-Dyna `d3plot` (viewable in LS-PrePost etc.). Set `d3plot.enabled: true`;
+* `beso.archive_iterations` / `beso.archive_restart` (both default `true`) — see *Outputs* below.
+* `d3plot` — post-run conversion of the final OpenRadioss animation into an
+  LS-Dyna `d3plot` (viewable in LS-PrePost etc.), **on by default**
+  (`d3plot.enabled: true`); one d3plot is produced per load case.
   `tool_root` points at the [Vortex-Radioss](https://github.com/Vortex-CAE/Vortex-Radioss)
   `openradioss_tools` checkout (the folder holding the `vortex_radioss` package).
   The converter runs in an **isolated subprocess** using `python_exe` — blank
@@ -202,12 +196,14 @@ blank-`work_dir` default), or type an explicit path to override it.
   environment stays clean. It is best-effort: a missing tool, interpreter or
   dependency is logged and skipped, never failing the run. Also exposed as
   **Post-processing — d3plot** on the GUI's *Constraints / BC* tab.
-* `smooth` — optional surface smoothing of the **final optimised geometry**. Set
-  `smooth.enabled: true` to extract the final design's surface, smooth it
+* `smooth` — surface smoothing of the optimised geometry, **on by default**
+  (`smooth.enabled: true`). Extracts the design surface, smooths it
   (`method: taubin` volume-preserving, or `laplacian`; `iterations` passes) and
-  write `topology_smoothed.<ext>` (`output_format: stl|vtp|both`) to the run
-  folder — a clean deliverable for CAD / 3D-print / review. Best-effort. Exposed
-  under **Post-processing — Surface smoothing** in the GUI.
+  writes `topology_smoothed.<ext>` (`output_format: stl|vtp|both`) to the run
+  folder — a clean deliverable for CAD / 3D-print / review. **Every** per-iteration
+  snapshot is smoothed too, into `topology_smoothed_iterNNNN.<ext>`, so the
+  smoothed shape evolution is reviewable, not just the final design. Best-effort.
+  Exposed under **Post-processing — Surface smoothing** in the GUI.
 * `report` — automatic post-run **summary report** (`report.enabled: true` by
   default — it's cheap and read-only). On finish, oropt summarises the run from
   the `status.json`/`history.csv` it already wrote into `report.html` (a
@@ -229,6 +225,51 @@ blank-`work_dir` default), or type an explicit path to override it.
   there, so the rest of the pipeline is unchanged. Requires Docker Desktop
   running; selectable as **Solver backend** on the GUI's *Input* tab.
 
+## How multiple load cases work
+
+Multiple load cases optimise **one** shared structure against several loads at
+once. The primary (first) case defines the geometry, mesh and protected set; every
+other case is a separate deck pair (`<stem>_0000.rad` / `<stem>_0001.rad`) that
+**must share the same design-part element ids** — only its load cards differ. There
+is a single `alive` element mask and a single optimiser; the loads are all that
+vary.
+
+Each iteration runs the same four steps:
+
+1. **Solve every case.** The current `alive` design is written into each case's
+   deck and solved **sequentially**, each in its own `solve/case_<i>/` directory
+   (so decks, listings and animations never collide). Runtime is therefore ≈ N× a
+   single-case iteration. If any case fails to solve, the iteration aborts.
+2. **Combine into one decision.** The per-case results are fused two ways:
+   * **Objective (sensitivity)** — a *per-case-normalised weighted sum*
+     `s_e = Σ_i wᵢ·(rawᵢ_e / max rawᵢ)`. Normalising each case by its own peak
+     before weighting makes the weights express *relative* importance regardless
+     of how the cases' absolute strain-energy magnitudes differ.
+   * **Constraints (feasibility)** — *worst-case*: the reported `sigma_max` /
+     `disp` are the maxima across cases, and the design is **feasible only when
+     every case satisfies its own `sigma_allow` / `d_allow`**.
+3. **One shared design update.** From here the loop is identical to a single-load
+   run — it sees only the combined sensitivity and the worst-case feasibility:
+   spatial filter + history blend, convergence check, then the target-volume /
+   `alive`-mask update. This combining sits in the loop **above** the optimiser, so
+   multiple load cases work with **any** optimiser (`beso`, `levelset`, `tobs`)
+   unchanged.
+4. **Next iteration** re-solves *all* cases against the new design, and the cycle
+   repeats until convergence or `max_iter`.
+
+So after the first iteration of all cases is computed, the N per-case results
+collapse into a single sensitivity field and a single feasibility verdict, which
+drive one new global `alive` mask — the next iteration then re-solves every case on
+that mask. Cost scales roughly linearly with the number of cases (they run
+sequentially, not in parallel).
+
+Post-processing covers **every** case: the per-iteration archive
+(`iter_NNNN/<stem>…`) and the final-design d3plot (`d3plot/<stem>.d3plot`) are
+written per case, while surface smoothing emits the one shared design (the final
+`topology_smoothed.<ext>` plus each `topology_smoothed_iterNNNN.<ext>`). Leave
+`load_cases` empty for the classic single-solve run — the multi-case path then
+collapses to exactly the original single-solve behaviour (byte-identical).
+
 ## Outputs
 
 Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir/work`):
@@ -239,18 +280,22 @@ Every iteration the loop writes, into the run folder (`work_dir`, or `case_dir/w
   mesh (sensitivity + von-Mises fields), so the topology evolution can be
   replayed/animated after the run. These are small (only the surviving tets).
 
-Set **`beso.archive_iterations: true`** to also keep each iteration's key
+**`beso.archive_iterations`** (on by default) keeps each iteration's key
 OpenRadioss outputs under `work_dir/iter_NNNN/` before the `solve/` folder is
 recycled for the next iteration: the mutated `<stem>_0000.rad`, the final
-animation state(s) `<stem>A0*`, and the engine listing `<stem>_0001.out`. Add
-**`beso.archive_restart: true`** to also copy the restart (`<stem>*.rst`),
-preserving the *full* solver state of every iteration for replay/debug.
+animation state(s) `<stem>A0*`, and the engine listing `<stem>_0001.out`.
+**`beso.archive_restart`** (also on by default) additionally copies the restart
+(`<stem>*.rst`), preserving the *full* solver state of every iteration for
+replay/debug. With multiple load cases **every** case is archived into the same
+`iter_NNNN/` folder, keyed by its own stem (so the files never collide). Set
+either flag to `false` to save disk (see the note below).
 
-When **`d3plot.enabled: true`**, once the run finishes the final design's
-animation is converted to an LS-Dyna d3plot and written to
-`work_dir/d3plot/<stem>.d3plot` (+ its `.d3plotNN` state files). When
-**`smooth.enabled: true`**, the final design's surface is extracted, smoothed and
-written to `work_dir/topology_smoothed.<ext>` (STL/VTP).
+With **`d3plot.enabled`** (on by default), once the run finishes each load case's
+final animation is converted to an LS-Dyna d3plot and written to
+`work_dir/d3plot/<stem>.d3plot` (+ its `.d3plotNN` state files) — one per case.
+With **`smooth.enabled`** (on by default), the design surface is extracted,
+smoothed and written to `work_dir/topology_smoothed.<ext>` (STL/VTP), and every
+per-iteration snapshot likewise into `work_dir/topology_smoothed_iterNNNN.<ext>`.
 
 Unless **`report.enabled: false`**, the run also writes a summary report —
 `work_dir/report.html` (self-contained: convergence charts + a final-design
@@ -258,11 +303,14 @@ render embedded) and `work_dir/report.md`, alongside the `report_*.png` charts �
 recapping optimiser, start→final volume fraction and % mass removed, final
 σ_max/displacement vs limits, feasibility, iteration count and total wall time.
 
-> **Disk cost.** Archiving is off by default because it adds up: tens of MB per
-> iteration (deck + animation), so a 50–150 iteration run can reach several GB.
-> The ~345 MB restart (`<stem>_0000_0001.rst`) is excluded unless you opt in with
-> `archive_restart` — that alone is ~50 GB over a long run, so enable it only when
-> you truly need every iteration's full state.
+> **Disk cost.** Archiving is **on by default** and adds up fast: tens of MB per
+> iteration *per load case* (deck + animation), **plus** the ~345 MB restart
+> (`<stem>_0000_0001.rst`) per iteration per case while `archive_restart` is on
+> (also the default) — the restart alone is ~50 GB over a long single-case run and
+> scales with the number of load cases. Per-iteration smoothed surfaces (on by
+> default) add a little more. Set `beso.archive_restart: false` and/or
+> `beso.archive_iterations: false` to trim this when you don't need every
+> iteration's full solver state.
 
 ## Honest caveats
 

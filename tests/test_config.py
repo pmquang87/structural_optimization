@@ -66,27 +66,28 @@ def test_work_falls_back_to_work_subdir_and_creates_it(tmp_path):
     assert p.is_dir()
 
 
-def test_archive_iterations_flag_default_off_and_roundtrips(tmp_path):
+def test_archive_iterations_flag_default_on_and_roundtrips(tmp_path):
     cfg = Config()
-    assert cfg.beso.archive_iterations is False        # opt-in
-    cfg.beso.archive_iterations = True
+    assert cfg.beso.archive_iterations is True          # on by default
+    assert cfg.beso.archive_restart is True             # restart kept too
+    cfg.beso.archive_iterations = False
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)
-    assert Config.from_yaml(p).beso.archive_iterations is True
+    assert Config.from_yaml(p).beso.archive_iterations is False
 
 
 def test_protect_bc_and_smooth_defaults_and_roundtrip(tmp_path):
     cfg = Config()
     assert cfg.beso.protect_bc_nodes is True            # default: BC frozen
-    assert cfg.smooth.enabled is False                  # opt-in
+    assert cfg.smooth.enabled is True                   # on by default
     cfg.beso.protect_bc_nodes = False
-    cfg.smooth.enabled = True
+    cfg.smooth.enabled = False
     cfg.smooth.method = "laplacian"
     cfg.smooth.output_format = "both"
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)
     back = Config.from_yaml(p)
     assert back.beso.protect_bc_nodes is False
-    assert back.smooth.enabled is True
+    assert back.smooth.enabled is False
     assert back.smooth.method == "laplacian"
     assert back.smooth.output_format == "both"

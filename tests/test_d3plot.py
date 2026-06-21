@@ -12,15 +12,15 @@ from oropt.d3plot import _resolve_python, convert_final, convert_stem
 from oropt.loop import _case_config
 
 
-def test_d3plot_defaults_off_and_roundtrips(tmp_path):
+def test_d3plot_defaults_on_and_roundtrips(tmp_path):
     cfg = Config()
-    assert cfg.d3plot.enabled is False                 # opt-in
-    cfg.d3plot.enabled = True
+    assert cfg.d3plot.enabled is True                  # on by default
+    cfg.d3plot.enabled = False
     cfg.d3plot.tool_root = r"X:\tools\openradioss_tools"
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)
     back = Config.from_yaml(p)
-    assert back.d3plot.enabled is True
+    assert back.d3plot.enabled is False
     assert back.d3plot.tool_root == r"X:\tools\openradioss_tools"
 
 

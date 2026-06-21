@@ -271,6 +271,71 @@ def test_mismatched_mesh_across_cases_is_rejected(case_env, monkeypatch):
         loop_mod.run_optimization(cfg, log=lambda *_: None)
 
 
+# ---- (e) per-case post-processing: archive + d3plot for EVERY case ---------
+def test_multi_case_archives_every_case_each_iteration(case_env, monkeypatch):
+    """With archive_iterations on, each iteration's folder holds the curated
+    outputs of *every* load case side by side (here just the mutated deck the
+    stub solver leaves), not only the primary case's."""
+    case_dir, out = case_env(("lc_a", "lc_b"))
+    cfg = _cfg(case_dir, out, "lc_a", [
+        LoadCase(name="a", stem="lc_a", weight=1.0),
+        LoadCase(name="b", stem="lc_b", weight=1.0),
+    ])
+    cfg.beso.archive_iterations = True
+    _stub_solver(monkeypatch, {
+        "lc_a": _results(100.0, 0.1, energy=[1.0, 0.0]),
+        "lc_b": _results(120.0, 0.2, energy=[0.0, 1.0]),
+    }, calls=[])
+    loop_mod.run_optimization(cfg, log=lambda *_: None)
+
+    it0 = cfg.work() / "iter_0000"
+    assert it0.is_dir()
+    names = {p.name for p in it0.iterdir()}
+    # both cases archived into the one iteration folder (distinct stems, no clash)
+    assert "lc_a_0000.rad" in names
+    assert "lc_b_0000.rad" in names
+
+
+def test_multi_case_converts_d3plot_for_every_case(case_env, monkeypatch):
+    """Post-run d3plot conversion runs once per load case, each keyed to its own
+    stem and its own solve sub-dir."""
+    case_dir, out = case_env(("lc_a", "lc_b"))
+    cfg = _cfg(case_dir, out, "lc_a", [
+        LoadCase(name="a", stem="lc_a", weight=1.0),
+        LoadCase(name="b", stem="lc_b", weight=1.0),
+    ])
+    _stub_solver(monkeypatch, {
+        "lc_a": _results(100.0, 0.1, energy=[1.0, 0.0]),
+        "lc_b": _results(120.0, 0.2, energy=[0.0, 1.0]),
+    }, calls=[])
+    conv_calls = []
+    monkeypatch.setattr(loop_mod, "convert_final",
+                        lambda c, sd, w, log: conv_calls.append((c.model.stem, Path(sd))))
+    loop_mod.run_optimization(cfg, log=lambda *_: None)
+
+    work = cfg.work()
+    assert conv_calls == [
+        ("lc_a", work / "solve" / "case_0"),
+        ("lc_b", work / "solve" / "case_1"),
+    ]
+
+
+def test_single_case_converts_d3plot_once_with_plain_solve_dir(case_env, monkeypatch):
+    """A single (classic) case still converts exactly once, against plain
+    ``solve/`` — byte-identical to the pre-multi-case behaviour."""
+    case_dir, out = case_env(("implicit_demo",))
+    cfg = _cfg(case_dir, out, "implicit_demo", load_cases=[])
+    _stub_solver(monkeypatch,
+                 {"implicit_demo": _results(100.0, 0.1, energy=[2.0, 1.0])},
+                 calls=[])
+    conv_calls = []
+    monkeypatch.setattr(loop_mod, "convert_final",
+                        lambda c, sd, w, log: conv_calls.append((c.model.stem, Path(sd))))
+    loop_mod.run_optimization(cfg, log=lambda *_: None)
+
+    assert conv_calls == [("implicit_demo", cfg.work() / "solve")]
+
+
 # ---- (d) config roundtrip --------------------------------------------------
 def test_load_cases_default_empty_and_single_resolution():
     cfg = Config()
