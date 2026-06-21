@@ -318,6 +318,7 @@ class AnimateOpts:
     window_w: int = 900              # render width  [px]
     window_h: int = 600              # render height [px]
     color: str = "lightsteelblue"    # solid surface colour of the design
+    opacity: float = 1.0             # surface opacity 0..1 (1 = solid, <1 = see-through)
     background: str = "white"        # frame background colour
     show_edges: bool = False         # draw mesh edges on the surface
     show_labels: bool = True         # stamp "iter N" on each frame

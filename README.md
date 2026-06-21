@@ -240,12 +240,14 @@ blank-`work_dir` default), or type an explicit path to override it.
     custom_views:
       - {name: three_quarter, base: front, azimuth: 40, elevation: 25}
   ```
-  Other tunables: `fps`, `color`, `show_labels`, `hold_last`,
-  `window_w`/`window_h`. The whole **Evolution animation** block — enable, custom
-  angles, camera angle, azimuth/elevation, fps, labels — is editable under
-  *Post-processing* in the GUI. Re-buildable for any existing run folder without
-  re-optimising via `python -m oropt.animate <run_dir>` (e.g.
-  `--view top --fps 8 --color orange`).
+  Other tunables: `fps`, `color`, `opacity` (0..1 — drop below 1 to make the
+  design see-through so internal structure shows; transparency uses depth peeling
+  when the driver supports it), `show_labels`, `hold_last`, `window_w`/`window_h`.
+  The whole **Evolution animation** block — enable, custom angles, camera angle,
+  azimuth/elevation, fps, opacity, labels — is editable under *Post-processing* in
+  the GUI. Re-buildable for any existing run folder without re-optimising via
+  `python -m oropt.animate <run_dir>` (e.g.
+  `--view top --fps 8 --color orange --opacity 0.5`).
 * `docker` — optionally run the solver via the **Dockerised OpenRadioss MUMPS
   build** instead of the native Windows binaries (no Intel oneAPI/MKL/MPI; works
   on AMD or Intel). Set `docker.enabled: true` with the loaded `image`

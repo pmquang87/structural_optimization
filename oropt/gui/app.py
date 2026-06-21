@@ -433,6 +433,11 @@ with tab_con:
         min_value=0.5, step=1.0))
     cfg.animate.show_labels = ac2[1].checkbox(
         "Stamp 'iter N' on each frame", value=cfg.animate.show_labels)
+    cfg.animate.opacity = float(st.slider(
+        "Surface opacity", min_value=0.0, max_value=1.0,
+        value=float(cfg.animate.opacity), step=0.05,
+        help="1.0 = solid; lower makes the design see-through so internal "
+             "structure shows. Transparency uses depth peeling when available."))
 
     if st.button("💾 Save config"):
         cfg.to_yaml(cfg_path)

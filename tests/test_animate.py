@@ -23,6 +23,7 @@ def test_animate_enabled_by_default_and_roundtrips(tmp_path):
     cfg.animate.view = "top"
     cfg.animate.azimuth = 45.0
     cfg.animate.elevation = -20.0
+    cfg.animate.opacity = 0.4
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)
     back = Config.from_yaml(p)
@@ -32,6 +33,7 @@ def test_animate_enabled_by_default_and_roundtrips(tmp_path):
     assert back.animate.view == "top"
     assert back.animate.azimuth == 45.0
     assert back.animate.elevation == -20.0
+    assert back.animate.opacity == 0.4
 
 
 # --- camera angle ----------------------------------------------------------- #
