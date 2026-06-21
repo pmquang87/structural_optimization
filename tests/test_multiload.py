@@ -274,8 +274,8 @@ def test_mismatched_mesh_across_cases_is_rejected(case_env, monkeypatch):
 # ---- (e) per-case post-processing: archive + d3plot for EVERY case ---------
 def test_multi_case_archives_every_case_each_iteration(case_env, monkeypatch):
     """With archive_iterations on, each iteration's folder holds the curated
-    outputs of *every* load case side by side (here just the mutated deck the
-    stub solver leaves), not only the primary case's."""
+    outputs of *every* load case (here just the mutated deck the stub solver
+    leaves), each grouped under its own stem-named sub-folder."""
     case_dir, out = case_env(("lc_a", "lc_b"))
     cfg = _cfg(case_dir, out, "lc_a", [
         LoadCase(name="a", stem="lc_a", weight=1.0),
@@ -290,10 +290,11 @@ def test_multi_case_archives_every_case_each_iteration(case_env, monkeypatch):
 
     it0 = cfg.work() / "iter_0000"
     assert it0.is_dir()
-    names = {p.name for p in it0.iterdir()}
-    # both cases archived into the one iteration folder (distinct stems, no clash)
-    assert "lc_a_0000.rad" in names
-    assert "lc_b_0000.rad" in names
+    # each case archived into its own stem-named sub-folder, not side by side
+    assert (it0 / "lc_a" / "lc_a_0000.rad").is_file()
+    assert (it0 / "lc_b" / "lc_b_0000.rad").is_file()
+    # the iteration folder holds only the per-case sub-folders (no flat files)
+    assert {p.name for p in it0.iterdir()} == {"lc_a", "lc_b"}
 
 
 def test_multi_case_converts_d3plot_for_every_case(case_env, monkeypatch):
