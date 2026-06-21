@@ -169,13 +169,17 @@ def _parse_engine_stats(out_file: Path) -> tuple[Optional[int], Optional[float]]
             float(el.group(1)) if el else None)
 
 
-def run_solver(cfg: Config, run_dir: str | Path) -> RunResult:
+def run_solver(cfg: Config, run_dir: str | Path,
+               stem: Optional[str] = None) -> RunResult:
     """Run starter then engine in *run_dir*; return a RunResult.
 
     The deck (``<stem>_0000.rad`` / ``_0001.rad``) must already exist in *run_dir*.
+    *stem* selects which deck to solve, defaulting to ``cfg.model.stem``; the
+    multi-load-case loop passes a per-case stem so one *cfg* can drive several
+    cases without the implicit "swap model.stem" dance.
     """
     run_dir = Path(run_dir).resolve()
-    stem = cfg.model.stem
+    stem = stem if stem is not None else cfg.model.stem
 
     # --- backend pre-flight + environment ---
     problems = backend_problems(cfg)

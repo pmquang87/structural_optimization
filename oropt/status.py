@@ -18,7 +18,7 @@ import csv
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -168,7 +168,9 @@ def pid_alive(pid: Optional[int]) -> bool:
         # OpenProcess succeeding only proves the kernel object still exists; a
         # handle held elsewhere (e.g. the parent/GUI) keeps it alive after the
         # process has exited. Query the exit code to tell a live process apart
-        # from an exited-but-lingering one.
+        # from an exited-but-lingering one. Caveat: a process that genuinely exits
+        # with code 259 (== STILL_ACTIVE) is indistinguishable from a running one
+        # here — accepted, as our runs never exit with that code.
         try:
             code = wintypes.DWORD()
             if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
