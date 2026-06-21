@@ -122,7 +122,7 @@ class Beso:
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid (cylinder) node
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group (model.bc_group_id). False -> they may be deleted; the BC nodes stay fixed via their /BCS and still anchor connectivity
     archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default; see README disk cost)
-    archive_restart: bool = True       # when archiving, also copy the ~345 MB restart (<stem>*.rst) into iter_NNNN/ -> full per-iteration solver state (on by default; large)
+    archive_restart: bool = False      # when archiving, also copy the ~345 MB restart (<stem>*.rst) into iter_NNNN/ -> full per-iteration solver state. OFF by default: ~345 MB/iter would be ~50 GB over a 150-iter run; opt in when you need replayable solver state
 
 
 @dataclass
@@ -156,7 +156,7 @@ class LevelSet:
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid node
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
     archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
-    archive_restart: bool = True       # when archiving, also copy the restart (.rst) (on by default; large)
+    archive_restart: bool = False      # when archiving, also copy the restart (.rst). OFF by default (~345 MB/iter); opt in for replayable solver state
     # --- level-set specific ---
     dt: float = 1.0                  # pseudo-time step for the phi evolution
     smoothing_passes: int = 3        # Laplacian/Jacobi smoothing passes per iteration (regularisation)
@@ -203,7 +203,7 @@ class TobsOpts:
     contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid node
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
     archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
-    archive_restart: bool = True       # when archiving, also copy the restart (.rst) (on by default; large)
+    archive_restart: bool = False      # when archiving, also copy the restart (.rst). OFF by default (~345 MB/iter); opt in for replayable solver state
     # --- TOBS specific ---
     flip_limit: float = 0.05         # beta: max fraction of elements flipped per ILP step (Sum|dx| <= beta*N)
     constraint_relaxation: float = 0.01  # epsilon: relaxation band (x V0) on the linearised volume constraint
@@ -222,8 +222,10 @@ class D3plotOpts:
     """
     enabled: bool = True
     # Folder containing the ``vortex_radioss`` package (the openradioss_tools repo
-    # root); placed on the converter subprocess's ``sys.path``.
-    tool_root: str = r"C:\Users\pmqua\PycharmProjects\openradioss_tools"
+    # root); placed on the converter subprocess's ``sys.path``. Blank -> the
+    # ``OROPT_VORTEX_ROOT`` environment variable (so the default config stays
+    # portable across machines instead of hard-coding one user's checkout).
+    tool_root: str = ""
     # Interpreter that has lasso-python/tqdm installed. Blank -> ``<tool_root>/
     # .venv`` if present, else the interpreter running oropt.
     python_exe: str = ""
@@ -481,6 +483,16 @@ class Config:
             encoding="utf-8",
         )
 
+    @staticmethod
+    def read_yaml_dict(path: str | Path) -> dict:
+        """The raw mapping parsed from *path* (``{}`` for an empty file).
+
+        Exposed so callers can validate the *as-written* config (e.g. flag
+        unrecognised keys via :func:`unknown_keys`) before they are silently
+        dropped by :meth:`from_dict`.
+        """
+        return yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+
     # ---- optimiser selection ----------------------------------------------
     def optimizer_name(self) -> str:
         """Normalised optimiser selector: ``"beso"``, ``"levelset"`` or ``"tobs"``."""
@@ -545,3 +557,65 @@ class Config:
         p = Path(self.run_folder()).resolve()
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+
+def _field_names(klass) -> set[str]:
+    return {f.name for f in dataclasses.fields(klass)}
+
+
+def _section_types() -> dict[str, type]:
+    """``{section name: dataclass}`` for every nested-dataclass field of Config.
+
+    Derived from Config's own fields (each section is a ``field(default_factory=
+    <DataclassType>)``) so it can never drift out of sync with :meth:`Config.from_dict`
+    as sections are added. Scalar fields (``optimizer``, ``work_dir``) and the
+    ``load_cases`` list are not dataclass sections and are handled separately.
+    """
+    out: dict[str, type] = {}
+    for f in dataclasses.fields(Config):
+        factory = f.default_factory  # type: ignore[misc]
+        if factory is not dataclasses.MISSING:
+            inst = factory()
+            if dataclasses.is_dataclass(inst):
+                out[f.name] = type(inst)
+    return out
+
+
+def unknown_keys(data: dict) -> list[str]:
+    """Config keys in the raw mapping *data* that :meth:`Config.from_dict` ignores.
+
+    :meth:`Config.from_dict` silently drops any key it does not recognise, so a
+    typo (``evolution_ratte``) or a knob placed under the wrong section reverts to
+    the default — an expensive surprise on a multi-hour run. This walks *data*
+    against the known schema (top-level sections/scalars, each section's fields,
+    and the ``load_cases`` / ``animate.custom_views`` lists) and returns a
+    dotted-path name for every unrecognised key, so validation can warn about them.
+    """
+    if not isinstance(data, dict):
+        return []
+    sections = _section_types()
+    out: list[str] = []
+
+    top_known = set(sections) | {"load_cases", "optimizer", "work_dir"}
+    out.extend(k for k in data if k not in top_known)
+
+    for name, klass in sections.items():
+        sub = data.get(name)
+        if isinstance(sub, dict):
+            known = _field_names(klass)
+            out.extend(f"{name}.{k}" for k in sub if k not in known)
+
+    def _list_of(parent_key: str, items, klass) -> None:
+        if isinstance(items, list):
+            known = _field_names(klass)
+            for i, row in enumerate(items):
+                if isinstance(row, dict):
+                    out.extend(f"{parent_key}[{i}].{k}"
+                               for k in row if k not in known)
+
+    _list_of("load_cases", data.get("load_cases"), LoadCase)
+    anim = data.get("animate")
+    if isinstance(anim, dict):
+        _list_of("animate.custom_views", anim.get("custom_views"), CustomView)
+
+    return out

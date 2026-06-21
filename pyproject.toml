@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["streamlit>=1.30", "stpyvista>=0.0.10"]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff>=0.6"]
 
 [project.scripts]
 oropt = "oropt.run:main"
@@ -30,3 +30,18 @@ packages = ["oropt", "oropt.gui"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100          # the codebase favours long, descriptive comment lines
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+# Pyflakes (F) catches the real drift — unused imports/vars, undefined names,
+# f-strings without placeholders — plus the safe pycodestyle error classes.
+# E501 (line length) is intentionally off: the explanatory comments run long.
+select = ["E4", "E7", "E9", "F", "W"]
+ignore = [
+    "E741",   # short axis names (l/x/y) read fine in this maths code
+    "E702",   # compact paired statements (a = ...; a[0] = ...) are idiomatic here
+]

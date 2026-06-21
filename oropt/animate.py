@@ -29,12 +29,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
+from ._render import run_render
 from .config import AnimateOpts, Config
 
 ANIM_GIF = "topology_evolution.gif"
@@ -222,21 +222,13 @@ def _render_frames(frames: list[Path], opts: AnimateOpts, tmp: Path,
     }
     spec_path = tmp / "anim_spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
-    cmd = [sys.executable, "-c", _RENDER_RUNNER, str(spec_path)]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=float(opts.render_timeout_s))
-    except subprocess.TimeoutExpired:
-        log(f"[oropt] animate: render timed out after {opts.render_timeout_s:.0f}s "
-            "- skipped")
-        return None
-    except OSError as exc:
-        log(f"[oropt] animate: could not launch renderer: {exc} - skipped")
-        return None
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        log(f"[oropt] animate: off-screen render failed (rc={proc.returncode}): "
-            f"{detail[-1] if detail else 'no output'} - skipped")
+    result = run_render(_RENDER_RUNNER, [spec_path], float(opts.render_timeout_s))
+    if not result.ok:
+        if result.returncode is None:                 # timed out / could not launch
+            log(f"[oropt] animate: {result.detail} - skipped")
+        else:
+            log(f"[oropt] animate: off-screen render failed "
+                f"(rc={result.returncode}): {result.detail} - skipped")
         return None
     written = [p for p in pngs if p.is_file()]
     if len(written) < 2:

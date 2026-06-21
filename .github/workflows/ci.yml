@@ -30,5 +30,8 @@ jobs:
       - name: Install package and test deps
         run: pip install -e ".[gui,dev]"
 
+      - name: Lint (ruff)
+        run: ruff check oropt tests run_gui.py
+
       - name: Run tests
         run: pytest -q

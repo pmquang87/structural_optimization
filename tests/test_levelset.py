@@ -70,11 +70,12 @@ def test_step_drives_volume_down_to_target():
     ls = _ls(mesh, protected)
     sens = np.linspace(1.0, 0.1, 12)                 # spatially varying energy
 
-    vf = ls.volume_fraction(np.ones(12, bool))
+    alive = np.ones(12, bool)
+    vf = ls.volume_fraction(alive)
     assert vf == 1.0
     prev = vf
     for target in (0.75, 0.5, 0.25):
-        alive = ls.update(np.ones(12, bool) if prev == 1.0 else alive, sens, target)
+        alive = ls.update(alive, sens, target)         # successively shrink the design
         vf = ls.volume_fraction(alive)
         assert vf <= prev + 1e-9                      # monotone (never grows past)
         assert vf <= target + 1e-9                    # bisection keeps volume <= target

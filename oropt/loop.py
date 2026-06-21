@@ -156,7 +156,8 @@ def run_optimization(cfg: Config, resume: bool = False,
 
     (work / "stop.flag").unlink(missing_ok=True)   # ignore any stale stop request
     if should_stop is None:                          # GUI "Stop" drops a stop.flag
-        should_stop = lambda: (work / "stop.flag").exists()
+        def should_stop() -> bool:
+            return (work / "stop.flag").exists()
 
     # Run-level knobs shared by both optimisers (protect_*, archive_*, max_iter,
     # convergence_*, target_volume_fraction) come from the selected optimiser's

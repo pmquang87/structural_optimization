@@ -1,6 +1,5 @@
 """parse_vtk: filter design part + active elements, read fields and displacement."""
 import numpy as np
-import pytest
 
 from oropt.results import parse_vtk
 

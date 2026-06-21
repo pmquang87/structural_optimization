@@ -21,14 +21,13 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import math
-import subprocess
-import sys
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import status as st
+from ._render import run_render
 from .config import Config
 
 REPORT_HTML = "report.html"
@@ -274,22 +273,17 @@ def _render_topology(work: Path, timeout_s: float,
         return None
     dest = Path(work) / TOPOLOGY_PNG
     dest.unlink(missing_ok=True)        # don't mistake a stale PNG for a fresh one
-    cmd = [sys.executable, "-c", _RENDER_RUNNER, str(src), str(dest)]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout_s)
-    except subprocess.TimeoutExpired:
+    result = run_render(_RENDER_RUNNER, [src, dest], timeout_s)
+    if result.ok and dest.is_file():
+        return dest
+    if result.timed_out:
         log(f"[oropt] report: topology render timed out after {timeout_s:.0f}s "
             "- linking files")
-        return None
-    except OSError as exc:
-        log(f"[oropt] report: could not launch renderer: {exc} - linking files")
-        return None
-    if proc.returncode == 0 and dest.is_file():
-        return dest
-    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-    log(f"[oropt] report: off-screen render failed (rc={proc.returncode}): "
-        f"{detail[-1] if detail else 'no output'} - linking files")
+    elif result.returncode is None:
+        log(f"[oropt] report: {result.detail} - linking files")
+    else:
+        log(f"[oropt] report: off-screen render failed (rc={result.returncode}): "
+            f"{result.detail} - linking files")
     return None
 
 

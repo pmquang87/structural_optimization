@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from oropt.config import Config, DEFAULT_WORK_SUBDIR
+from oropt.config import Config, DEFAULT_WORK_SUBDIR, unknown_keys
 
 
 def test_run_folder_defaults_to_work_subdir_inside_case_dir():
@@ -69,11 +69,41 @@ def test_work_falls_back_to_work_subdir_and_creates_it(tmp_path):
 def test_archive_iterations_flag_default_on_and_roundtrips(tmp_path):
     cfg = Config()
     assert cfg.beso.archive_iterations is True          # on by default
-    assert cfg.beso.archive_restart is True             # restart kept too
+    assert cfg.beso.archive_restart is False            # ~345 MB/iter -> opt-in
     cfg.beso.archive_iterations = False
+    cfg.beso.archive_restart = True
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)
-    assert Config.from_yaml(p).beso.archive_iterations is False
+    back = Config.from_yaml(p)
+    assert back.beso.archive_iterations is False
+    assert back.beso.archive_restart is True            # roundtrips when opted in
+
+
+def test_archive_restart_default_off_for_every_optimiser():
+    cfg = Config()
+    assert cfg.beso.archive_restart is False
+    assert cfg.levelset.archive_restart is False
+    assert cfg.tobs.archive_restart is False
+
+
+def test_unknown_keys_flags_typos_and_misplaced_knobs():
+    data = {
+        "optimizer": "beso",
+        "bogus_top": 1,                       # unknown top-level key
+        "beso": {"evolution_rate": 0.02, "evolution_ratte": 0.05},  # typo
+        "model": {"stem": "demo"},            # all-known section -> nothing
+        "load_cases": [{"name": "a", "stem": "lc_a", "whoops": 1}],
+        "animate": {"custom_views": [{"name": "v", "nope": 2}]},
+    }
+    keys = set(unknown_keys(data))
+    assert keys == {"bogus_top", "beso.evolution_ratte",
+                    "load_cases[0].whoops", "animate.custom_views[0].nope"}
+
+
+def test_unknown_keys_empty_for_serialised_config():
+    # everything Config.to_yaml writes must be a recognised key (no false positives)
+    from dataclasses import asdict
+    assert unknown_keys(asdict(Config())) == []
 
 
 def test_protect_bc_and_smooth_defaults_and_roundtrip(tmp_path):

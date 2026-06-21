@@ -95,13 +95,19 @@ def parse_vtk(vtk_path: Path, design_part_id: int,
                    sigma_max=sigma_max, disp=disp, disp_node_id=disp_node_id)
 
 
-def extract(cfg: Config, run_dir: str | Path, keep_vtk: bool = False) -> Results:
-    """Convert the latest animation in *run_dir* and parse it into Results."""
+def extract(cfg: Config, run_dir: str | Path, keep_vtk: bool = False,
+            stem: Optional[str] = None) -> Results:
+    """Convert the latest animation in *run_dir* and parse it into Results.
+
+    *stem* selects which case's animation/VTK to read, defaulting to
+    ``cfg.model.stem`` (the multi-load-case loop passes a per-case stem).
+    """
     run_dir = Path(run_dir)
-    anim = find_last_anim(run_dir, cfg.model.stem)
+    stem = stem if stem is not None else cfg.model.stem
+    anim = find_last_anim(run_dir, stem)
     if anim is None:
-        raise FileNotFoundError(f"no animation file <{cfg.model.stem}A0NN> in {run_dir}")
-    out_vtk = run_dir / f"{cfg.model.stem}_last.vtk"
+        raise FileNotFoundError(f"no animation file <{stem}A0NN> in {run_dir}")
+    out_vtk = run_dir / f"{stem}_last.vtk"
     run_anim_to_vtk(cfg, anim, out_vtk)
     res = parse_vtk(out_vtk, cfg.model.design_part_id, cfg.model.disp_node_id)
     if not keep_vtk:
