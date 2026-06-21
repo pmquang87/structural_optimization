@@ -14,10 +14,6 @@ from typing import Optional
 import yaml
 
 
-# Default run/output sub-folder created *inside* the case directory when
-# ``work_dir`` is left blank — keeps per-run scratch/status/checkpoints out of
-# the source deck folder while staying right next to it.
-DEFAULT_WORK_SUBDIR = "work"
 
 
 @dataclass
@@ -442,9 +438,8 @@ class Config:
     # via ``active_opts()``.
     optimizer: str = "beso"
     # Run/output folder: per-iteration scratch + checkpoints + status files. Leave
-    # blank to default to a ``work/`` sub-folder *inside* the input deck folder
-    # (``model.case_dir``); set a path (e.g. ``runs/run01``) to put outputs
-    # elsewhere.
+    # blank to default to the input deck folder (``model.case_dir``) itself; set a
+    # path (e.g. ``runs/run01``) to put outputs elsewhere.
     work_dir: str = ""
 
     # ---- (de)serialisation -------------------------------------------------
@@ -542,16 +537,16 @@ class Config:
     def run_folder(self) -> str:
         """The configured run/output folder *as written* (may be relative).
 
-        Falls back to a ``work/`` sub-folder *inside* the input deck folder
-        (``model.case_dir``) when ``work_dir`` is blank, so by default a run keeps
-        its scratch/status/checkpoints out of the source deck folder while staying
-        next to it. The mutated deck still goes to ``<run_folder>/solve/`` — a
-        further sub-folder — so the source decks are never clobbered.
+        Falls back to the input deck folder (``model.case_dir``) itself when
+        ``work_dir`` is blank, so by default a run writes its status/history/
+        topology right next to the decks it was built from. The mutated deck still
+        goes to ``<run_folder>/solve/`` — a sub-folder — so the source decks are
+        never clobbered.
         """
         wd = (self.work_dir or "").strip()
         if wd:
             return wd
-        return str(Path(self.model.case_dir) / DEFAULT_WORK_SUBDIR)
+        return str(Path(self.model.case_dir))
 
     def work(self) -> Path:
         p = Path(self.run_folder()).resolve()
