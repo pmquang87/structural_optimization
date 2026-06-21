@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 # 5 design nodes (two tets sharing a face) + 1 rigid node; node 60000001 sits in

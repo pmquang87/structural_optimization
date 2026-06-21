@@ -82,7 +82,7 @@ def test_symmetry_makes_mask_mirror_symmetric():
     # "either alive => both alive": element 0 (x=-2) pulls its mirror 3 (x=+2) on
     assert out.tolist() == [True, False, False, True]
     # the pair (1, 2) was both dead -> stays dead (no over-removal, no over-add)
-    assert out[1] == out[2] == False
+    assert not out[1] and not out[2]
 
 
 def test_symmetry_offset_plane():
