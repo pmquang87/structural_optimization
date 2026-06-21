@@ -146,6 +146,15 @@ def run_optimization(cfg: Config, resume: bool = False,
     solve_root = work / "solve"
     m = cfg.model
 
+    # Snapshot the exact config this run uses into its own run folder (which is the
+    # case_dir when work_dir is blank, or the queue's per-run --work-dir folder), so
+    # every result set carries the config that produced it. Best-effort: a write
+    # failure is logged, never fatal.
+    try:
+        cfg.to_yaml(work / "config_used.yaml")
+    except Exception as exc:  # noqa: BLE001
+        log(f"[oropt] could not write config_used.yaml: {exc}")
+
     (work / "stop.flag").unlink(missing_ok=True)   # ignore any stale stop request
     if should_stop is None:                          # GUI "Stop" drops a stop.flag
         def should_stop() -> bool:

@@ -296,6 +296,20 @@ def test_multi_case_archives_every_case_each_iteration(case_env, monkeypatch):
     assert "lc_b_0000.rad" in names
 
 
+def test_run_writes_config_snapshot_into_run_folder(case_env, monkeypatch):
+    """run_optimization drops a config_used.yaml in the run folder so every result
+    set carries the exact config that produced it (reproducible from its folder)."""
+    case_dir, out = case_env(("lc_a",))
+    cfg = _cfg(case_dir, out, "lc_a", [])
+    _stub_solver(monkeypatch,
+                 {"lc_a": _results(100.0, 0.1, energy=[1.0, 0.0])}, calls=[])
+    loop_mod.run_optimization(cfg, log=lambda *_: None)
+
+    snap = cfg.work() / "config_used.yaml"
+    assert snap.is_file()
+    assert Config.from_yaml(snap).model.stem == "lc_a"      # round-trips
+
+
 def test_multi_case_converts_d3plot_for_every_case(case_env, monkeypatch):
     """Post-run d3plot conversion runs once per load case, each keyed to its own
     stem and its own solve sub-dir."""
