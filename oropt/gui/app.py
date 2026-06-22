@@ -46,9 +46,9 @@ st.set_page_config(page_title="oropt — OpenRadioss BESO", layout="wide")
 
 # ---- run control -----------------------------------------------------------
 def launch_run(cfg_path: Path, resume: bool) -> None:
-    # Reuse the queue runner's detached-launch helpers so the single ▶ Start and a
-    # queued run share one definition of "launch oropt.run detached" (same command,
-    # same CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS flags) — no drift.
+    # Reuse the queue runner's detached-launch helpers so ↻ Resume and a queued run
+    # share one definition of "launch oropt.run detached" (same command, same
+    # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS flags) — no drift.
     queue_runner.spawn_detached(
         queue_runner.run_argv(cfg_path, resume), PROJECT_ROOT)
 
@@ -151,7 +151,7 @@ def render_load_cases_tab(cfg: Config) -> None:
             f"{len(cfg.load_cases)} load case(s): every iteration solves all of "
             "them (≈ N× a single-case run, each under `solve/case_<i>/`); the "
             "design is feasible only when **every** case is. Save the config "
-            "(Constraints / BC tab) or ▶ Start to apply.")
+            "(Constraints / BC tab) or ➕ Add to queue to apply.")
     else:
         st.info("No load cases — the run uses the single model deck (classic "
                 "single-load BESO). Add a row above to optimise several loads.")
@@ -411,8 +411,8 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
         st.caption(f"📂 monitoring `{work}`")     # which run folder this view reads
         status = st_io.read_status(work)
         if status is None:
-            st.info("No run here yet. Configure on the other tabs, then ▶ Start "
-                    "(or start the queue).")
+            st.info("No run here yet. Configure on the other tabs, then "
+                    "➕ Add to queue and ▶ Start queue.")
             return
 
         feas = "✅ feasible" if status.feasible else "⚠️ infeasible"
@@ -639,7 +639,8 @@ else:
 st.sidebar.markdown(f"**Run state:** {run_state}")
 
 # Fail-fast config check: same validation the headless run does, surfaced before
-# launch. Hard errors block ▶ Start (the run could not or must not start anyway).
+# launch. Hard errors block enqueuing the config (a queued run could not or must
+# not start anyway).
 problems = check_config(cfg, raw=cfg_raw)
 cfg_errors = has_errors(problems)
 if problems:
@@ -650,44 +651,42 @@ if problems:
         for p in problems:
             (st.error if p.severity == ERROR else st.warning)(p.message)
         if cfg_errors:
-            st.caption("Fix the errors above to enable ▶ Start.")
+            st.caption("Fix the errors above to enable ➕ Add to queue.")
 
-c1, c2, c3 = st.sidebar.columns(3)
-if c1.button("▶ Start", disabled=running or cfg_errors, width="stretch"):
-    cfg.to_yaml(cfg_path)
-    launch_run(cfg_path, resume=False)
-    st.sidebar.success("Launched.")
-# Stop / Force kill target the live run's folder (the selected config's, or the
-# queued run's reserved one), so they act on whatever Run state shows as running.
-if c2.button("⏸ Stop", disabled=not running, width="stretch"):
+# Ad-hoc single-run launching was removed: a run is started *only* via the queue
+# (➕ Add current config to queue → ▶ Start queue, below). Stop / Resume / Force
+# kill act on whatever Run state shows as live (a queued run, or one launched
+# earlier), so they stay; they target the live run's folder and don't touch `cfg`.
+c1, c2 = st.sidebar.columns(2)
+if c1.button("⏸ Stop", disabled=not running, width="stretch"):
     request_stop(live_dir)
     st.sidebar.info("Stop requested (after current solve).")
-if c3.button("↻ Resume", disabled=running, width="stretch"):
-    launch_run(cfg_path, resume=True)
+if c2.button("↻ Resume", disabled=running, width="stretch"):
+    launch_run(cfg_path, resume=True)   # resumes the selected config's run from checkpoint
     st.sidebar.success("Resumed.")
 if st.sidebar.button("⏹ Force kill", disabled=not running):
     force_kill(live_dir)
 
 refresh_s = int(st.sidebar.number_input(
-    "Refresh interval (s)", min_value=1, max_value=3600, value=60, step=5,
-    help="How often the Monitor tab re-reads the run's status files."))
+    "Refresh interval (s)", min_value=120, max_value=300, value=120, step=5,
+    help="How often the Monitor tab re-reads the run's status files "
+         "(default 120s; increase up to 300s to ease the polling load)."))
 
-# ---- sidebar: run queue (serial) ------------------------------------------
-# Quick add/start/pause; full management lives in the 🧮 Queue tab. The queue is
-# additive — it reuses the same detached-run launch path one run at a time and
-# never touches the single ▶ Start flow above. (`queue` was loaded above for the
-# run-state sync.)
+# ---- sidebar: run queue (serial) — the only way to start a run ------------
+# Add/start/pause; full management lives in the 🧮 Queue tab. The detached serial
+# runner launches one run at a time. (`queue` was loaded above for the run-state
+# sync.)
 runner_alive = bool(queue.runner_pid) and st_io.pid_alive(queue.runner_pid)
 qcounts = qs.counts(queue)
 st.sidebar.markdown("---")
 queue_state = ("🟢 runner active" if runner_alive
                else "⏸ paused" if queue.paused else "⚪ idle")
 st.sidebar.markdown(f"**Run queue:** {qcounts['pending']} pending · {queue_state}")
-if st.sidebar.button("➕ Add current config to queue", width="stretch"):
-    qs.mutate(QUEUE_PATH, lambda q: qs.add(
-        q, str(cfg_path), resume=False,
-        work_dir=qs.resolve_work_dir(cfg_path, PROJECT_ROOT)))
-    st.rerun()
+# Captured here but enqueued *after* the tabs populate `cfg`: a queued run reads the
+# on-disk config at run time, so the current edits must be saved first or the queued
+# run ignores them (e.g. the chosen optimiser). Blocked on config errors.
+add_to_queue_clicked = st.sidebar.button("➕ Add current config to queue",
+                                         width="stretch", disabled=cfg_errors)
 qcol = st.sidebar.columns(2)
 if qcol[0].button("▶ Start queue", width="stretch",
                   disabled=runner_alive or qcounts["pending"] == 0):
@@ -711,3 +710,15 @@ with tab_mon:
     render_monitor_tab(cfg, live_dir, refresh_s)   # follow the live run's folder
 with tab_q:
     render_queue_tab(cfg_path)
+
+# ---- deferred enqueue action -----------------------------------------------
+# Handled here, now that every tab above has written its widgets back into `cfg`,
+# so enqueuing persists the *on-screen* config (incl. the selected optimiser)
+# rather than the stale on-disk one. The button renders in the sidebar above; only
+# its cfg-dependent effect is deferred to this point.
+if add_to_queue_clicked:
+    cfg.to_yaml(cfg_path)
+    qs.mutate(QUEUE_PATH, lambda q: qs.add(
+        q, str(cfg_path), resume=False,
+        work_dir=qs.resolve_work_dir(cfg_path, PROJECT_ROOT)))
+    st.rerun()

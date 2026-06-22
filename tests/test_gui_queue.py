@@ -312,3 +312,48 @@ def test_app_renders_with_queue_tab(tmp_path):
     at.run()
     assert not at.exception
     assert any("Queue" in t.label for t in at.tabs)
+
+
+def test_enqueue_persists_current_optimiser_selection(tmp_path, monkeypatch):
+    """Regression: a run is started only via the queue, and picking an optimiser in
+    a tab then clicking ➕ Add to queue must enqueue *that* optimiser. The sidebar
+    action used to persist the config before the tabs wrote their widgets back into
+    it, so a TOBS selection was silently enqueued/launched as BESO. Also guards that
+    the ad-hoc ▶ Start button is gone (queue is the only launch path)."""
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+
+    # Don't touch the real project queue; don't let config validation disable the
+    # ➕ Add to queue button.
+    enqueued: list = []
+    monkeypatch.setattr(qs, "mutate", lambda path, fn: enqueued.append(str(path)))
+    monkeypatch.setattr("oropt.validate.check_config", lambda *a, **k: [])
+
+    cfg = Config()
+    cfg.model.case_dir = str(tmp_path)
+    cfg.work_dir = str(tmp_path / "work")
+    cfg.optimizer = "beso"                       # the on-disk default
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg.to_yaml(cfg_path)
+
+    app_file = Path(oropt.__file__).resolve().parent / "gui" / "app.py"
+    at = AppTest.from_file(str(app_file), default_timeout=30)
+    at.run()
+    at.sidebar.text_input[0].set_value(str(cfg_path)).run()   # point at our config
+    assert not at.exception
+
+    # the ad-hoc single-run launcher is gone — only the queue's ▶ Start queue remains
+    labels = [b.label for b in at.sidebar.button]
+    assert "▶ Start" not in labels and "▶ Start queue" in labels
+
+    # pick TOBS in the optimiser selectbox (rendered in the Constraints/BC tab)
+    sb = next(s for s in at.selectbox if s.label == "Topology optimiser")
+    sb.set_value("tobs").run()
+    assert not at.exception
+
+    # ➕ Add current config to queue -> must persist the on-screen TOBS selection
+    add = next(b for b in at.sidebar.button
+               if b.label == "➕ Add current config to queue")
+    add.click().run()
+    assert not at.exception
+    assert Config.from_yaml(cfg_path).optimizer == "tobs"     # saved what's on screen
+    assert enqueued, "➕ Add to queue did not enqueue the run"
