@@ -3,9 +3,10 @@ the Pillow encode. Hermetic — never invokes the GL-dependent off-screen render
 (its frames are synthesised as plain PNGs), mirroring test_report.py."""
 from __future__ import annotations
 
+import oropt.animate as anim
 from oropt.animate import (
     ANIM_GIF, VIEWS, _encode_gif, _frame_sources, _label_for, _resolve_camera,
-    _resolve_view, make_animation, selectable_views)
+    _resolve_view, frame_count, main, make_animation, selectable_views)
 from oropt.config import AnimateOpts, Config, CustomView
 
 
@@ -113,6 +114,15 @@ def test_frame_sources_empty_when_nothing(tmp_path):
     assert _frame_sources(tmp_path) == []
 
 
+def test_frame_count_reports_number_and_kind(tmp_path):
+    assert frame_count(tmp_path) == (0, "")          # nothing yet
+    for it in range(3):
+        _touch(tmp_path, f"topology_smoothed_iter{it:04d}.stl")
+    assert frame_count(tmp_path) == (3, "stl")       # smoothed surfaces preferred
+    _touch(tmp_path, "extra.vtu")                    # not a frame source -> ignored
+    assert frame_count(tmp_path) == (3, "stl")
+
+
 def test_label_for_parses_iteration():
     assert _label_for(_P("topology_smoothed_iter0007.stl")) == "iter 7"
     assert _label_for(_P("topology_iter0042.vtu")) == "iter 42"
@@ -153,3 +163,43 @@ def test_encode_gif_writes_valid_multiframe_gif(tmp_path):
     gif = Image.open(dest)
     assert gif.format == "GIF"
     assert getattr(gif, "n_frames", 1) == 3
+
+
+# --- re-animate: custom output name (GL-free via a faked frame render) ------- #
+def _fake_render_frames(monkeypatch):
+    """Patch the GL-dependent frame render to synthesise plain PNGs instead, so
+    the rest of make_animation (frame globbing, encode, naming) runs hermetically."""
+    from PIL import Image
+
+    def fake(frames, opts, tmp, log):
+        pngs = []
+        for i in range(len(frames)):
+            p = tmp / f"frame_{i:04d}.png"
+            Image.new("RGB", (8, 8), (i * 40, i * 40, i * 40)).save(p)
+            pngs.append(p)
+        return pngs
+    monkeypatch.setattr(anim, "_render_frames", fake)
+
+
+def test_make_animation_writes_custom_out_name(tmp_path, monkeypatch):
+    _touch(tmp_path, "topology_iter0000.vtu")        # >=2 frame sources so it renders
+    _touch(tmp_path, "topology_iter0001.vtu")
+    _fake_render_frames(monkeypatch)
+    out = make_animation(Config(), tmp_path, lambda *_: None,
+                         out_name="topology_evolution_reanim.gif")
+    assert out == tmp_path / "topology_evolution_reanim.gif" and out.is_file()
+    assert not (tmp_path / ANIM_GIF).exists()        # the run's original is untouched
+
+
+def test_cli_out_flag_passes_through(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def fake_make(cfg, work, log, *, out_name=ANIM_GIF):
+        captured.update(out_name=out_name, fps=cfg.animate.fps,
+                        w=cfg.animate.window_w, bg=cfg.animate.background)
+        return work / out_name
+    monkeypatch.setattr(anim, "make_animation", fake_make)
+    rc = main([str(tmp_path), "--out", "my.gif", "--fps", "10",
+               "--window-w", "640", "--background", "black"])
+    assert rc == 0
+    assert captured == {"out_name": "my.gif", "fps": 10.0, "w": 640, "bg": "black"}
