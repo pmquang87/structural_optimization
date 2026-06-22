@@ -22,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import time
 import uuid
 from contextlib import contextmanager
@@ -39,6 +40,9 @@ ACTIVE_STATES = (PENDING, RUNNING)        # still occupy a work dir
 FINISHED_STATES = (DONE, FAILED, SKIPPED)
 
 QUEUE_FILENAME = "run_queue.json"
+# Sub-folder (under the model's case directory) holding the immutable per-run
+# config snapshots a queued run is launched from. See :func:`snapshot_config`.
+QUEUE_CONFIG_DIRNAME = "queue_configs"
 
 
 @dataclass
@@ -280,6 +284,49 @@ def duplicate_work_dirs(q: RunQueue) -> set[str]:
                 dup.add(e.work_dir)
             seen.add(key)
     return dup
+
+
+def snapshot_config(source_path: str | Path,
+                    dest_dir: str | Path | None = None) -> str:
+    """Copy *source_path* to an immutable per-run snapshot and return its path.
+
+    A queued run is launched from this frozen copy, never the working config, so a
+    later edit to the original (or another enqueue that re-saves it) can't change a
+    run already sitting in the queue — what you see when you add it is what runs.
+    The copy lands in *dest_dir* (the GUI passes the model's case directory; falls
+    back to a ``queue_configs/`` folder beside the source) under a unique
+    ``<stem>_<id><suffix>`` name. It is a faithful *byte* copy (not a
+    :class:`~oropt.config.Config` round-trip) so nothing in the file is normalised
+    or dropped.
+    """
+    src = Path(source_path)
+    d = Path(dest_dir) if dest_dir is not None else src.parent / QUEUE_CONFIG_DIRNAME
+    d.mkdir(parents=True, exist_ok=True)
+    snap = d / f"{src.stem}_{new_id()}{src.suffix or '.yaml'}"
+    shutil.copyfile(src, snap)
+    return str(snap)
+
+
+def resolve_case_dir(config_path: str | Path, project_root: str | Path) -> str:
+    """Absolute model case directory a config points at (``model.case_dir``).
+
+    Resolved like the run folder (relative paths against *project_root*, since runs
+    launch with that cwd); a blank/default ``"."`` resolves to *project_root*. Blank
+    on a bad/missing config. The queue stores each run's frozen config snapshot here
+    so it travels with the model/case data rather than the working config's folder.
+    """
+    from oropt.config import Config
+    try:
+        cfg = Config.from_yaml(config_path)
+    except Exception:  # noqa: BLE001 - any read/parse error -> case dir unknown
+        return ""
+    c = Path(cfg.model.case_dir or ".")
+    if not c.is_absolute():
+        c = Path(project_root) / c
+    try:
+        return str(c.resolve())
+    except OSError:
+        return str(c)
 
 
 def resolve_work_dir(config_path: str | Path, project_root: str | Path) -> str:

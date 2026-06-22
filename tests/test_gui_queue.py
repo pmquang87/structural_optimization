@@ -145,6 +145,48 @@ def test_resolve_work_dir_missing_config_is_blank(tmp_path):
     assert qs.resolve_work_dir(tmp_path / "nope.yaml", tmp_path) == ""
 
 
+def test_resolve_case_dir_blank_relative_absolute_and_missing(tmp_path):
+    cfg = Config()
+    p = tmp_path / "c.yaml"
+    cfg.model.case_dir = "."                             # default -> project root
+    cfg.to_yaml(p)
+    assert qs.resolve_case_dir(p, tmp_path) == str(tmp_path.resolve())
+    cfg.model.case_dir = "decks/run1"                    # relative -> vs project_root
+    cfg.to_yaml(p)
+    assert qs.resolve_case_dir(p, tmp_path) == str((tmp_path / "decks" / "run1").resolve())
+    cfg.model.case_dir = str(tmp_path / "abs_case")      # absolute -> verbatim
+    cfg.to_yaml(p)
+    assert qs.resolve_case_dir(p, tmp_path) == str((tmp_path / "abs_case").resolve())
+    assert qs.resolve_case_dir(tmp_path / "nope.yaml", tmp_path) == ""
+
+
+# ---- config snapshot (frozen copy a queued run launches from) --------------
+def test_snapshot_config_is_a_faithful_frozen_unique_copy(tmp_path):
+    src = tmp_path / "cfg.yaml"
+    src.write_text("optimizer: tobs\nwork_dir: runs/r1\n", encoding="utf-8")
+
+    snap = Path(qs.snapshot_config(src))
+    assert snap != src and snap.is_file()
+    assert snap.parent == tmp_path / qs.QUEUE_CONFIG_DIRNAME
+    assert snap.name.startswith("cfg_") and snap.suffix == ".yaml"
+    assert snap.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+
+    # the whole point: editing the original after enqueue can't change the snapshot
+    src.write_text("optimizer: beso\n", encoding="utf-8")
+    assert "tobs" in snap.read_text(encoding="utf-8")
+
+    # each enqueue gets its own copy (two queued runs never share a frozen config)
+    assert Path(qs.snapshot_config(src)) != snap
+
+
+def test_snapshot_config_honours_explicit_dest_dir(tmp_path):
+    src = tmp_path / "model.yaml"
+    src.write_text("optimizer: beso\n", encoding="utf-8")
+    dest = tmp_path / "frozen"
+    snap = Path(qs.snapshot_config(src, dest))
+    assert snap.parent == dest and snap.is_file()
+
+
 # ---- runner: result classification -----------------------------------------
 def test_classify_from_terminal_status(tmp_path):
     w = tmp_path / "w"
@@ -319,17 +361,22 @@ def test_enqueue_persists_current_optimiser_selection(tmp_path, monkeypatch):
     a tab then clicking ➕ Add to queue must enqueue *that* optimiser. The sidebar
     action used to persist the config before the tabs wrote their widgets back into
     it, so a TOBS selection was silently enqueued/launched as BESO. Also guards that
-    the ad-hoc ▶ Start button is gone (queue is the only launch path)."""
+    the ad-hoc ▶ Start button is gone (queue is the only launch path). Also guards
+    that the entry queued is the frozen *snapshot*, not the working config path."""
     AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
 
-    # Don't touch the real project queue; don't let config validation disable the
-    # ➕ Add to queue button.
-    enqueued: list = []
-    monkeypatch.setattr(qs, "mutate", lambda path, fn: enqueued.append(str(path)))
+    # Don't touch the real project queue (run the add against a throwaway queue so
+    # we can inspect the entry); don't let validation disable the ➕ button.
+    captured: dict = {}
+
+    def fake_mutate(path, fn):
+        captured["entry"] = fn(qs.RunQueue())
+        return captured["entry"]
+    monkeypatch.setattr(qs, "mutate", fake_mutate)
     monkeypatch.setattr("oropt.validate.check_config", lambda *a, **k: [])
 
     cfg = Config()
-    cfg.model.case_dir = str(tmp_path)
+    cfg.model.case_dir = str(tmp_path / "case")  # distinct from the config's folder
     cfg.work_dir = str(tmp_path / "work")
     cfg.optimizer = "beso"                       # the on-disk default
     cfg_path = tmp_path / "cfg.yaml"
@@ -355,5 +402,14 @@ def test_enqueue_persists_current_optimiser_selection(tmp_path, monkeypatch):
                if b.label == "➕ Add current config to queue")
     add.click().run()
     assert not at.exception
-    assert Config.from_yaml(cfg_path).optimizer == "tobs"     # saved what's on screen
-    assert enqueued, "➕ Add to queue did not enqueue the run"
+    assert Config.from_yaml(cfg_path).optimizer == "tobs"     # working config saved on-screen
+    # the queued entry is the frozen snapshot (under queue_configs/), not cfg_path,
+    # and the snapshot itself carries the on-screen TOBS selection.
+    entry = captured.get("entry")
+    assert entry is not None, "➕ Add to queue did not enqueue the run"
+    snap = Path(entry.config)
+    # stored in the model's case directory (not beside the working config) under
+    # queue_configs/, and the snapshot itself froze the on-screen TOBS selection.
+    assert snap.parent == Path(cfg.model.case_dir).resolve() / qs.QUEUE_CONFIG_DIRNAME
+    assert snap != cfg_path
+    assert Config.from_yaml(snap).optimizer == "tobs"

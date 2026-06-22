@@ -60,6 +60,19 @@ def request_stop(work: Path) -> None:
     (work / "stop.flag").write_text("stop", encoding="utf-8")
 
 
+def snapshot_into_case_dir(source: str | Path) -> str:
+    """Freeze *source* as the queue's immutable run config and return its path.
+
+    Stored in the model's case directory (under ``queue_configs/``) so the frozen
+    config travels with the run/case data; falls back to beside the source when the
+    case dir can't be resolved. A queued run is launched from this copy, so later
+    edits to the working config can't change a run already in the queue.
+    """
+    case_dir = qs.resolve_case_dir(source, PROJECT_ROOT)
+    dest = str(Path(case_dir) / qs.QUEUE_CONFIG_DIRNAME) if case_dir else None
+    return qs.snapshot_config(source, dest)
+
+
 def force_kill(work: Path) -> None:
     pid = st_io.read_pid(work)
     if pid and sys.platform == "win32":
@@ -653,7 +666,10 @@ def render_queue_tab(cfg_path: Path) -> None:
         "automatically when the current finishes. The queue lives on disk and "
         "keeps draining after you close the browser — just like a single run. "
         "`is_running` stays the source of truth, so a run already live for a "
-        "config is waited on, never double-launched.")
+        "config is waited on, never double-launched. Each entry runs from a "
+        "**frozen copy** of the config taken when you added it (saved in the "
+        "model's case directory under `queue_configs/`), so later edits to the "
+        "working config never change a run already queued.")
 
     queue = qs.load_queue(QUEUE_PATH)          # re-read (sidebar may have mutated)
     runner_alive = bool(queue.runner_pid) and st_io.pid_alive(queue.runner_pid)
@@ -669,9 +685,12 @@ def render_queue_tab(cfg_path: Path) -> None:
         if not p.exists():
             st.warning(f"Config not found: {new_cfg}")
         else:
+            # Freeze a snapshot now (in the case dir) and queue *that* — later edits
+            # to the source config can't change a run already in the queue.
+            snap = snapshot_into_case_dir(p)
             qs.mutate(QUEUE_PATH, lambda q: qs.add(
-                q, str(p), resume=add_resume,
-                work_dir=qs.resolve_work_dir(p, PROJECT_ROOT)))
+                q, snap, resume=add_resume,
+                work_dir=qs.resolve_work_dir(snap, PROJECT_ROOT)))
             st.rerun()
 
     dups = qs.duplicate_work_dirs(queue)
@@ -707,7 +726,7 @@ def render_queue_tab(cfg_path: Path) -> None:
                 "“➕ Add current config to queue”.")
     last = len(queue.entries) - 1
     for i, e in enumerate(queue.entries):
-        row = st.columns([5, 2, 1, 1, 1, 1])
+        row = st.columns([5, 2, 1, 1, 1])
         label = Path(e.config).name + (" · resume" if e.resume else "")
         detail = f"`{e.config}`"
         if e.work_dir:
@@ -716,50 +735,20 @@ def render_queue_tab(cfg_path: Path) -> None:
             detail += f"  \n_{e.message}_"
         row[0].markdown(f"**{label}**  \n{detail}")
         row[1].markdown(QUEUE_BADGE.get(e.state, e.state))
-        # Only pending entries are editable — never move a live run's folder.
-        editable = e.state == qs.PENDING
+        # Reorder / remove only — entries run from an immutable config snapshot
+        # (see snapshot_config), so there is nothing to edit in place anymore.
         # Capture e.id via default arg so the lambda binds this row, not the last.
-        if row[2].button("✏", key=f"q_edit_{e.id}", disabled=not editable,
-                         help="Edit this run's config / run folder"):
-            st.session_state[f"q_editing_{e.id}"] = not st.session_state.get(
-                f"q_editing_{e.id}", False)
-            st.rerun()
-        if row[3].button("⬆", key=f"q_up_{e.id}", disabled=i == 0,
+        if row[2].button("⬆", key=f"q_up_{e.id}", disabled=i == 0,
                          help="Run earlier"):
             qs.mutate(QUEUE_PATH, lambda q, _id=e.id: qs.move(q, _id, -1))
             st.rerun()
-        if row[4].button("⬇", key=f"q_down_{e.id}", disabled=i == last,
+        if row[3].button("⬇", key=f"q_down_{e.id}", disabled=i == last,
                          help="Run later"):
             qs.mutate(QUEUE_PATH, lambda q, _id=e.id: qs.move(q, _id, +1))
             st.rerun()
-        if row[5].button("✖", key=f"q_rm_{e.id}", help="Remove from queue"):
+        if row[4].button("✖", key=f"q_rm_{e.id}", help="Remove from queue"):
             qs.mutate(QUEUE_PATH, lambda q, _id=e.id: qs.remove(q, _id))
             st.rerun()
-
-        if editable and st.session_state.get(f"q_editing_{e.id}"):
-            with st.container(border=True):
-                ec = st.columns([5, 5, 1])
-                new_config = ec[0].text_input("Config", e.config,
-                                              key=f"q_cfg_{e.id}")
-                new_work = ec[1].text_input(
-                    "Run folder", e.work_dir, key=f"q_wd_{e.id}",
-                    help="Where this run writes. Give each run its own folder so "
-                         "they don't overwrite each other. Blank → the config's "
-                         "own folder (its work_dir, or the case directory).")
-                new_resume = ec[2].checkbox("resume", value=e.resume,
-                                            key=f"q_res_{e.id}")
-                bcol = st.columns([1, 1, 6])
-                if bcol[0].button("💾 Save", key=f"q_save_{e.id}", width="stretch"):
-                    wd = new_work.strip() or qs.resolve_work_dir(
-                        new_config, PROJECT_ROOT)
-                    qs.mutate(QUEUE_PATH, lambda q, _id=e.id, c=new_config,
-                              w=wd, r=new_resume: qs.update_entry(
-                                  q, _id, config=c, work_dir=w, resume=r))
-                    st.session_state[f"q_editing_{e.id}"] = False
-                    st.rerun()
-                if bcol[1].button("Cancel", key=f"q_cancel_{e.id}", width="stretch"):
-                    st.session_state[f"q_editing_{e.id}"] = False
-                    st.rerun()
 
 
 # ---- sidebar: config selection --------------------------------------------
@@ -871,10 +860,13 @@ with tab_q:
 # Handled here, now that every tab above has written its widgets back into `cfg`,
 # so enqueuing persists the *on-screen* config (incl. the selected optimiser)
 # rather than the stale on-disk one. The button renders in the sidebar above; only
-# its cfg-dependent effect is deferred to this point.
+# its cfg-dependent effect is deferred to this point. We save the working config,
+# then freeze an immutable snapshot and queue *that* — so later edits to the
+# working config can't change a run already in the queue (it runs what you saw).
 if add_to_queue_clicked:
     cfg.to_yaml(cfg_path)
+    snap = snapshot_into_case_dir(cfg_path)        # frozen copy in the case dir
     qs.mutate(QUEUE_PATH, lambda q: qs.add(
-        q, str(cfg_path), resume=False,
-        work_dir=qs.resolve_work_dir(cfg_path, PROJECT_ROOT)))
+        q, snap, resume=False,
+        work_dir=qs.resolve_work_dir(snap, PROJECT_ROOT)))
     st.rerun()
