@@ -506,26 +506,43 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
             d3 = df[["disp"]].copy(); d3["d_allow"] = status.d_allow
             cols[2].caption("disp vs limit"); cols[2].line_chart(d3)
 
-        topo = work / st_io.TOPOLOGY
-        if topo.exists():
-            st.subheader("Current topology")
-            try:
-                import pyvista as pv
-                from stpyvista import stpyvista
-                grid = pv.read(str(topo))
-                scal = "sensitivity" if "sensitivity" in grid.cell_data else None
-                pl = pv.Plotter(window_size=[700, 450], off_screen=True)
-                pl.add_mesh(grid, scalars=scal, cmap="viridis", show_edges=False)
-                pl.view_isometric(); pl.background_color = "white"
-                # backend="panel" renders in-process. The default "trame" backend
-                # exports the scene from a multiprocessing.Process whose spawned
-                # child dies in DuplicateHandle under `streamlit run` on Windows
-                # (and would then hang the parent on queue.get()).
-                stpyvista(pl, backend="panel", key="topo")
-            except Exception as exc:  # noqa: BLE001
-                st.caption(f"(3D view unavailable: {exc})")
-
     monitor()
+
+    # The 3D topology preview lives in its OWN fragment, deliberately *without*
+    # run_every: the Monitor's periodic auto-refresh reruns only the metrics/queue
+    # fragments, so it never re-renders this one — and the panel pane keeps whatever
+    # camera angle the user set instead of snapping back to isometric every refresh.
+    # 🔄 Update view re-reads the latest geometry on demand (which does reset it).
+    @st.fragment
+    def topology_view():
+        topo = work / st_io.TOPOLOGY
+        if not topo.exists():
+            return
+        head = st.columns([3, 1])
+        head[0].subheader("Current topology")
+        # The button's only effect is to rerun this fragment, which re-reads the
+        # geometry below; its return value is intentionally unused.
+        head[1].button(
+            "🔄 Update view", key="topo_refresh", width="stretch",
+            help="Re-read the latest geometry. This resets the camera angle; "
+                 "otherwise the view keeps your angle across the auto-refresh.")
+        try:
+            import pyvista as pv
+            from stpyvista import stpyvista
+            grid = pv.read(str(topo))
+            scal = "sensitivity" if "sensitivity" in grid.cell_data else None
+            pl = pv.Plotter(window_size=[700, 450], off_screen=True)
+            pl.add_mesh(grid, scalars=scal, cmap="viridis", show_edges=False)
+            pl.view_isometric(); pl.background_color = "white"
+            # backend="panel" renders in-process. The default "trame" backend
+            # exports the scene from a multiprocessing.Process whose spawned child
+            # dies in DuplicateHandle under `streamlit run` on Windows (and would
+            # then hang the parent on queue.get()).
+            stpyvista(pl, backend="panel", key="topo")
+        except Exception as exc:  # noqa: BLE001
+            st.caption(f"(3D view unavailable: {exc})")
+
+    topology_view()
 
     # Live read-only view of the serial run queue, on the same refresh tick (so a
     # queued run's progress shows here even before its config is selected above).
