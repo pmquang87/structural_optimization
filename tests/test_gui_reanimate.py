@@ -50,9 +50,15 @@ def test_reanimate_tab_detects_frames_and_enables_generate(tmp_path):
     at.run()
     at.sidebar.text_input[0].set_value(str(cfg_path)).run()   # use our config
 
+    # An empty / nonexistent folder -> no frames -> Generate stays disabled. (Set
+    # the field explicitly rather than trust the default, which seeds from whatever
+    # run is live on the machine — keeps the test hermetic.)
+    folder = next(t for t in at.text_input if t.label == "Run folder")
+    folder.set_value(str(tmp_path / "empty")).run()
     gen = next(b for b in at.button if b.label == "🎬 Generate animation")
-    assert gen.disabled                       # default folder (work) has no frames
+    assert gen.disabled
 
+    # Pointing at the run with 3 snapshots reports them and enables Generate.
     folder = next(t for t in at.text_input if t.label == "Run folder")
     folder.set_value(str(run_dir)).run()
     assert not at.exception
