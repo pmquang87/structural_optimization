@@ -116,11 +116,16 @@ sidebar. The **Run / output folder** field on the Input tab is editable; leave i
 blank to write into the case directory itself (matching the blank-`work_dir`
 default), or type an explicit path to override it.
 
-In the **🧮 Queue** tab each run's folder is shown and **`✏` edits** a pending
-entry's config / run folder / resume flag in place. When you enqueue runs whose
-folders would collide, the queue automatically gives each its own folder
-(`…_2`, `…_3`, …) and launches every run there (via `oropt.run --work-dir`), so
-queued runs never overwrite each other's status/results.
+Adding a run to the queue **freezes a snapshot** of the config at that moment
+(saved in the model's case directory under `queue_configs/`) and the queued run
+launches from that copy — so editing the working config afterwards never changes
+a run already queued. The
+**🧮 Queue** tab shows each entry's snapshot and folder and lets you reorder
+(`⬆`/`⬇`) or remove (`✖`) pending entries; there is no in-place edit, since the
+snapshot *is* the run. When you enqueue runs whose folders would collide, the
+queue automatically gives each its own folder (`…_2`, `…_3`, …) and launches
+every run there (via `oropt.run --work-dir`), so queued runs never overwrite each
+other's status/results.
 
 The sidebar **Run state** and the Monitor tab follow whatever run is actually
 live — the selected config's, or a queued run in its own reserved folder — so

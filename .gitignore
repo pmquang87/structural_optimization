@@ -22,6 +22,8 @@ runs/
 # GUI run-queue state (disk-backed serial queue + its lock)
 run_queue.json
 run_queue.json.*
+# Immutable per-run config snapshots the queue launches from
+queue_configs/
 
 # scratch
 _probe.*
