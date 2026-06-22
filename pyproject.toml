@@ -19,6 +19,11 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["streamlit>=1.30", "stpyvista>=0.0.10"]
+# Interactive (zoom/rotate) final-design viewer embedded in report.html, via
+# pyvista's Plotter.export_html. This is pyvista's own "jupyter" extra (the trame
+# export stack: trame / trame-vtk / trame-vuetify / nest-asyncio2). Without it the
+# report falls back to the static topology PNG, so it's optional.
+report3d = ["pyvista[jupyter]>=0.43"]
 dev = ["pytest>=7.0", "ruff>=0.6"]
 
 [project.scripts]

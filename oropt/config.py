@@ -261,11 +261,20 @@ class ReportOpts:
     or pyvista (topology render) degrades gracefully to file links and is logged,
     never fatal. The render runs in an *isolated subprocess* (like ``d3plot``) so
     even a hard GL/driver crash on a headless box is contained and never aborts
-    the run. See :mod:`oropt.report`.
+    the run.
+
+    ``interactive_topology`` adds a **zoom/rotate** VTK.js viewer of the final
+    design to ``report.html`` (the same scene the GUI's Monitor tab shows), via
+    pyvista's ``Plotter.export_html``. That needs the optional **trame** export
+    backend (``pip install "oropt[report3d]"`` — i.e. ``trame`` / ``trame-vtk``);
+    when it isn't installed the report silently falls back to the static
+    ``render_topology`` image, so this flag is safe to leave on. See
+    :mod:`oropt.report`.
     """
     enabled: bool = True
     charts: bool = True              # matplotlib convergence charts (vf, sigma, disp)
-    render_topology: bool = True     # off-screen pyvista render of the final design
+    render_topology: bool = True     # off-screen pyvista PNG of the final design (fallback)
+    interactive_topology: bool = True  # zoom/rotate VTK.js viewer in report.html (needs trame)
     render_timeout_s: float = 120.0  # cap on the isolated render subprocess
 
 
@@ -313,8 +322,8 @@ class AnimateOpts:
     view: str = "iso"                # built-in preset name OR a custom_views name
     azimuth: float = 0.0             # extra camera azimuth rotation [deg] after the preset
     elevation: float = 0.0           # extra camera elevation rotation [deg] after the preset
-    window_w: int = 900              # render width  [px]
-    window_h: int = 600              # render height [px]
+    window_w: int = 1440             # render width  [px]
+    window_h: int = 960              # render height [px]
     color: str = "lightsteelblue"    # solid surface colour of the design
     opacity: float = 1.0             # surface opacity 0..1 (1 = solid, <1 = see-through)
     background: str = "white"        # frame background colour

@@ -13,6 +13,14 @@ It only *reads* the artefacts the loop already wrote (``status.json``,
 ``history.csv``, ``topology_latest.vtu``), so it never touches the run. Charts
 need matplotlib and the topology render needs an off-screen pyvista; both are
 best-effort — a missing/failing dependency is logged and degrades to a file link.
+
+The final design is shown as an **interactive zoom/rotate viewer** (the same
+VTK.js scene the GUI's Monitor tab renders) when pyvista's ``Plotter.export_html``
+and its optional **trame** export backend (``trame`` / ``trame-vtk``, the
+``oropt[report3d]`` extra) are available; otherwise it degrades to the static
+off-screen PNG, and then to a plain file link — so the report is identical to
+before when the extra isn't installed.
+
 Nothing here raises: every failure path is caught and returns/skips so a report
 problem can never abort or fail an optimisation run.
 """
@@ -28,11 +36,20 @@ from typing import Callable, Optional
 
 from . import status as st
 from ._render import run_render
+from .animate import ANIM_GIF
 from .config import Config
 
 REPORT_HTML = "report.html"
 REPORT_MD = "report.md"
 TOPOLOGY_PNG = "report_topology.png"
+TOPOLOGY_SCENE_HTML = "report_topology.html"   # standalone interactive VTK.js scene
+
+# The evolution GIF and the interactive scene are embedded inline so report.html
+# stays a single emailable file — but only while each is small enough; above the
+# cap we reference the sibling file instead so the HTML doesn't balloon. (The
+# VTK.js scene bundles vtk.js, so it is typically a few MB.)
+MAX_INLINE_GIF_BYTES = 8 * 1024 * 1024
+MAX_INLINE_SCENE_BYTES = 12 * 1024 * 1024
 
 # Run by an isolated subprocess (same interpreter, which already has pyvista) so a
 # hard VTK/OpenGL crash on a headless box can never bring the run down — it shows
@@ -46,6 +63,20 @@ _RENDER_RUNNER = (
     "p.add_mesh(g, scalars=s, cmap='viridis', show_edges=False); "
     "p.view_isometric(); p.background_color = 'white'; "
     "p.screenshot(sys.argv[2]); p.close()"
+)
+# Same scene as the PNG render, but exported as an *interactive* standalone VTK.js
+# page (zoom/rotate) via pyvista's export_html instead of a screenshot. Also run in
+# the isolated subprocess so a GL/driver crash stays contained. argv -> [vtu_in,
+# html_out]. Needs the optional trame export backend (see _scene_backend_available).
+_SCENE_RUNNER = (
+    "import sys, pyvista as pv; "
+    "pv.OFF_SCREEN = True; "
+    "g = pv.read(sys.argv[1]); "
+    "s = 'sensitivity' if 'sensitivity' in g.cell_data else None; "
+    "p = pv.Plotter(window_size=[900, 600], off_screen=True); "
+    "p.add_mesh(g, scalars=s, cmap='viridis', show_edges=False); "
+    "p.view_isometric(); p.background_color = 'white'; "
+    "p.export_html(sys.argv[2]); p.close()"
 )
 _CHART_FILES = {
     "vf": "report_volume_fraction.png",
@@ -287,6 +318,59 @@ def _render_topology(work: Path, timeout_s: float,
     return None
 
 
+def _scene_backend_available() -> bool:
+    """Whether ``Plotter.export_html``'s trame backend is importable here.
+
+    The export subprocess uses this same interpreter, so an in-process
+    :func:`importlib.util.find_spec` of the two distinct pieces pyvista needs for
+    the offline HTML export — ``trame_vtk`` (the vtk.js exporter) and
+    ``nest_asyncio2`` (to launch trame's server synchronously) — predicts whether
+    the export can work. Both ship with the optional ``report3d`` extra
+    (``pyvista[jupyter]``); when either is missing we skip a doomed subprocess and
+    fall straight back to the static PNG.
+    """
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None
+               for m in ("trame_vtk", "nest_asyncio2"))
+
+
+def _export_topology_scene(work: Path, timeout_s: float,
+                           log: Callable[[str], None]) -> Optional[Path]:
+    """Export an interactive (zoom/rotate) VTK.js scene to ``report_topology.html``.
+
+    Renders the same ``topology_latest.vtu`` scene as :func:`_render_topology`, but
+    via pyvista's ``export_html`` into a standalone, offline interactive viewer —
+    so the report's final design can be orbited/zoomed like the GUI's Monitor tab.
+    Runs in the *isolated subprocess* (crash containment). Returns the scene path,
+    or ``None`` (reason logged) when the optional trame backend is missing, there
+    is nothing to render, or the export fails/times out/crashes — the caller then
+    falls back to the static PNG. Never raises.
+    """
+    if not _scene_backend_available():
+        log("[oropt] report: interactive 3D viewer needs the optional 'report3d' "
+            "extra (trame-vtk) - using a static image "
+            "(pip install \"oropt[report3d]\")")
+        return None
+    src = Path(work) / st.TOPOLOGY
+    if not src.is_file():
+        log(f"[oropt] report: no {st.TOPOLOGY} to render - interactive view skipped")
+        return None
+    dest = Path(work) / TOPOLOGY_SCENE_HTML
+    dest.unlink(missing_ok=True)        # don't mistake a stale scene for a fresh one
+    result = run_render(_SCENE_RUNNER, [src, dest], timeout_s)
+    if result.ok and dest.is_file():
+        return dest
+    if result.timed_out:
+        log(f"[oropt] report: interactive export timed out after {timeout_s:.0f}s "
+            "- falling back to a static image")
+    elif result.returncode is None:
+        log(f"[oropt] report: {result.detail} - falling back to a static image")
+    else:
+        log(f"[oropt] report: interactive export failed (rc={result.returncode}): "
+            f"{result.detail} - falling back to a static image")
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # artefact links
 # --------------------------------------------------------------------------- #
@@ -307,24 +391,83 @@ def _artefacts(work: Path) -> list[tuple[str, str]]:
     if smoothed_snaps:
         out.append((f"Per-iteration smoothed surfaces ({len(smoothed_snaps)})",
                     smoothed_snaps[0].name))
+    if (work / TOPOLOGY_SCENE_HTML).is_file():
+        out.append(("Interactive final design", TOPOLOGY_SCENE_HTML))
+    if (work / ANIM_GIF).is_file():
+        out.append(("Evolution animation", ANIM_GIF))
     if (work / "d3plot").is_dir():
         out.append(("LS-Dyna d3plot", "d3plot/"))
     return out
 
 
-def _data_uri(png: Path) -> Optional[str]:
+def _data_uri(png: Path, mime: str = "image/png") -> Optional[str]:
     try:
         b64 = base64.b64encode(png.read_bytes()).decode("ascii")
     except OSError:
         return None
-    return f"data:image/png;base64,{b64}"
+    return f"data:{mime};base64,{b64}"
+
+
+def _animation_html(work: Path) -> str:
+    """The ``<figure>`` for the topology-evolution GIF, or a note when absent.
+
+    Inlines the GIF as a data URI while it's under :data:`MAX_INLINE_GIF_BYTES`
+    (keeps report.html self-contained); a larger GIF is linked as the sibling file
+    so the HTML stays light. The GIF is written by :func:`oropt.animate.make_animation`,
+    which the loop now runs *before* the report.
+    """
+    gif = work / ANIM_GIF
+    if not gif.is_file():
+        return ('  <p class="note">(no evolution animation — enable '
+                '<code>animate</code>, or see the per-iteration files under '
+                '<em>Artefacts</em>)</p>')
+    try:
+        small = gif.stat().st_size <= MAX_INLINE_GIF_BYTES
+    except OSError:
+        small = False
+    src = (_data_uri(gif, "image/gif") if small else None) or escape(ANIM_GIF)
+    return (f'  <figure class="anim"><img alt="Topology evolution" src="{src}">'
+            f'<figcaption>Topology evolution</figcaption></figure>')
+
+
+def _final_design_html(scene: Optional[Path], topo: Optional[Path]) -> str:
+    """The 'Final design' block: interactive viewer if exported, else the static
+    PNG, else a note pointing at the topology files.
+
+    The interactive scene (zoom/rotate, like the Monitor tab) is inlined via an
+    ``<iframe srcdoc>`` while it's under :data:`MAX_INLINE_SCENE_BYTES` so
+    report.html stays one self-contained, offline-viewable file; a larger scene is
+    referenced as the sibling ``report_topology.html`` instead.
+    """
+    cap = ('<figcaption>Final design — drag to rotate, scroll to zoom'
+           '</figcaption>')
+    if scene is not None and scene.is_file():
+        try:
+            inline = scene.stat().st_size <= MAX_INLINE_SCENE_BYTES
+            doc = scene.read_text(encoding="utf-8") if inline else ""
+        except OSError:
+            inline, doc = False, ""
+        if inline and doc:
+            attr = f'srcdoc="{escape(doc, quote=True)}"'   # self-contained, offline
+        else:
+            attr = f'src="{escape(scene.name)}"'           # too big -> sibling file
+        return (f'  <figure class="topo"><iframe class="scene" {attr} '
+                f'title="Final design (interactive)" loading="lazy"></iframe>'
+                f'{cap}</figure>')
+
+    topo_uri = _data_uri(topo) if topo else None
+    if topo_uri:
+        return (f'  <figure class="topo"><img alt="Final design" src="{topo_uri}">'
+                f'<figcaption>Final design</figcaption></figure>')
+    return ('  <p class="note">(no rendered image — see the topology files under '
+            '<em>Artefacts</em>)</p>')
 
 
 # --------------------------------------------------------------------------- #
 # rendering
 # --------------------------------------------------------------------------- #
 def _html(s: Summary, work: Path, charts: dict[str, Path],
-          topo: Optional[Path]) -> str:
+          scene: Optional[Path], topo: Optional[Path]) -> str:
     now = _dt.datetime.now().isoformat(timespec="seconds")
     rows = "\n".join(
         f"    <tr><th>{escape(k)}</th><td>{escape(v)}</td></tr>"
@@ -356,14 +499,9 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
     charts_html = ("\n".join(img_blocks) if img_blocks
                    else '    <p class="note">(charts unavailable)</p>')
 
-    topo_uri = _data_uri(topo) if topo else None
-    if topo_uri:
-        topo_html = (f'  <figure class="topo"><img alt="Final topology" '
-                     f'src="{topo_uri}">'
-                     f'<figcaption>Final topology</figcaption></figure>')
-    else:
-        topo_html = ('  <p class="note">(no rendered image — see the topology '
-                     'files under <em>Artefacts</em>)</p>')
+    topo_html = _final_design_html(scene, topo)
+
+    anim_html = _animation_html(work)
 
     links = "\n".join(
         f'    <li><a href="{escape(name)}">{escape(label)}</a> '
@@ -395,6 +533,10 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
   figure img {{ max-width: 100%; border: 1px solid #d0d7de; border-radius: 6px; }}
   figcaption {{ color: #57606a; font-size: 0.8rem; text-align: center; }}
   .topo img {{ max-width: 620px; }}
+  .topo iframe.scene {{ width: 100%; max-width: 620px; height: 460px;
+                       border: 1px solid #d0d7de; border-radius: 6px;
+                       background: #fff; }}
+  .anim img {{ max-width: 620px; }}
   code {{ background: #eaeef2; padding: 0.05rem 0.3rem; border-radius: 4px; }}
 </style>
 </head>
@@ -414,6 +556,8 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
   </div>
   <h2>Final design</h2>
 {topo_html}
+  <h2>Evolution</h2>
+{anim_html}
   <h2>Artefacts</h2>
   <ul>
 {links}
@@ -424,7 +568,7 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
 
 
 def _md(s: Summary, work: Path, charts: dict[str, Path],
-        topo: Optional[Path]) -> str:
+        scene: Optional[Path], topo: Optional[Path]) -> str:
     now = _dt.datetime.now().isoformat(timespec="seconds")
     lines = [
         "# oropt run report",
@@ -455,10 +599,19 @@ def _md(s: Summary, work: Path, charts: dict[str, Path],
     if not any_chart:
         lines += ["_(charts unavailable)_", ""]
     lines += ["## Final design", ""]
-    if topo is not None:
-        lines += [f"![Final topology]({topo.name})", ""]
+    if scene is not None and scene.is_file():
+        # Markdown can't embed the interactive scene; link the standalone viewer.
+        lines += [f"Interactive viewer (rotate / zoom): "
+                  f"[`{scene.name}`]({scene.name})", ""]
+    elif topo is not None:
+        lines += [f"![Final design]({topo.name})", ""]
     else:
         lines += ["_(no rendered image — see the topology files below)_", ""]
+    lines += ["## Evolution", ""]
+    if (work / ANIM_GIF).is_file():
+        lines += [f"![Topology evolution]({ANIM_GIF})", ""]
+    else:
+        lines += ["_(no evolution animation — see the per-iteration files below)_", ""]
     lines += ["## Artefacts", ""]
     lines += [f"- [{label}]({name})" for label, name in _artefacts(work)]
     lines.append("")
@@ -488,24 +641,32 @@ def write_report(cfg: Config, work: Path,
             return None
 
         s = _summarise(cfg, status, history)
+        timeout = float(getattr(opts, "render_timeout_s", 120.0)
+                        if opts is not None else 120.0)
         charts = (_charts(history, s, work, log)
                   if (opts is None or getattr(opts, "charts", True)) else {})
-        topo = (_render_topology(
-                    work, float(getattr(opts, "render_timeout_s", 120.0)
-                                if opts is not None else 120.0), log)
-                if (opts is None or getattr(opts, "render_topology", True))
-                else None)
+        # Final design: try the interactive viewer first; only spend a second
+        # subprocess on the static PNG when it isn't available, so a report always
+        # carries *some* final-design visual (the PNG also keeps report.html
+        # self-contained when the scene is too big to inline).
+        scene = (_export_topology_scene(work, timeout, log)
+                 if (opts is None or getattr(opts, "interactive_topology", True))
+                 else None)
+        want_png = (opts is None or getattr(opts, "render_topology", True))
+        topo = (_render_topology(work, timeout, log)
+                if (scene is None and want_png) else None)
 
         written: list[Path] = []
         html_path = work / REPORT_HTML
         try:
-            html_path.write_text(_html(s, work, charts, topo), encoding="utf-8")
+            html_path.write_text(_html(s, work, charts, scene, topo),
+                                 encoding="utf-8")
             written.append(html_path)
         except OSError as exc:
             log(f"[oropt] report: could not write {REPORT_HTML}: {exc}")
         md_path = work / REPORT_MD
         try:
-            md_path.write_text(_md(s, work, charts, topo), encoding="utf-8")
+            md_path.write_text(_md(s, work, charts, scene, topo), encoding="utf-8")
             written.append(md_path)
         except OSError as exc:
             log(f"[oropt] report: could not write {REPORT_MD}: {exc}")

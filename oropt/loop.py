@@ -385,19 +385,20 @@ def run_optimization(cfg: Config, resume: bool = False,
             smooth_all_iterations(cfg, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] smooth: unexpected error during per-iteration smoothing: {exc}")
+        # Automatic topology-evolution GIF from the per-iteration smoothed surfaces
+        # (raw snapshots as fallback). Isolated off-screen render like the report's;
+        # best-effort, never affects the run. Built *before* the report so the
+        # report can embed it.
+        try:
+            make_animation(cfg, work, log)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[oropt] animate: unexpected error during animation: {exc}")
         # Automatic post-run summary (report.html/report.md) from the status &
         # history this run wrote. Read-only and best-effort; never affects the run.
         try:
             write_report(cfg, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] report: unexpected error during report: {exc}")
-        # Automatic topology-evolution GIF from the per-iteration smoothed surfaces
-        # (raw snapshots as fallback). Isolated off-screen render like the report's;
-        # best-effort, never affects the run.
-        try:
-            make_animation(cfg, work, log)
-        except Exception as exc:  # noqa: BLE001
-            log(f"[oropt] animate: unexpected error during animation: {exc}")
         st.clear_pid(work)
     return status
 
