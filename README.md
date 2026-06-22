@@ -58,7 +58,7 @@ oropt/
   simp.py     EXPERIMENTAL SIMP/OC prototype — offline maths only, not wired into the loop (see docs/simp_spike.md)
   manufacturing.py additive-manufacturing constraints on the alive mask: min member size (open), symmetry, overhang
   smoothing.py / d3plot.py  post-run: smoothed-surface (STL/VTP) export; OpenRadioss anim -> LS-Dyna d3plot
-  report.py   post-run: auto summary report (report.html/report.md) — charts + final-design render from status/history
+  report.py   post-run: auto summary report (report.html/report.md) — charts + interactive/static final-design view from status/history
   animate.py  post-run: topology_evolution.gif from the per-iteration smoothed surfaces (fixed camera, isolated render)
   status.py   status.json / history.csv / topology_latest.vtu (+ per-iter topology_iterNNNN.vtu) + PID + checkpoint
   loop.py     build_optimizer(cfg) -> solve (every load case) -> extract -> update -> repeat; resumable; feasibility gate
@@ -74,6 +74,11 @@ A Python 3.12 virtual environment lives in `.venv` (vtk/scipy/streamlit wheels):
 ```powershell
 .venv\Scripts\python -m pip install -e .[gui]
 ```
+
+Optional extras: `report3d` adds the **trame** export backend
+(`pip install -e .[gui,report3d]`) so `report.html` embeds an interactive
+zoom/rotate viewer of the final design (via pyvista's `export_html`); without it
+the report falls back to a static image. `dev` adds pytest/ruff.
 
 Requires a working OpenRadioss install (default `C:\OpenRadioss`) with Intel
 oneAPI MPI — the engine is launched as `mpiexec -np 1 engine_win64_impi.exe`
@@ -220,15 +225,19 @@ in progress.
 * `report` — automatic post-run **summary report** (`report.enabled: true` by
   default — it's cheap and read-only). On finish, oropt summarises the run from
   the `status.json`/`history.csv` it already wrote into `report.html` (a
-  self-contained page with the convergence charts and a render of the final
-  design embedded) and `report.md`: optimiser, start→final volume fraction and %
-  mass removed, final σ_max/displacement vs their limits, feasibility,
-  iteration count and total wall time. Charts need matplotlib and the final-design
-  render an off-screen pyvista (run in an **isolated subprocess**, so even a hard
-  GL/driver crash on a headless box can't abort the run); both are best-effort —
-  if either is unavailable the report still writes and links the files instead.
-  Set `report.charts: false` or `report.render_topology: false` to skip those
-  pieces.
+  self-contained page with the convergence charts and the final design embedded)
+  and `report.md`: optimiser, start→final volume fraction and % mass removed,
+  final σ_max/displacement vs their limits, feasibility, iteration count and total
+  wall time. The final design is shown as an **interactive zoom/rotate viewer**
+  (`report.interactive_topology: true`, the same VTK.js scene as the Monitor tab,
+  via pyvista's `export_html`) — this needs the optional **trame** backend (the
+  `report3d` extra; see *Install*). Without it, oropt falls back to a static
+  off-screen-pyvista **PNG** (`report.render_topology`), and then to a plain file
+  link. Charts need matplotlib; every render runs in an **isolated subprocess**, so
+  even a hard GL/driver crash on a headless box can't abort the run, and each piece
+  is best-effort — anything unavailable is logged and the report still writes. Set
+  `report.charts: false`, `report.interactive_topology: false` or
+  `report.render_topology: false` to skip those pieces.
 * `animate` — automatic post-run **topology-evolution GIF** (`animate.enabled:
   true` by default). On finish, oropt renders the per-iteration *smoothed*
   surfaces (`topology_smoothed_iterNNNN.<ext>`, falling back to the raw
@@ -349,10 +358,13 @@ smoothed and written to `work_dir/topology_smoothed.<ext>` (STL/VTP), and every
 per-iteration snapshot likewise into `work_dir/topology_smoothed_iterNNNN.<ext>`.
 
 Unless **`report.enabled: false`**, the run also writes a summary report —
-`work_dir/report.html` (self-contained: convergence charts + a final-design
-render embedded) and `work_dir/report.md`, alongside the `report_*.png` charts —
+`work_dir/report.html` (self-contained: convergence charts + the final design
+embedded) and `work_dir/report.md`, alongside the `report_*.png` charts —
 recapping optimiser, start→final volume fraction and % mass removed, final
 σ_max/displacement vs limits, feasibility, iteration count and total wall time.
+With the optional `report3d` extra installed, the final design is an interactive
+zoom/rotate viewer inlined into `report.html` (and also written as the standalone
+`work_dir/report_topology.html`); otherwise it's the static `report_topology.png`.
 
 > **Disk cost.** Archiving is **on by default** and adds up fast: tens of MB per
 > iteration *per load case* (deck + animation), **plus** the ~345 MB restart

@@ -4,11 +4,21 @@ best-effort guards. Hermetic — synthesises a run folder from the status helper
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import oropt.report as report
 from oropt import status as st
 from oropt.config import Config, ReportOpts
 from oropt.report import _render_topology, _summarise, write_report
+
+
+@pytest.fixture(autouse=True)
+def _no_interactive_scene(monkeypatch):
+    """Keep the suite hermetic/fast: the report's interactive VTK.js export needs
+    the optional trame backend and spawns a subprocess, so default it 'off' for
+    every test (regardless of whether trame happens to be installed). The tests
+    that exercise it re-enable the backend via monkeypatch."""
+    monkeypatch.setattr(report, "_scene_backend_available", lambda: False)
 
 
 def _write_topology(work):
@@ -163,6 +173,114 @@ def test_write_report_infeasible_badge(tmp_path):
     write_report(cfg, tmp_path, lambda *_: None)
     html = (tmp_path / "report.html").read_text(encoding="utf-8")
     assert "INFEASIBLE" in html
+
+
+# --- evolution animation in the report -------------------------------------- #
+def _write_anim_gif(work, data=b"GIF89a-fake-bytes"):
+    (work / report.ANIM_GIF).write_bytes(data)
+
+
+def test_write_report_embeds_animation_gif(tmp_path):
+    # When the evolution GIF exists it's embedded inline (report.html stays a
+    # single self-contained file), linked under Artefacts, and referenced by md.
+    _make_run(tmp_path)
+    _write_anim_gif(tmp_path)
+    cfg = _cfg("beso")
+    cfg.report.render_topology = False
+    write_report(cfg, tmp_path, lambda *_: None)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    md = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "<h2>Evolution</h2>" in html
+    assert "data:image/gif;base64," in html            # embedded inline
+    assert "Evolution animation" in html               # artefact link
+    assert "topology_evolution.gif" in md              # md references the sibling
+
+
+def test_write_report_large_gif_is_linked_not_embedded(tmp_path, monkeypatch):
+    # A GIF over the inline cap is linked as the sibling file so report.html
+    # doesn't balloon with megabytes of base64.
+    _make_run(tmp_path)
+    _write_anim_gif(tmp_path)
+    monkeypatch.setattr(report, "MAX_INLINE_GIF_BYTES", 1)   # force the link path
+    cfg = _cfg("beso")
+    cfg.report.render_topology = False
+    write_report(cfg, tmp_path, lambda *_: None)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert "data:image/gif" not in html                      # not embedded
+    assert 'src="topology_evolution.gif"' in html            # linked instead
+
+
+def test_write_report_without_animation_shows_note(tmp_path):
+    # No GIF -> the Evolution section degrades to a note, never an error.
+    _make_run(tmp_path)
+    cfg = _cfg("beso")
+    cfg.report.render_topology = False
+    write_report(cfg, tmp_path, lambda *_: None)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert "<h2>Evolution</h2>" in html
+    assert "no evolution animation" in html
+
+
+# --- interactive final-design viewer ---------------------------------------- #
+def _force_scene_export(monkeypatch, *, body="<html><body>FAKE SCENE</body></html>"):
+    """Make the interactive export deterministically 'succeed' without trame: the
+    backend check passes and the subprocess just writes a tiny fake scene file."""
+    monkeypatch.setattr(report, "_scene_backend_available", lambda: True)
+    runner = f"import sys; open(sys.argv[2], 'w', encoding='utf-8').write({body!r})"
+    monkeypatch.setattr(report, "_SCENE_RUNNER", runner)
+
+
+def test_write_report_embeds_interactive_scene(tmp_path, monkeypatch):
+    # With the export available, report.html inlines the interactive scene in an
+    # <iframe srcdoc> (self-contained), links it under Artefacts, and report.md
+    # links the standalone viewer. The static PNG isn't produced when the scene is.
+    _make_run(tmp_path)
+    _force_scene_export(monkeypatch)
+    write_report(_cfg("beso"), tmp_path, lambda *_: None)
+    assert (tmp_path / "report_topology.html").is_file()
+    assert not (tmp_path / "report_topology.png").exists()   # scene wins; no PNG
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    md = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert '<iframe class="scene"' in html
+    assert "srcdoc=" in html and "FAKE SCENE" in html        # inlined
+    assert "Interactive final design" in html                # artefact link
+    assert "report_topology.html" in md                      # md links the viewer
+
+
+def test_write_report_large_scene_is_linked_not_inlined(tmp_path, monkeypatch):
+    # A scene over the inline cap is referenced as the sibling file (src=) so
+    # report.html stays light instead of inlining megabytes of vtk.js.
+    _make_run(tmp_path)
+    _force_scene_export(monkeypatch)
+    monkeypatch.setattr(report, "MAX_INLINE_SCENE_BYTES", 1)
+    write_report(_cfg("beso"), tmp_path, lambda *_: None)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert "srcdoc=" not in html
+    assert 'src="report_topology.html"' in html
+
+
+def test_write_report_no_backend_falls_back_to_static(tmp_path, monkeypatch):
+    # Without the trame backend the interactive export is skipped (with a hint) and
+    # the report uses the static PNG path — here forced to fail, so it links the
+    # topology files instead. Never errors, and writes no scene file.
+    _make_run(tmp_path)
+    monkeypatch.setattr(report, "_scene_backend_available", lambda: False)
+    monkeypatch.setattr(report, "_RENDER_RUNNER", "import sys; sys.exit(3)")
+    logs: list[str] = []
+    write_report(_cfg("beso"), tmp_path, logs.append)
+    assert not (tmp_path / "report_topology.html").exists()
+    assert any("report3d" in m for m in logs)                # logged the install hint
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert "topology_latest.vtu" in html                     # linked fallback
+
+
+def test_interactive_topology_flag_roundtrips(tmp_path):
+    cfg = Config()
+    assert cfg.report.interactive_topology is True            # on by default
+    cfg.report.interactive_topology = False
+    p = tmp_path / "cfg.yaml"
+    cfg.to_yaml(p)
+    assert Config.from_yaml(p).report.interactive_topology is False
 
 
 # --- topology render (isolated subprocess) ---------------------------------- #
