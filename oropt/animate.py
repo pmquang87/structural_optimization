@@ -190,6 +190,19 @@ def _frame_sources(work: Path) -> list[Path]:
     return []
 
 
+def frame_count(work: Path) -> tuple[int, str]:
+    """``(n_frames, source_kind)`` available to animate in *work*.
+
+    A small public wrapper over :func:`_frame_sources` for the GUI's Re-animate
+    tab (and any other caller that wants to *preview* what a re-render would use):
+    how many per-iteration snapshots would be animated and their file kind
+    (``"stl"`` / ``"vtp"`` / ``"vtu"``, ``""`` when none), so the tool can tell the
+    user what it found before spending time on a render.
+    """
+    frames = _frame_sources(Path(work))
+    return len(frames), (frames[0].suffix.lstrip(".") if frames else "")
+
+
 def _label_for(src: Path) -> str:
     """``topology_smoothed_iter0007.stl`` -> ``"iter 7"`` (empty if no match)."""
     m = _ITER_RE.search(src.stem)
@@ -259,13 +272,19 @@ def _encode_gif(pngs: list[Path], dest: Path, opts: AnimateOpts,
 
 
 def make_animation(cfg: Config, work: Path,
-                   log: Callable[[str], None] = print) -> Optional[Path]:
-    """If enabled, write ``topology_evolution.gif`` from the per-iteration surfaces.
+                   log: Callable[[str], None] = print,
+                   *, out_name: str = ANIM_GIF) -> Optional[Path]:
+    """If enabled, write the topology-evolution GIF from the per-iteration surfaces.
 
     Renders the smoothed per-iteration surfaces (or the raw ``.vtu`` snapshots as a
     fallback) from a fixed camera and encodes them into an animated GIF in *work*.
     Returns the GIF path, else ``None`` (reason logged) when disabled, when there
     are fewer than two snapshots, or when rendering/encoding fails. Never raises.
+
+    The GIF is named *out_name* (default ``topology_evolution.gif`` — what the loop
+    and the report expect). The GUI's Re-animate tool passes a different name so a
+    re-render with fresh settings can sit alongside the run's original instead of
+    overwriting it.
     """
     opts = getattr(cfg, "animate", None) or AnimateOpts()
     if not opts.enabled:
@@ -277,7 +296,7 @@ def make_animation(cfg: Config, work: Path,
             log("[oropt] animate: need >=2 per-iteration snapshots to animate "
                 f"(found {len(frames)}) - skipped")
             return None
-        dest = work / ANIM_GIF
+        dest = work / out_name
         with tempfile.TemporaryDirectory(prefix="oropt_anim_", dir=work) as td:
             pngs = _render_frames(frames, opts, Path(td), log)
             if not pngs:
@@ -285,7 +304,7 @@ def make_animation(cfg: Config, work: Path,
             out = _encode_gif(pngs, dest, opts, log)
         if out is None:
             return None
-        log(f"[oropt] animate: wrote {ANIM_GIF} ({len(frames)} frames @ "
+        log(f"[oropt] animate: wrote {out.name} ({len(frames)} frames @ "
             f"{opts.fps:g} fps, view={opts.view} from "
             f"{frames[0].suffix.lstrip('.')} surfaces)")
         return out
@@ -307,6 +326,9 @@ def main(argv=None) -> int:
                     "per-iteration (smoothed) surfaces.")
     ap.add_argument("run_dir", help="run folder containing the per-iteration "
                                     "topology_smoothed_iter*/topology_iter* files")
+    ap.add_argument("--out", default=ANIM_GIF,
+                    help=f"output GIF name written into the run folder "
+                         f"(default: {ANIM_GIF}; pick another to keep the original)")
     ap.add_argument("--fps", type=float, default=None, help="frames per second")
     ap.add_argument("--view", choices=VIEWS, default=None,
                     help="camera angle (default: iso)")
@@ -315,8 +337,17 @@ def main(argv=None) -> int:
     ap.add_argument("--elevation", type=float, default=None,
                     help="extra camera elevation rotation [deg] after the preset")
     ap.add_argument("--color", default=None, help="surface colour")
+    ap.add_argument("--background", default=None, help="frame background colour")
     ap.add_argument("--opacity", type=float, default=None,
                     help="surface opacity 0..1 (1 = solid, <1 = see-through)")
+    ap.add_argument("--window-w", type=int, default=None,
+                    help="render width [px] (resolution)")
+    ap.add_argument("--window-h", type=int, default=None,
+                    help="render height [px] (resolution)")
+    ap.add_argument("--hold-last", type=int, default=None,
+                    help="linger on the final design (x frame duration)")
+    ap.add_argument("--show-edges", action="store_true",
+                    help="draw mesh edges on the surface")
     ap.add_argument("--no-labels", action="store_true",
                     help="don't stamp 'iter N' on each frame")
     args = ap.parse_args(argv)
@@ -333,12 +364,23 @@ def main(argv=None) -> int:
         cfg.animate.elevation = args.elevation
     if args.color is not None:
         cfg.animate.color = args.color
+    if args.background is not None:
+        cfg.animate.background = args.background
     if args.opacity is not None:
         cfg.animate.opacity = args.opacity
+    if args.window_w is not None:
+        cfg.animate.window_w = args.window_w
+    if args.window_h is not None:
+        cfg.animate.window_h = args.window_h
+    if args.hold_last is not None:
+        cfg.animate.hold_last = args.hold_last
+    if args.show_edges:
+        cfg.animate.show_edges = True
     if args.no_labels:
         cfg.animate.show_labels = False
 
-    out = make_animation(cfg, Path(args.run_dir), log=lambda s: print(s, flush=True))
+    out = make_animation(cfg, Path(args.run_dir), log=lambda s: print(s, flush=True),
+                         out_name=args.out)
     if out is None:
         print("[oropt] animate: no GIF produced (see messages above)", flush=True)
         return 1

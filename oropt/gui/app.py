@@ -10,12 +10,13 @@ status files the loop writes (``status.json`` / ``history.csv`` /
 ``topology_latest.vtu``). Closing the browser never stops the run; reopening
 re-attaches to it.
 
-The page is laid out as a sidebar (config selection + run/queue control) and five
+The page is laid out as a sidebar (config selection + run/queue control) and six
 tabs; each tab's body lives in its own ``render_*_tab`` function below so this
 script stays readable as orchestration rather than one long top-level block.
 """
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 import sys
 from pathlib import Path
@@ -25,11 +26,13 @@ import streamlit as st
 
 from oropt import queue_runner
 from oropt import status as st_io
-from oropt.animate import VIEWS as _BUILTIN_VIEWS, selectable_views
-from oropt.config import Config
+from oropt.animate import (VIEWS as _BUILTIN_VIEWS, frame_count,
+                           make_animation, selectable_views)
+from oropt.config import AnimateOpts, Config
 from oropt.gui import queue_store as qs
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
+from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
 from oropt.gui.runstate import find_active_run
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
                              records_from_custom_views)
@@ -155,6 +158,93 @@ def render_load_cases_tab(cfg: Config) -> None:
     else:
         st.info("No load cases — the run uses the single model deck (classic "
                 "single-load BESO). Add a row above to optimise several loads.")
+
+
+# ---- shared evolution-animation camera/playback widgets --------------------
+def render_camera_settings(opts: AnimateOpts, key_prefix: str) -> None:
+    """Render the evolution-animation camera & playback widgets into *opts*.
+
+    Shared by the Constraints/BC tab (settings the post-run animation will use)
+    and the 🎬 Re-animate tab (settings for an on-demand re-render), so the two
+    can never drift. Every widget writes straight back into the passed *opts*
+    (an :class:`~oropt.config.AnimateOpts`); *key_prefix* keeps the two instances'
+    Streamlit widget keys distinct so both can live on the page at once.
+    """
+    st.caption("Custom camera angles — name your own viewpoints (a built-in base "
+               "+ azimuth/elevation offsets) to reuse them in the dropdown below.")
+    cv_df = pd.DataFrame(records_from_custom_views(opts.custom_views),
+                         columns=VIEW_COLUMNS)
+    cv_edited = st.data_editor(
+        cv_df, num_rows="dynamic", width="stretch",
+        key=f"{key_prefix}_custom_views_editor", column_config={
+            "name": st.column_config.TextColumn(
+                "name", help="Pick this angle by name in 'Camera angle'."),
+            "base": st.column_config.SelectboxColumn(
+                "base", options=list(_BUILTIN_VIEWS), default="iso",
+                help="Built-in preset this angle starts from."),
+            "azimuth": st.column_config.NumberColumn(
+                "azimuth [°]", step=15.0, help="Offset about the vertical."),
+            "elevation": st.column_config.NumberColumn(
+                "elevation [°]", step=15.0, help="Up/down tilt offset."),
+        })
+    opts.custom_views = custom_views_from_records(cv_edited.to_dict("records"))
+
+    ac = st.columns(3)
+    _views = selectable_views(opts)                # custom names + built-in presets
+    opts.view = ac[0].selectbox(
+        "Camera angle", _views,
+        index=_views.index(opts.view) if opts.view in _views else 0,
+        key=f"{key_prefix}_view",
+        help="Viewpoint for every frame: a custom angle (above), iso (3D), or a "
+             "straight-on front/back/left/right/top/bottom. The azimuth/elevation "
+             "here are added on top as a final nudge.")
+    opts.azimuth = float(ac[1].number_input(
+        "Azimuth [°]", value=float(opts.azimuth), step=15.0,
+        key=f"{key_prefix}_azimuth",
+        help="Extra camera rotation about the vertical, applied after the preset."))
+    opts.elevation = float(ac[2].number_input(
+        "Elevation [°]", value=float(opts.elevation), step=15.0,
+        key=f"{key_prefix}_elevation",
+        help="Extra camera tilt up/down, applied after the preset."))
+    ac2 = st.columns(2)
+    opts.fps = float(ac2[0].number_input(
+        "Frames per second", value=float(opts.fps), min_value=0.5, step=1.0,
+        key=f"{key_prefix}_fps"))
+    opts.show_labels = ac2[1].checkbox(
+        "Stamp 'iter N' on each frame", value=opts.show_labels,
+        key=f"{key_prefix}_show_labels")
+    opts.opacity = float(st.slider(
+        "Surface opacity", min_value=0.0, max_value=1.0,
+        value=float(opts.opacity), step=0.05, key=f"{key_prefix}_opacity",
+        help="1.0 = solid; lower makes the design see-through so internal "
+             "structure shows. Transparency uses depth peeling when available."))
+
+
+def color_picker(container, label: str, current: str, key_prefix: str
+                 ) -> tuple[str, bool]:
+    """A named-colour dropdown + an "Other…" hex/name escape hatch in *container*.
+
+    Returns ``(value, valid)``. A dropdown pick is always valid; a custom entry is
+    checked with :func:`oropt.gui.colors.is_valid_color` so a typo is caught in the
+    form rather than only as a failed render. *current* pre-selects the matching
+    name, else the "Other…" box pre-filled with it. *key_prefix* namespaces the
+    widgets so several pickers coexist on the page.
+    """
+    current = (current or "").strip()
+    options = list(COMMON_COLORS) + [OTHER]
+    preset = current if current in COMMON_COLORS else OTHER
+    choice = container.selectbox(label, options, index=options.index(preset),
+                                 key=f"{key_prefix}_name")
+    if choice != OTHER:
+        return choice, True
+    value = container.text_input(
+        f"{label} (hex or name)",
+        "" if current in COMMON_COLORS else current,
+        key=f"{key_prefix}_custom", placeholder="#b0c4de").strip()
+    ok = is_valid_color(value)
+    if value and not ok:
+        container.caption(f"⚠ '{value}' isn't a colour pyvista recognises.")
+    return value, ok
 
 
 # ---- Constraints / BC tab --------------------------------------------------
@@ -354,50 +444,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
              "fallback) from one fixed camera into <work>/topology_evolution.gif — "
              "a quick visual of the optimisation. Best-effort; never fails the run.")
 
-    st.caption("Custom camera angles — name your own viewpoints (a built-in base "
-               "+ azimuth/elevation offsets) to reuse them in the dropdown below.")
-    cv_df = pd.DataFrame(records_from_custom_views(cfg.animate.custom_views),
-                         columns=VIEW_COLUMNS)
-    cv_edited = st.data_editor(
-        cv_df, num_rows="dynamic", width="stretch",
-        key="custom_views_editor", column_config={
-            "name": st.column_config.TextColumn(
-                "name", help="Pick this angle by name in 'Camera angle'."),
-            "base": st.column_config.SelectboxColumn(
-                "base", options=list(_BUILTIN_VIEWS), default="iso",
-                help="Built-in preset this angle starts from."),
-            "azimuth": st.column_config.NumberColumn(
-                "azimuth [°]", step=15.0, help="Offset about the vertical."),
-            "elevation": st.column_config.NumberColumn(
-                "elevation [°]", step=15.0, help="Up/down tilt offset."),
-        })
-    cfg.animate.custom_views = custom_views_from_records(cv_edited.to_dict("records"))
-
-    ac = st.columns(3)
-    _views = selectable_views(cfg.animate)         # custom names + built-in presets
-    cfg.animate.view = ac[0].selectbox(
-        "Camera angle", _views,
-        index=_views.index(cfg.animate.view) if cfg.animate.view in _views else 0,
-        help="Viewpoint for every frame: a custom angle (above), iso (3D), or a "
-             "straight-on front/back/left/right/top/bottom. The azimuth/elevation "
-             "here are added on top as a final nudge.")
-    cfg.animate.azimuth = float(ac[1].number_input(
-        "Azimuth [°]", value=float(cfg.animate.azimuth), step=15.0,
-        help="Extra camera rotation about the vertical, applied after the preset."))
-    cfg.animate.elevation = float(ac[2].number_input(
-        "Elevation [°]", value=float(cfg.animate.elevation), step=15.0,
-        help="Extra camera tilt up/down, applied after the preset."))
-    ac2 = st.columns(2)
-    cfg.animate.fps = float(ac2[0].number_input(
-        "Frames per second", value=float(cfg.animate.fps),
-        min_value=0.5, step=1.0))
-    cfg.animate.show_labels = ac2[1].checkbox(
-        "Stamp 'iter N' on each frame", value=cfg.animate.show_labels)
-    cfg.animate.opacity = float(st.slider(
-        "Surface opacity", min_value=0.0, max_value=1.0,
-        value=float(cfg.animate.opacity), step=0.05,
-        help="1.0 = solid; lower makes the design see-through so internal "
-             "structure shows. Transparency uses depth peeling when available."))
+    render_camera_settings(cfg.animate, key_prefix="con")
 
     if st.button("💾 Save config"):
         cfg.to_yaml(cfg_path)
@@ -489,6 +536,112 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
                        + (f" — {e.message}" if e.message else ""))
 
     queue_monitor()
+
+
+# ---- Re-animate tab --------------------------------------------------------
+def render_reanimate_tab(cfg: Config, default_folder: Path) -> None:
+    """Re-render the topology-evolution GIF for an *existing* run with fresh
+    camera / resolution / playback settings — no re-solving.
+
+    A spin-off of the post-run animation: it reads the same per-iteration
+    ``topology_smoothed_iter*`` (or raw ``topology_iter*.vtu``) snapshots a finished
+    run already wrote and re-encodes them via :func:`oropt.animate.make_animation`,
+    writing a **new** GIF into the run folder so the run's original is preserved
+    unless its name is reused. The render runs in :mod:`oropt.animate`'s isolated
+    off-screen subprocess (crash containment), so it is safe to drive synchronously
+    from here.
+    """
+    st.subheader("Re-animate a finished run")
+    st.caption(
+        "Re-render the topology-evolution GIF from an **existing** run's "
+        "per-iteration surfaces with new settings (camera angle, resolution, "
+        "colours, playback) — without re-running the optimisation. Writes a new "
+        "GIF into the run folder, leaving the original `topology_evolution.gif` "
+        "untouched unless you reuse its name.")
+
+    folder = Path(st.text_input(
+        "Run folder", str(default_folder), key="reanim_folder",
+        help="A finished run's output folder — the one holding the per-iteration "
+             "topology_smoothed_iter*/topology_iter* snapshots. Defaults to the "
+             "currently selected run."))
+    n_frames, src = frame_count(folder) if str(folder).strip() else (0, "")
+    ready = bool(str(folder).strip()) and folder.exists() and n_frames >= 2
+    if not str(folder).strip() or not folder.exists():
+        st.warning("Run folder not found.")
+    elif n_frames < 2:
+        st.warning(
+            f"Need ≥2 per-iteration snapshots to animate (found {n_frames}). Run "
+            "with surface smoothing or per-iteration snapshots enabled first.")
+    else:
+        st.success(f"{n_frames} frames found ({src} surfaces).")
+
+    out_name = st.text_input(
+        "Output GIF name", "topology_evolution_reanim.gif", key="reanim_out",
+        help="Written into the run folder. Use `topology_evolution.gif` to "
+             "overwrite the run's original (e.g. to refresh the one the report "
+             "embeds).").strip()
+
+    # Independent settings, seeded from the config's animate block so the tool
+    # starts from the run's configured look — but kept on a SEPARATE AnimateOpts so
+    # editing here never leaks into the cfg the queue would enqueue/save.
+    opts = dataclasses.replace(cfg.animate)
+    render_camera_settings(opts, key_prefix="reanim")
+
+    st.markdown("**Appearance & resolution**")
+    st.caption("Colours take a named colour (e.g. `steelblue`), a hex code "
+               "(`#b0c4de`), or a matplotlib `tab:` name — pick a common one or "
+               "choose *Other…* to type your own.")
+    rc = st.columns(3)
+    opts.color, color_ok = color_picker(rc[0], "Surface colour", opts.color,
+                                        "reanim_color")
+    opts.background, bg_ok = color_picker(rc[1], "Background", opts.background,
+                                          "reanim_bg")
+    opts.show_edges = rc[2].checkbox("Show mesh edges", value=opts.show_edges,
+                                     key="reanim_edges")
+    rc2 = st.columns(3)
+    opts.window_w = int(rc2[0].number_input(
+        "Width [px]", value=int(opts.window_w), min_value=160, step=80,
+        key="reanim_w", help="Render width — higher = sharper but slower/larger."))
+    opts.window_h = int(rc2[1].number_input(
+        "Height [px]", value=int(opts.window_h), min_value=120, step=80,
+        key="reanim_h"))
+    opts.hold_last = int(rc2[2].number_input(
+        "Hold last frame (×)", value=int(opts.hold_last), min_value=1, step=1,
+        key="reanim_hold",
+        help="Linger on the final design, in multiples of one frame's duration."))
+    opts.render_timeout_s = float(st.number_input(
+        "Render timeout [s]", value=float(opts.render_timeout_s),
+        min_value=10.0, step=30.0, key="reanim_timeout",
+        help="Cap on the off-screen render subprocess (all frames). Raise it for "
+             "many high-resolution frames."))
+
+    name_ok = out_name.endswith(".gif")
+    if out_name and not name_ok:
+        st.caption("Output name must end in `.gif`.")
+    if st.button("🎬 Generate animation", type="primary",
+                 disabled=not (ready and name_ok and color_ok and bg_ok)):
+        opts.enabled = True
+        tmp_cfg = Config()
+        tmp_cfg.animate = opts                 # make_animation reads cfg.animate
+        logs: list[str] = []
+        with st.spinner(f"Rendering {n_frames} frames at "
+                        f"{opts.window_w}×{opts.window_h}…"):
+            out = make_animation(tmp_cfg, folder, logs.append, out_name=out_name)
+        if logs:
+            with st.expander("Render log", expanded=out is None):
+                for line in logs:
+                    st.text(line)
+        if out is not None and out.is_file():
+            st.success(f"Wrote `{out}`")
+            st.image(str(out), caption=out.name)
+            try:
+                st.download_button("⬇ Download GIF", out.read_bytes(),
+                                   file_name=out.name, mime="image/gif",
+                                   key="reanim_dl")
+            except OSError:
+                pass
+        else:
+            st.error("No GIF produced — see the render log above.")
 
 
 # ---- Queue tab -------------------------------------------------------------
@@ -698,8 +851,9 @@ if qcol[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive)
     st.rerun()
 
 # ---- tabs (each body lives in a render_*_tab function above) ---------------
-tab_in, tab_lc, tab_con, tab_mon, tab_q = st.tabs(
-    ["📥 Input", "🔀 Load cases", "🎚 Constraints / BC", "📊 Monitor", "🧮 Queue"])
+tab_in, tab_lc, tab_con, tab_mon, tab_anim, tab_q = st.tabs(
+    ["📥 Input", "🔀 Load cases", "🎚 Constraints / BC", "📊 Monitor",
+     "🎬 Re-animate", "🧮 Queue"])
 with tab_in:
     render_input_tab(cfg)
 with tab_lc:
@@ -708,6 +862,8 @@ with tab_con:
     render_constraints_tab(cfg, cfg_path)
 with tab_mon:
     render_monitor_tab(cfg, live_dir, refresh_s)   # follow the live run's folder
+with tab_anim:
+    render_reanimate_tab(cfg, live_dir)            # re-render an existing run's GIF
 with tab_q:
     render_queue_tab(cfg_path)
 
