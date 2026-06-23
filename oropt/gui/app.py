@@ -260,6 +260,47 @@ def color_picker(container, label: str, current: str, key_prefix: str
     return value, ok
 
 
+def render_appearance_settings(opts: AnimateOpts, key_prefix: str
+                               ) -> tuple[bool, bool]:
+    """Render the evolution-animation appearance & resolution widgets into *opts*.
+
+    Shared by the Constraints/BC tab (the look the post-run animation will use) and
+    the 🎬 Re-animate tab (an on-demand re-render), so the two can never drift — the
+    same split as :func:`render_camera_settings`. Returns ``(color_ok, bg_ok)`` from
+    the two colour pickers so the caller can gate its action button on valid
+    colours. *key_prefix* namespaces the widgets so both instances coexist.
+    """
+    st.markdown("**Appearance & resolution**")
+    st.caption("Colours take a named colour (e.g. `steelblue`), a hex code "
+               "(`#b0c4de`), or a matplotlib `tab:` name — pick a common one or "
+               "choose *Other…* to type your own.")
+    rc = st.columns(3)
+    opts.color, color_ok = color_picker(rc[0], "Surface colour", opts.color,
+                                        f"{key_prefix}_color")
+    opts.background, bg_ok = color_picker(rc[1], "Background", opts.background,
+                                          f"{key_prefix}_bg")
+    opts.show_edges = rc[2].checkbox("Show mesh edges", value=opts.show_edges,
+                                     key=f"{key_prefix}_edges")
+    rc2 = st.columns(3)
+    opts.window_w = int(rc2[0].number_input(
+        "Width [px]", value=int(opts.window_w), min_value=160, step=80,
+        key=f"{key_prefix}_w",
+        help="Render width — higher = sharper but slower/larger."))
+    opts.window_h = int(rc2[1].number_input(
+        "Height [px]", value=int(opts.window_h), min_value=120, step=80,
+        key=f"{key_prefix}_h"))
+    opts.hold_last = int(rc2[2].number_input(
+        "Hold last frame (×)", value=int(opts.hold_last), min_value=1, step=1,
+        key=f"{key_prefix}_hold",
+        help="Linger on the final design, in multiples of one frame's duration."))
+    opts.render_timeout_s = float(st.number_input(
+        "Render timeout [s]", value=float(opts.render_timeout_s),
+        min_value=10.0, step=30.0, key=f"{key_prefix}_timeout",
+        help="Cap on the off-screen render subprocess (all frames). Raise it for "
+             "many high-resolution frames."))
+    return color_ok, bg_ok
+
+
 # ---- Constraints / BC tab --------------------------------------------------
 def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     st.subheader("Constraints")
@@ -458,8 +499,9 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
              "a quick visual of the optimisation. Best-effort; never fails the run.")
 
     render_camera_settings(cfg.animate, key_prefix="con")
+    color_ok, bg_ok = render_appearance_settings(cfg.animate, key_prefix="con")
 
-    if st.button("💾 Save config"):
+    if st.button("💾 Save config", disabled=not (color_ok and bg_ok)):
         cfg.to_yaml(cfg_path)
         st.success(f"Saved to {cfg_path}")
 
@@ -616,34 +658,7 @@ def render_reanimate_tab(cfg: Config, default_folder: Path) -> None:
     # editing here never leaks into the cfg the queue would enqueue/save.
     opts = dataclasses.replace(cfg.animate)
     render_camera_settings(opts, key_prefix="reanim")
-
-    st.markdown("**Appearance & resolution**")
-    st.caption("Colours take a named colour (e.g. `steelblue`), a hex code "
-               "(`#b0c4de`), or a matplotlib `tab:` name — pick a common one or "
-               "choose *Other…* to type your own.")
-    rc = st.columns(3)
-    opts.color, color_ok = color_picker(rc[0], "Surface colour", opts.color,
-                                        "reanim_color")
-    opts.background, bg_ok = color_picker(rc[1], "Background", opts.background,
-                                          "reanim_bg")
-    opts.show_edges = rc[2].checkbox("Show mesh edges", value=opts.show_edges,
-                                     key="reanim_edges")
-    rc2 = st.columns(3)
-    opts.window_w = int(rc2[0].number_input(
-        "Width [px]", value=int(opts.window_w), min_value=160, step=80,
-        key="reanim_w", help="Render width — higher = sharper but slower/larger."))
-    opts.window_h = int(rc2[1].number_input(
-        "Height [px]", value=int(opts.window_h), min_value=120, step=80,
-        key="reanim_h"))
-    opts.hold_last = int(rc2[2].number_input(
-        "Hold last frame (×)", value=int(opts.hold_last), min_value=1, step=1,
-        key="reanim_hold",
-        help="Linger on the final design, in multiples of one frame's duration."))
-    opts.render_timeout_s = float(st.number_input(
-        "Render timeout [s]", value=float(opts.render_timeout_s),
-        min_value=10.0, step=30.0, key="reanim_timeout",
-        help="Cap on the off-screen render subprocess (all frames). Raise it for "
-             "many high-resolution frames."))
+    color_ok, bg_ok = render_appearance_settings(opts, key_prefix="reanim")
 
     name_ok = out_name.endswith(".gif")
     if out_name and not name_ok:

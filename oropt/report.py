@@ -241,6 +241,7 @@ def _charts(history: list[dict], s: Summary, work: Path,
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        from matplotlib.ticker import MaxNLocator
     except Exception as exc:  # noqa: BLE001
         log(f"[oropt] report: matplotlib unavailable: {exc} - charts skipped")
         return {}
@@ -270,6 +271,8 @@ def _charts(history: list[dict], s: Summary, work: Path,
             ax.set_title(title, fontsize=10)
             ax.set_xlabel("iteration", fontsize=9)
             ax.set_ylabel(ylabel, fontsize=9)
+            # iteration is a count -> integer-only ticks (no "2.5")
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
             ax.grid(True, alpha=0.3)
             fig.tight_layout()
             fig.savefig(dest)
