@@ -242,18 +242,29 @@ def color_picker(container, label: str, current: str, key_prefix: str
     form rather than only as a failed render. *current* pre-selects the matching
     name, else the "Other…" box pre-filled with it. *key_prefix* namespaces the
     widgets so several pickers coexist on the page.
+
+    The controls are keyed, so Streamlit persists the user's pick across reruns and
+    ignores ``index``/``value`` after the first render — what we want while editing
+    one config, but it means loading a *different* config in the sidebar would leave
+    the box showing the previous pick (a lie the Save button would then write back
+    over the new config). So we re-seed both controls from *current* whenever it
+    changes underneath us, which leaves in-session edits untouched.
     """
     current = (current or "").strip()
     options = list(COMMON_COLORS) + [OTHER]
     preset = current if current in COMMON_COLORS else OTHER
-    choice = container.selectbox(label, options, index=options.index(preset),
-                                 key=f"{key_prefix}_name")
+    name_key, custom_key = f"{key_prefix}_name", f"{key_prefix}_custom"
+    seed_key = f"{key_prefix}_seed"
+    if st.session_state.get(seed_key) != current:      # config changed (or first run)
+        st.session_state[seed_key] = current
+        st.session_state[name_key] = preset
+        st.session_state[custom_key] = current if preset == OTHER else ""
+
+    choice = container.selectbox(label, options, key=name_key)
     if choice != OTHER:
         return choice, True
     value = container.text_input(
-        f"{label} (hex or name)",
-        "" if current in COMMON_COLORS else current,
-        key=f"{key_prefix}_custom", placeholder="#b0c4de").strip()
+        f"{label} (hex or name)", key=custom_key, placeholder="#b0c4de").strip()
     ok = is_valid_color(value)
     if value and not ok:
         container.caption(f"⚠ '{value}' isn't a colour pyvista recognises.")
