@@ -79,4 +79,4 @@ def test_reanimate_surface_colour_is_a_dropdown_with_named_colours(tmp_path):
     sb = next(s for s in at.selectbox if s.label == "Surface colour")
     assert "steelblue" in sb.options
     assert any("Other" in o for o in sb.options)
-    assert sb.value == "lightsteelblue"       # seeded from the AnimateOpts default
+    assert sb.value == "gray"                 # seeded from the AnimateOpts default

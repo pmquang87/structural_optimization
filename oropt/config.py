@@ -335,7 +335,7 @@ class AnimateOpts:
     elevation: float = 0.0           # extra camera elevation rotation [deg] after the preset
     window_w: int = 1440             # render width  [px]
     window_h: int = 960              # render height [px]
-    color: str = "lightsteelblue"    # solid surface colour of the design
+    color: str = "gray"              # solid surface colour of the design
     opacity: float = 1.0             # surface opacity 0..1 (1 = solid, <1 = see-through)
     background: str = "white"        # frame background colour
     show_edges: bool = False         # draw mesh edges on the surface
