@@ -47,6 +47,7 @@ class Status:
     feasible: bool = True
     elements_alive: int = 0
     elements_total: int = 0
+    stress_excluded_elems: int = 0    # design elements whose von-Mises is ignored (stress-exclusion region)
     or_termination: str = ""
     iter_wall_s: float = 0.0
     elapsed_s: float = 0.0

@@ -194,6 +194,17 @@ in progress.
   optimiser only ever removes the remaining design material — note that an
   over-large keep-out caps how much mass can be removed (if it already exceeds
   `target_volume_fraction`, no removal is possible).
+* **Stress-exclusion regions** — `model.stress_exclude_group_ids` (e.g.
+  `[999999998]`, any `/GRNOD/NODE` set in the deck) and
+  `model.stress_exclude_node_ids`: every design element touching those nodes has
+  its von-Mises **ignored** — dropped from the reported peak `σ_max`, the
+  feasibility check, and the stress shown in the *Monitor* and `report.html`. Use
+  it for a **known hot-spot a later design phase will fix** (e.g. around a small
+  cylinder) so that local artefact can't keep the design infeasible or distort the
+  loop's back-off. Unlike the keep-out set these elements are **not frozen** — they
+  still take part in the optimisation; list them in `freeze_*` as well if you also
+  want to protect them from removal. Editable on the GUI's *Constraints / BC* tab;
+  the *Monitor* and report then note how many elements σ_max is ignoring.
 * `beso.protect_bc_nodes` (default `true`) — whether elements touching the BC
   node-group (`model.bc_group_id`) are frozen. Set it `false` to **allow the
   optimiser to delete material at the BC nodes** too; those nodes stay fixed via

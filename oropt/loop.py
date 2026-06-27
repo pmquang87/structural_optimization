@@ -64,6 +64,35 @@ def collect_protect_nodes(deck: Deck, model, include_bc: bool = True) -> np.ndar
     return np.unique(np.concatenate(parts)) if parts else np.empty(0, np.int64)
 
 
+def collect_stress_exclude_nodes(deck: Deck, model) -> np.ndarray:
+    """Nodes whose design elements have their von-Mises ignored: the user-defined
+    stress-exclusion /GRNOD/NODE groups (``stress_exclude_group_ids``, e.g.
+    999999998) plus explicit ``stress_exclude_node_ids``.
+
+    Empty by default, so a config that doesn't use the feature is unaffected. The
+    elements touching these nodes still take part in the optimisation (they are not
+    frozen); only their stress is dropped from ``sigma_max`` / feasibility / the
+    Monitor & report (see :func:`oropt.results.parse_vtk`)."""
+    parts = []
+    for gid in getattr(model, "stress_exclude_group_ids", []) or []:
+        parts.append(deck.group_nodes(int(gid)))
+    explicit = getattr(model, "stress_exclude_node_ids", []) or []
+    if explicit:
+        parts.append(np.asarray([int(v) for v in explicit], dtype=np.int64))
+    return np.unique(np.concatenate(parts)) if parts else np.empty(0, np.int64)
+
+
+def stress_exclude_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
+    """Boolean mask (aligned with ``deck.elem_ids``) of design elements whose
+    von-Mises is ignored — those touching a stress-exclusion node. All-False when
+    the feature is unconfigured."""
+    nodes = collect_stress_exclude_nodes(deck, model)
+    if not nodes.size:
+        return np.zeros(deck.n_design_elements, dtype=bool)
+    # layers=0 / contact_dist=0 -> exactly the elements touching an excluded node.
+    return mesh.protected_mask(deck, nodes, contact_dist=0.0, layers=0)
+
+
 def _clean_solve_dir(run_dir: Path) -> None:
     if run_dir.exists():
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -87,12 +116,15 @@ def _case_config(cfg: Config, case: ResolvedCase) -> Config:
 
 
 def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
-                no_pin: set, solve_dir: Path, anim_dt: float):
+                no_pin: set, solve_dir: Path, anim_dt: float,
+                exclude_elem_ids: Optional[np.ndarray] = None):
     """Write the alive deck for one load case, solve it, extract its results.
 
     The per-case "solve + extract" unit reused for every case each iteration.
-    Returns ``(run_result, results)`` where *results* is ``None`` if the solve
-    failed (the caller surfaces *run_result*)."""
+    *exclude_elem_ids* (the stress-exclusion set, shared by all cases) is forwarded
+    to ``extract`` so the case's ``sigma_max`` ignores those elements. Returns
+    ``(run_result, results)`` where *results* is ``None`` if the solve failed (the
+    caller surfaces *run_result*)."""
     case_cfg = _case_config(cfg, case)
     _clean_solve_dir(solve_dir)
     deck.write(solve_dir / f"{case.stem}_0000.rad", alive, no_pin=no_pin)
@@ -100,7 +132,7 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
     res = run_solver(case_cfg, solve_dir)
     if not res.ok:
         return res, None
-    return res, extract(case_cfg, solve_dir)
+    return res, extract(case_cfg, solve_dir, exclude_element_ids=exclude_elem_ids)
 
 
 def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int,
@@ -217,6 +249,18 @@ def run_optimization(cfg: Config, resume: bool = False,
     log(f"[oropt] optimizer={cfg.optimizer_name()}; protected elements: "
         f"{int(protected.sum())} ({100*protected.mean():.1f}%); V0={opt.V0:.3f}")
 
+    # Stress-exclusion region: design elements touching a user-flagged hot-spot
+    # node set have their von-Mises ignored everywhere it's reported (sigma_max,
+    # feasibility, the Monitor & report stress field). Computed once — all load
+    # cases share the design mesh. The elements still take part in the optimisation.
+    stress_excluded = stress_exclude_mask(deck, mesh, m)
+    exclude_elem_ids = deck.elem_ids[stress_excluded]
+    n_excluded = int(exclude_elem_ids.size)
+    if n_excluded:
+        log(f"[oropt] stress-exclusion: {n_excluded} design elements "
+            f"({100*stress_excluded.mean():.1f}%) ignored for sigma_max / "
+            "feasibility / monitor / report")
+
     # ---- initial / resumed state ------------------------------------------
     alive = np.ones(deck.n_design_elements, dtype=bool)
     sens_prev: Optional[np.ndarray] = None
@@ -232,6 +276,7 @@ def run_optimization(cfg: Config, resume: bool = False,
     pid = st.write_pid(work)
     status = st.Status(state="running", max_iter=oc.max_iter,
                        elements_total=deck.n_design_elements,
+                       stress_excluded_elems=n_excluded,
                        sigma_allow=cfg.constraints.sigma_allow,
                        d_allow=cfg.constraints.d_allow, pid=pid)
     st.write_status(work, status)
@@ -254,7 +299,7 @@ def run_optimization(cfg: Config, resume: bool = False,
             for i, (case, cdeck) in enumerate(zip(cases, case_decks)):
                 csolve = _case_solve_dir(solve_root, n_cases, i)
                 res, r = _solve_case(cfg, case, cdeck, alive, no_pin,
-                                     csolve, cfg.run.anim_dt)
+                                     csolve, cfg.run.anim_dt, exclude_elem_ids)
                 run_results.append(res)
                 if r is None:                       # this case failed -> abort iter
                     break
@@ -294,6 +339,7 @@ def run_optimization(cfg: Config, resume: bool = False,
                 d_allow=cfg.constraints.d_allow, feasible=feasible,
                 elements_alive=int(alive.sum()),
                 elements_total=deck.n_design_elements,
+                stress_excluded_elems=n_excluded,
                 or_termination=res.message, iter_wall_s=iter_wall,
                 elapsed_s=elapsed, eta_s=iter_wall * remaining,
                 message=("feasible" if feasible else "INFEASIBLE - backing off"),
@@ -305,10 +351,11 @@ def run_optimization(cfg: Config, resume: bool = False,
                 "elements_alive": int(alive.sum()), "feasible": feasible,
                 "iter_wall_s": round(iter_wall, 1), "or_termination": res.message})
             sens = opt.filter_history(raw, sens_prev)
+            vm_field = _scatter_max(case_results, deck.elem_ids)
+            if n_excluded:                       # drop the ignored stress from any view
+                vm_field[stress_excluded] = np.nan
             st.write_topology(work, deck.node_xyz, mesh.conn_rows, alive,
-                              fields={"sensitivity": sens,
-                                      "vonmises": _scatter_max(case_results,
-                                                               deck.elem_ids)},
+                              fields={"sensitivity": sens, "vonmises": vm_field},
                               iteration=it)
             if oc.archive_iterations:
                 # Archive EVERY load case's curated outputs (mutated deck +

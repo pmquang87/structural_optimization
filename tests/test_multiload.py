@@ -63,7 +63,8 @@ def _stub_solver(monkeypatch, results_by_stem, calls, fail_stems=()):
             return RunResult(False, "engine", "ERROR TERMINATION")
         return RunResult(True, "ok", "NORMAL TERMINATION")
 
-    def fake_extract(cfg, run_dir, keep_vtk=False):
+    def fake_extract(cfg, run_dir, keep_vtk=False, stem=None,
+                     exclude_element_ids=None):
         return results_by_stem[cfg.model.stem]
 
     monkeypatch.setattr(loop_mod, "run_solver", fake_run_solver)
