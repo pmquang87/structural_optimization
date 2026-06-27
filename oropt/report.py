@@ -130,6 +130,7 @@ class Summary:
     d_allow: float
     total_wall_s: float
     n_cases: int
+    stress_excluded: int = 0
 
     @property
     def multi_load(self) -> bool:
@@ -187,6 +188,8 @@ def _summarise(cfg: Config, status: Optional[st.Status],
         d_allow=_from("d_allow", "", cfg.constraints.d_allow),
         total_wall_s=total_wall,
         n_cases=len(cfg.load_cases),
+        stress_excluded=(int(getattr(status, "stress_excluded_elems", 0))
+                         if status is not None else 0),
     )
 
 
@@ -488,6 +491,12 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
             f'  <p class="note">σ_max and displacement are the '
             f'<strong>worst case across {s.n_cases} load cases</strong>; the '
             f'design is feasible only when every case is.</p>')
+    if s.stress_excluded:
+        parts.append(
+            f'  <p class="note">σ_max <strong>excludes {s.stress_excluded} '
+            f'element(s)</strong> in the configured stress-exclusion region(s) — '
+            f'their von-Mises is ignored for the peak and the feasibility verdict.'
+            f'</p>')
 
     img_blocks: list[str] = []
     for key, title in (("vf", "Volume fraction"),
@@ -589,6 +598,11 @@ def _md(s: Summary, work: Path, charts: dict[str, Path],
                   f"> σ_max and displacement are the **worst case across "
                   f"{s.n_cases} load cases**; the design is feasible only when "
                   f"every case is."]
+    if s.stress_excluded:
+        lines += ["",
+                  f"> σ_max **excludes {s.stress_excluded} element(s)** in the "
+                  f"configured stress-exclusion region(s) — their von-Mises is "
+                  f"ignored for the peak and the feasibility verdict."]
     lines += ["", "## Convergence", ""]
     any_chart = False
     for key, title in (("vf", "Volume fraction"),

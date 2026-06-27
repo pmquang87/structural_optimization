@@ -86,6 +86,17 @@ class Model:
     # (e.g. 99999999) and/or explicit node ids.
     freeze_group_ids: list = field(default_factory=list)
     freeze_node_ids: list = field(default_factory=list)
+    # User-defined stress-exclusion regions: any design element touching one of
+    # these nodes has its von-Mises *ignored* — left out of the reported peak
+    # stress (sigma_max), the feasibility check, and the stress shown in the
+    # Monitor/report. Use it for a known hot-spot a later design phase will fix
+    # (e.g. around a small cylinder) so it can't drive the optimisation or flag the
+    # design infeasible. Give /GRNOD/NODE/<id> group ids (e.g. 999999998) and/or
+    # explicit node ids. These elements are NOT frozen — they still take part in
+    # the optimisation; add them to freeze_group_ids/freeze_node_ids too if you
+    # also want to protect them from removal.
+    stress_exclude_group_ids: list = field(default_factory=list)
+    stress_exclude_node_ids: list = field(default_factory=list)
 
     def starter(self) -> Path:
         return Path(self.case_dir).resolve() / f"{self.stem}_0000.rad"

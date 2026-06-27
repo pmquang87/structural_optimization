@@ -59,12 +59,19 @@ def run_anim_to_vtk(cfg: Config, anim_file: Path, out_vtk: Path) -> Path:
 
 
 def parse_vtk(vtk_path: Path, design_part_id: int,
-              disp_node_id: Optional[int]) -> Results:
+              disp_node_id: Optional[int],
+              exclude_element_ids: Optional[np.ndarray] = None) -> Results:
     """Read the VTK and pull out design-part solid fields + the constrained node.
 
     Read with pyvista (VTK's own reader) — robust to the field names anim_to_vtk
     emits (``/``, ``&``, spaces) that trip simpler parsers. ``cell_data`` is global
     per cell, so filtering on ``PART_ID`` isolates the design solids directly.
+
+    ``exclude_element_ids`` is the stress-exclusion set (design elements touching a
+    known hot-spot the user flagged): their von-Mises is dropped from ``sigma_max``
+    so it never drives the feasibility verdict or the Monitor/report peak. The
+    per-element ``energy``/``vonmises`` arrays stay full (the sensitivity still sees
+    every element); only the reported peak stress excludes them.
     """
     import pyvista as pv
     grid = pv.read(str(vtk_path))
@@ -81,7 +88,11 @@ def parse_vtk(vtk_path: Path, design_part_id: int,
     eid = cell_arr(F_ELEMENT_ID).astype(np.int64)[keep]
     energy = cell_arr(F_ENERGY).astype(float)[keep]
     vm = cell_arr(F_VONMISES).astype(float)[keep]
-    sigma_max = float(vm.max()) if vm.size else float("nan")
+    vm_rated = vm                                       # von-Mises that counts toward sigma_max
+    if exclude_element_ids is not None and len(exclude_element_ids):
+        excl = np.isin(eid, np.asarray(exclude_element_ids, dtype=np.int64))
+        vm_rated = vm[~excl]
+    sigma_max = float(vm_rated.max()) if vm_rated.size else float("nan")
 
     disp = float("nan")
     if disp_node_id is not None and P_NODE_ID in grid.point_data:
@@ -96,11 +107,14 @@ def parse_vtk(vtk_path: Path, design_part_id: int,
 
 
 def extract(cfg: Config, run_dir: str | Path, keep_vtk: bool = False,
-            stem: Optional[str] = None) -> Results:
+            stem: Optional[str] = None,
+            exclude_element_ids: Optional[np.ndarray] = None) -> Results:
     """Convert the latest animation in *run_dir* and parse it into Results.
 
     *stem* selects which case's animation/VTK to read, defaulting to
     ``cfg.model.stem`` (the multi-load-case loop passes a per-case stem).
+    *exclude_element_ids* is forwarded to :func:`parse_vtk` so the stress-exclusion
+    region is dropped from the reported ``sigma_max``.
     """
     run_dir = Path(run_dir)
     stem = stem if stem is not None else cfg.model.stem
@@ -109,7 +123,8 @@ def extract(cfg: Config, run_dir: str | Path, keep_vtk: bool = False,
         raise FileNotFoundError(f"no animation file <{stem}A0NN> in {run_dir}")
     out_vtk = run_dir / f"{stem}_last.vtk"
     run_anim_to_vtk(cfg, anim, out_vtk)
-    res = parse_vtk(out_vtk, cfg.model.design_part_id, cfg.model.disp_node_id)
+    res = parse_vtk(out_vtk, cfg.model.design_part_id, cfg.model.disp_node_id,
+                    exclude_element_ids=exclude_element_ids)
     if not keep_vtk:
         out_vtk.unlink(missing_ok=True)
     return res

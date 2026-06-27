@@ -343,6 +343,22 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
              "stay fixed via their /BCS and still anchor connectivity.")
     aopt.protect_bc_nodes = not allow_del_bc
 
+    st.subheader("Stress-exclusion regions")
+    st.caption("Design elements touching these nodes have their von-Mises "
+               "**ignored** — left out of σ_max, the feasibility check and the "
+               "Monitor/report stress. Use for a known hot-spot a later design "
+               "phase will fix (they still take part in the optimisation; add "
+               "them to the keep-out set above too if you also want them frozen).")
+    sg = st.text_input(
+        "Ignore-stress /GRNOD/NODE group ids (comma-sep, e.g. 999999998)",
+        ",".join(str(x) for x in cfg.model.stress_exclude_group_ids))
+    sn = st.text_input("Ignore-stress explicit node ids (comma-sep)",
+                       ",".join(str(x) for x in cfg.model.stress_exclude_node_ids))
+    cfg.model.stress_exclude_group_ids = [
+        int(x) for x in sg.replace(" ", "").split(",") if x]
+    cfg.model.stress_exclude_node_ids = [
+        int(x) for x in sn.replace(" ", "").split(",") if x]
+
     _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS"}
     st.subheader(f"{_opt_short[opt_name]} parameters")
     g = st.columns(3)
@@ -534,6 +550,9 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
                        f"{len(cfg.load_cases)} load cases**; the design is "
                        "feasible only when every case is. Each case's animation "
                        "is under `solve/case_<i>/`.")
+        if getattr(status, "stress_excluded_elems", 0):
+            st.caption(f"σ_max ignores **{status.stress_excluded_elems} elements** "
+                       "in the configured stress-exclusion region(s).")
 
         hist = st_io.read_history(work)
         if hist:
