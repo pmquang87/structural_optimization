@@ -197,6 +197,31 @@ def test_per_case_limit_override_relaxes_gate(case_env, monkeypatch):
     assert status.sigma_max == 400.0
 
 
+def test_status_reports_per_case_limits_not_global(case_env, monkeypatch):
+    """The Monitor reads status.sigma_allow/d_allow + status.cases; these must
+    carry each case's OWN limit so the displayed limit matches what gated
+    feasibility, not the global Constraints/BC value."""
+    case_dir, out = case_env(("lc_a", "lc_b"))
+    cfg = _cfg(case_dir, out, "lc_a", [
+        LoadCase(name="a", stem="lc_a", weight=1.0),                 # -> global 250
+        LoadCase(name="b", stem="lc_b", weight=1.0, sigma_allow=500.0),
+    ])
+    _stub_solver(monkeypatch, {
+        "lc_a": _results(100.0, 0.30, energy=[1.0, 0.0]),   # worst disp
+        "lc_b": _results(400.0, 0.20, energy=[0.0, 1.0]),   # worst stress, own limit 500
+    }, calls=[])
+    status = loop_mod.run_optimization(cfg, log=lambda *_: None)
+
+    # headline σ_max is case b's (worst); its limit is b's own 500, NOT the global 250
+    assert status.sigma_max == 400.0 and status.sigma_allow == 500.0
+    # headline disp is case a's (worst); its limit is the global 1.0 fallback
+    assert status.disp == 0.30 and status.d_allow == 1.0
+    # full per-case breakdown, each gated against its own limit
+    by_name = {c["name"]: c for c in status.cases}
+    assert by_name["a"]["sigma_allow"] == 250.0 and by_name["b"]["sigma_allow"] == 500.0
+    assert by_name["a"]["feasible"] and by_name["b"]["feasible"]
+
+
 def test_solve_failure_in_one_case_fails_iteration(case_env, monkeypatch):
     case_dir, out = case_env(("lc_a", "lc_b"))
     cfg = _cfg(case_dir, out, "lc_a", [

@@ -19,6 +19,16 @@ def test_status_roundtrip(tmp_path):
     assert r.updated                      # timestamp stamped on write
 
 
+def test_status_cases_roundtrip(tmp_path):
+    s = st.Status(state="running",
+                  cases=[{"name": "a", "sigma_max": 100.0, "sigma_allow": 250.0,
+                          "disp": 0.3, "d_allow": 1.0, "feasible": True}])
+    st.write_status(tmp_path, s)
+    r = st.read_status(tmp_path)
+    assert r is not None and len(r.cases) == 1
+    assert r.cases[0]["name"] == "a" and r.cases[0]["feasible"] is True
+
+
 def test_history_append(tmp_path):
     for it in range(3):
         st.append_history(tmp_path, {"iteration": it, "volume_fraction": 1 - 0.1 * it,
