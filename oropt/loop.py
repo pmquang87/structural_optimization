@@ -5,7 +5,6 @@ monitor without ever touching the run. Resumable from ``checkpoint.npz``.
 """
 from __future__ import annotations
 
-import dataclasses
 import shutil
 import time
 from pathlib import Path
@@ -106,13 +105,9 @@ def _case_solve_dir(solve_root: Path, n_cases: int, i: int) -> Path:
     return solve_root if n_cases == 1 else solve_root / f"case_{i}"
 
 
-def _case_config(cfg: Config, case: ResolvedCase) -> Config:
-    """A shallow copy of *cfg* whose ``model.stem`` / ``model.disp_node_id`` are
-    the load case's, so the existing ``run_solver`` / ``extract`` (which key off
-    the model stem and disp node) operate on that case with no other change."""
-    return dataclasses.replace(
-        cfg, model=dataclasses.replace(cfg.model, stem=case.stem,
-                                       disp_node_id=case.disp_node_id))
+def _within(value: float, limit: Optional[float]) -> bool:
+    """True if *value* satisfies *limit*; a blank limit (``None``) is unconstrained."""
+    return limit is None or value <= limit
 
 
 def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
@@ -120,19 +115,22 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
                 exclude_elem_ids: Optional[np.ndarray] = None):
     """Write the alive deck for one load case, solve it, extract its results.
 
-    The per-case "solve + extract" unit reused for every case each iteration.
+    The per-case "solve + extract" unit reused for every case each iteration. The
+    case's ``stem`` / ``disp_node_id`` are passed straight to ``run_solver`` /
+    ``extract`` (they accept them explicitly), so one *cfg* drives every case.
     *exclude_elem_ids* (the stress-exclusion set, shared by all cases) is forwarded
     to ``extract`` so the case's ``sigma_max`` ignores those elements. Returns
     ``(run_result, results)`` where *results* is ``None`` if the solve failed (the
     caller surfaces *run_result*)."""
-    case_cfg = _case_config(cfg, case)
     _clean_solve_dir(solve_dir)
     deck.write(solve_dir / f"{case.stem}_0000.rad", alive, no_pin=no_pin)
     prepare_engine(case.engine, solve_dir / f"{case.stem}_0001.rad", anim_dt=anim_dt)
-    res = run_solver(case_cfg, solve_dir)
+    res = run_solver(cfg, solve_dir, stem=case.stem)
     if not res.ok:
         return res, None
-    return res, extract(case_cfg, solve_dir, exclude_element_ids=exclude_elem_ids)
+    return res, extract(cfg, solve_dir, stem=case.stem,
+                        disp_node_id=case.disp_node_id,
+                        exclude_element_ids=exclude_elem_ids)
 
 
 def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int,
@@ -206,10 +204,13 @@ def run_optimization(cfg: Config, resume: bool = False,
     oc = cfg.active_opts()
 
     # ---- load cases --------------------------------------------------------
-    # A single (default) case == the classic single-solve run. The primary case's
-    # deck defines the shared geometry/mesh/protected set; every other case must
-    # share the same design-part element ids (only its load cards differ).
+    # One load case == the classic single-solve run. The primary case's deck
+    # defines the shared geometry/mesh/protected set; every other case must share
+    # the same design-part element ids (only its load cards differ).
     cases = cfg.load_case_list()
+    if not cases:
+        raise ValueError("no load cases defined -- nothing to solve "
+                         "(define at least one load case)")
     n_cases = len(cases)
     primary = cases[0]
 
@@ -277,8 +278,10 @@ def run_optimization(cfg: Config, resume: bool = False,
     status = st.Status(state="running", max_iter=oc.max_iter,
                        elements_total=deck.n_design_elements,
                        stress_excluded_elems=n_excluded,
-                       sigma_allow=primary.sigma_allow,
-                       d_allow=primary.d_allow, pid=pid)
+                       sigma_allow=(primary.sigma_allow if primary.sigma_allow
+                                    is not None else float("nan")),
+                       d_allow=(primary.d_allow if primary.d_allow
+                                is not None else float("nan")), pid=pid)
     st.write_status(work, status)
 
     vfs: list[float] = []
@@ -322,24 +325,28 @@ def run_optimization(cfg: Config, resume: bool = False,
             raws = [opt.raw_sensitivity(r, deck.elem_ids, alive)
                     for r in case_results]
             raw = combine_sensitivity(raws, [c.weight for c in cases])
-            # Each case is gated against its OWN limits (load-case/model overrides,
-            # falling back to the global constraints); a design is feasible only
-            # when every case is. per_case carries the full breakdown for the GUI.
+            # Each case is gated against its OWN limits; a blank limit (None) leaves
+            # that quantity unconstrained. A design is feasible only when every case
+            # is. per_case carries the full breakdown for the GUI.
             per_case = [
                 {"name": case.name,
-                 "sigma_max": float(r.sigma_max), "sigma_allow": float(case.sigma_allow),
-                 "disp": float(r.disp), "d_allow": float(case.d_allow),
-                 "feasible": bool(r.sigma_max <= case.sigma_allow
-                                  and r.disp <= case.d_allow)}
+                 "sigma_max": float(r.sigma_max), "sigma_allow": case.sigma_allow,
+                 "disp": float(r.disp), "d_allow": case.d_allow,
+                 "feasible": bool(_within(r.sigma_max, case.sigma_allow)
+                                  and _within(r.disp, case.d_allow))}
                 for case, r in zip(cases, case_results)]
             feasible = all(c["feasible"] for c in per_case)
-            # Headline sigma_max/disp stay the worst across cases, but each is
-            # reported with the limit of the case it came from (not the global
-            # constraints) so the Monitor's "limit" matches what gated feasibility.
+            # Headline sigma_max/disp stay the worst across cases, each reported with
+            # the limit of the case it came from (a blank limit -> NaN, "no limit")
+            # so the Monitor's "limit" matches what gated feasibility.
             si = max(range(n_cases), key=lambda i: case_results[i].sigma_max)
             di = max(range(n_cases), key=lambda i: case_results[i].disp)
-            sigma_max, sigma_allow = case_results[si].sigma_max, cases[si].sigma_allow
-            disp, d_allow = case_results[di].disp, cases[di].d_allow
+            sigma_max = case_results[si].sigma_max
+            disp = case_results[di].disp
+            sigma_allow = cases[si].sigma_allow
+            sigma_allow = float("nan") if sigma_allow is None else sigma_allow
+            d_allow = cases[di].d_allow
+            d_allow = float("nan") if d_allow is None else d_allow
             vf = opt.volume_fraction(alive)
             vfs.append(vf)
 
@@ -378,9 +385,7 @@ def run_optimization(cfg: Config, resume: bool = False,
                 # (iter_NNNN/<stem>/) so a case's deck/listing/anim/restart stay
                 # grouped instead of intermixed; a single-case run archives
                 # straight into iter_NNNN/, byte-identical to before.
-                # Archive by each case's own stem (== model.stem for a classic
-                # single-case run, but the real per-case stem when model.stem is
-                # blank in a multi-load-case config) so the deck/listing/anim are
+                # Archive by each case's own stem so the deck/listing/anim are
                 # matched, not just the restart files.
                 for i, case in enumerate(cases):
                     _archive_iteration(_case_solve_dir(solve_root, n_cases, i),
@@ -426,13 +431,11 @@ def run_optimization(cfg: Config, resume: bool = False,
         # result/state.
         for i, case in enumerate(cases):
             try:
-                # Use a per-case cfg so convert_final keys off that case's stem
-                # (== model.stem for a single-case run, but the real stem when
-                # model.stem is blank in a multi-load-case config) and finds its
-                # <stem>A0* animation rather than nothing. Distinct stems -> the
-                # per-case d3plot files never collide in work/d3plot/.
-                convert_final(_case_config(cfg, case),
-                              _case_solve_dir(solve_root, n_cases, i), work, log)
+                # Pass the case's own stem so convert_final finds its <stem>A0*
+                # animation. Distinct stems -> the per-case d3plot files never
+                # collide in work/d3plot/.
+                convert_final(cfg, _case_solve_dir(solve_root, n_cases, i),
+                              work, stem=case.stem, log=log)
             except Exception as exc:  # noqa: BLE001
                 log(f"[oropt] d3plot: unexpected error during conversion: {exc}")
         try:

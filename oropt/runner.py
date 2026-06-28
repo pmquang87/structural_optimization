@@ -174,12 +174,11 @@ def run_solver(cfg: Config, run_dir: str | Path,
     """Run starter then engine in *run_dir*; return a RunResult.
 
     The deck (``<stem>_0000.rad`` / ``_0001.rad``) must already exist in *run_dir*.
-    *stem* selects which deck to solve, defaulting to ``cfg.model.stem``; the
-    multi-load-case loop passes a per-case stem so one *cfg* can drive several
-    cases without the implicit "swap model.stem" dance.
+    *stem* selects which deck to solve; the loop passes each case's stem. When
+    omitted it defaults to the primary (first) load case's stem.
     """
     run_dir = Path(run_dir).resolve()
-    stem = stem if stem is not None else cfg.model.stem
+    stem = stem if stem is not None else cfg.primary_case().stem
 
     # --- backend pre-flight + environment ---
     problems = backend_problems(cfg)

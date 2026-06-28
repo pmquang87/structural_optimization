@@ -98,16 +98,19 @@ def convert_stem(stem_path: Path, opts: D3plotOpts,
 
 
 def convert_final(cfg: Config, solve_dir: Path, work: Path,
+                  stem: Optional[str] = None,
                   log: Callable[[str], None] = print) -> Optional[Path]:
     """If enabled, convert the final design's animation (in ``solve_dir``) and
     move the resulting ``<stem>.d3plot*`` files into ``<work>/d3plot/``.
 
+    *stem* selects which case's animation to convert; the loop passes each case's
+    stem. When omitted it defaults to the primary (first) load case's stem.
     Returns the path of the moved ``<stem>.d3plot`` on success, else ``None``.
     """
     opts = cfg.d3plot
     if not opts.enabled:
         return None
-    stem = cfg.model.stem
+    stem = stem if stem is not None else cfg.primary_case().stem
     if convert_stem(solve_dir / stem, opts, log) is None:
         return None
     dest_dir = work / "d3plot"

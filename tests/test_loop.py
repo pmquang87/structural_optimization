@@ -6,8 +6,7 @@ from pathlib import Path
 from oropt.config import Config
 from oropt.loop import _archive_iteration, _clean_solve_dir
 
-# A realistic per-load-case stem (the kind that lives on a load case while
-# model.stem is left blank in a multi-load-case config).
+# A realistic per-load-case stem (the kind that lives on a load case).
 MULTILOAD_STEM = "implicit_elevator-linkage_pull"
 
 
@@ -111,26 +110,26 @@ def test_archive_iteration_subdir_nests_outputs_by_stem(tmp_path):
     assert {p.name for p in (tmp_path / "iter_0005").iterdir()} == {MULTILOAD_STEM}
 
 
-def test_archive_uses_primary_case_stem_when_model_stem_blank(tmp_path):
-    """Regression for the empty-stem trap: in a multi-load config ``model.stem``
-    is blank and the real stems live per load case. The fixed call site archives
-    by the PRIMARY case's stem (deck + listing + anim + rst); archiving by the
-    old ``cfg.model.stem`` would have matched only the ``*.rst`` files."""
+def test_archive_uses_primary_case_stem(tmp_path):
+    """The archive call site keys off the load case's own stem (deck + listing +
+    anim + rst). Regression it guards: a blank stem would make the .rad/.out/A0*
+    patterns match nothing while the ``<stem>*.rst`` glob degrades to ``*.rst`` and
+    grabs every restart -> only the .rst would be archived."""
     cfg = Config.from_dict({
-        "model": {"stem": ""},
         "load_cases": [
-            {"name": "pull", "stem": MULTILOAD_STEM, "weight": 1.0},
-            {"name": "push", "stem": "implicit_elevator-linkage_push", "weight": 1.0},
+            {"name": "pull", "stem": MULTILOAD_STEM, "weight": 1.0,
+             "sigma_allow": 300.0, "d_allow": 1.0},
+            {"name": "push", "stem": "implicit_elevator-linkage_push", "weight": 1.0,
+             "sigma_allow": 300.0, "d_allow": 1.0},
         ],
     })
     primary = cfg.load_case_list()[0]
-    assert cfg.model.stem == ""               # the trap: model stem is blank ...
-    assert primary.stem == MULTILOAD_STEM     # ... but the real stem is per-case
+    assert primary.stem == MULTILOAD_STEM     # the real stem lives per-case
 
     solve_dir = tmp_path / "solve" / "case_0"
     _fake_solve_outputs(solve_dir, primary.stem)
 
-    # Fixed call site: passes primary.stem -> the full curated snapshot lands.
+    # Correct call site: passes primary.stem -> the full curated snapshot lands.
     good = _archive_iteration(solve_dir, tmp_path / "good", primary.stem, it=0,
                               keep_restart=True)
     assert {p.name for p in good.iterdir()} == {
@@ -138,10 +137,10 @@ def test_archive_uses_primary_case_stem_when_model_stem_blank(tmp_path):
         f"{primary.stem}A001", f"{primary.stem}A002",
         f"{primary.stem}_0000_0001.rst"}
 
-    # Old buggy call site: cfg.model.stem == '' makes the .rad/.out/A0* patterns
-    # match nothing while the `<stem>*.rst` glob degrades to `*.rst` and grabs
-    # every restart -> only the .rst would be archived.
-    bad = _archive_iteration(solve_dir, tmp_path / "bad", cfg.model.stem, it=0,
+    # A blank stem makes the .rad/.out/A0* patterns match nothing while the
+    # `<stem>*.rst` glob degrades to `*.rst` and grabs every restart -> only the
+    # .rst would be archived.
+    bad = _archive_iteration(solve_dir, tmp_path / "bad", "", it=0,
                              keep_restart=True)
     assert {p.name for p in bad.iterdir()} == {f"{primary.stem}_0000_0001.rst"}
 

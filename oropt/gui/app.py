@@ -28,7 +28,7 @@ from oropt import queue_runner
 from oropt import status as st_io
 from oropt.animate import (VIEWS as _BUILTIN_VIEWS, frame_count,
                            make_animation, selectable_views)
-from oropt.config import AnimateOpts, Config
+from oropt.config import AnimateOpts, Config, LoadCase
 from oropt.gui import queue_store as qs
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
@@ -87,11 +87,15 @@ def force_kill(work: Path) -> None:
             pass
 
 
+def _fmt_limit(v, fmt: str = "{:.0f}") -> str:
+    """Format a feasibility limit for display; a blank limit (None/NaN) -> '—'."""
+    return "—" if v is None or v != v else fmt.format(v)
+
+
 # ---- Input tab -------------------------------------------------------------
 def render_input_tab(cfg: Config) -> None:
     st.subheader("Model")
     cfg.model.case_dir = st.text_input("Case directory", cfg.model.case_dir)
-    cfg.model.stem = st.text_input("Deck stem", cfg.model.stem)
     cfg.work_dir = st.text_input(
         "Run / output folder", cfg.work_dir,
         placeholder=cfg.run_folder(),
@@ -99,15 +103,17 @@ def render_input_tab(cfg: Config) -> None:
              f"the case directory itself (→ `{cfg.run_folder()}`); the mutated "
              "deck is isolated in its solve/ sub-folder so the source decks are "
              "never clobbered.")
-    cc = st.columns(3)
+    cc = st.columns(2)
     cfg.model.design_part_id = int(cc[0].number_input(
         "Design part id", value=cfg.model.design_part_id, step=1))
-    cfg.model.disp_node_id = int(cc[1].number_input(
-        "Displacement node id", value=cfg.model.disp_node_id or 0, step=1)) or None
-    cfg.model.bc_group_id = int(cc[2].number_input(
+    cfg.model.bc_group_id = int(cc[1].number_input(
         "BC node-group id", value=cfg.model.bc_group_id, step=1))
+    cases = cfg.load_case_list()
+    stems = ", ".join(c.stem for c in cases) if cases else "—"
     st.caption(f"OpenRadioss root: `{cfg.or_paths.root}`  ·  np={cfg.run.np} "
-               f"nt={cfg.run.nt}  ·  starter `{cfg.model.starter().name}`")
+               f"nt={cfg.run.nt}  ·  deck(s) `{stems}`")
+    st.caption("The deck stem, displacement node and σ/d limits are defined "
+               "**per load case** on the 🔀 Load cases tab.")
 
     st.subheader("Solver backend")
     cfg.docker.enabled = st.checkbox(
@@ -129,15 +135,20 @@ def render_input_tab(cfg: Config) -> None:
 
 
 # ---- Load cases tab --------------------------------------------------------
-def render_load_cases_tab(cfg: Config) -> None:
+def render_load_cases_tab(cfg: Config, cfg_path: Path) -> None:
     st.subheader("Load cases")
     st.caption(
-        "Optimise the part against several loads (the linkage pulled in "
-        "different directions) by minimising a **weighted-sum compliance**. "
-        "Each row is a separate deck pair in the case directory that shares the "
-        "same mesh — only its load differs. **Leave the table empty for a "
-        "classic single-load run.** Blank *stem* → the model deck stem (Input "
-        "tab); blank *disp/σ/d* cells inherit the model & constraints defaults.")
+        "Define the load case(s) the part is optimised against — the **single "
+        "source of truth** for each deck's stem, the constrained displacement "
+        "node and the σ/d limits. A single-load run is just **one** row. Add more "
+        "rows to optimise a **weighted-sum compliance** over several loads (the "
+        "linkage pulled in different directions); each row is a separate deck pair "
+        "in the case directory that shares the same mesh — only its load differs. "
+        "*Deck stem* is required; leave *σ_allow* / *d_allow* blank to leave that "
+        "quantity unconstrained.")
+    if not cfg.load_cases:               # always offer at least one row to fill in
+        cfg.load_cases = [LoadCase(name="case", weight=1.0,
+                                   sigma_allow=250.0, d_allow=1.0)]
     lc_df = pd.DataFrame(records_from_load_cases(cfg.load_cases),
                          columns=CASE_COLUMNS)
     lc_edited = st.data_editor(
@@ -147,38 +158,44 @@ def render_load_cases_tab(cfg: Config) -> None:
                 "Name", help="Label for the load case, e.g. pull_z."),
             "stem": st.column_config.TextColumn(
                 "Deck stem", help="<stem>_0000.rad / _0001.rad in the case "
-                                  "directory. Blank → the model deck stem."),
+                                  "directory. Required."),
             "weight": st.column_config.NumberColumn(
                 "Weight", min_value=0.0, step=0.1, format="%.3f",
                 help="wᵢ in s_e = Σ wᵢ·(energyᵢ / max energyᵢ). Blank → 1."),
             "disp_node_id": st.column_config.NumberColumn(
                 "Disp node id", step=1, format="%d",
-                help="Constrained node for this case. Blank → model disp node."),
+                help="Constrained node for this case. Blank → none tracked."),
             "sigma_allow": st.column_config.NumberColumn(
                 "σ_allow [MPa]", min_value=0.0, step=1.0,
-                help="Per-case stress limit. Blank → the global constraint."),
+                help="Per-case von-Mises stress limit. Blank → no stress limit."),
             "d_allow": st.column_config.NumberColumn(
                 "d_allow [mm]", min_value=0.0, step=0.1,
-                help="Per-case displacement limit. Blank → the global constraint."),
+                help="Per-case displacement limit. Blank → no displacement limit."),
         })
     cfg.load_cases = load_cases_from_records(lc_edited.to_dict("records"))
-    if cfg.load_cases:
-        st.success(
-            f"{len(cfg.load_cases)} load case(s): every iteration solves all of "
-            "them (≈ N× a single-case run, each under `solve/case_<i>/`); the "
-            "design is feasible only when **every** case is. Save the config "
-            "(Constraints / BC tab) or ➕ Add to queue to apply.")
+    n = len(cfg.load_cases)
+    if n == 0:
+        st.warning("Define at least one load case — fill in a row above "
+                   "(a deck stem is required; σ_allow / d_allow may be blank).")
+    elif n == 1:
+        st.info("Single load case (classic single-load BESO). Add a row above to "
+                "optimise several loads.")
     else:
-        st.info("No load cases — the run uses the single model deck (classic "
-                "single-load BESO). Add a row above to optimise several loads.")
+        st.success(
+            f"{n} load cases: every iteration solves all of them (≈ {n}× a "
+            "single-case run, each under `solve/case_<i>/`); the design is "
+            "feasible only when **every** case is.")
+    if st.button("💾 Save config", key="lc_save"):
+        cfg.to_yaml(cfg_path)
+        st.success(f"Saved to {cfg_path}")
 
 
 # ---- shared evolution-animation camera/playback widgets --------------------
 def render_camera_settings(opts: AnimateOpts, key_prefix: str) -> None:
     """Render the evolution-animation camera & playback widgets into *opts*.
 
-    Shared by the Constraints/BC tab (settings the post-run animation will use)
-    and the 🎬 Re-animate tab (settings for an on-demand re-render), so the two
+    Shared by the Optimiser / Output tab (settings the post-run animation will
+    use) and the 🎬 Re-animate tab (settings for an on-demand re-render), so the two
     can never drift. Every widget writes straight back into the passed *opts*
     (an :class:`~oropt.config.AnimateOpts`); *key_prefix* keeps the two instances'
     Streamlit widget keys distinct so both can live on the page at once.
@@ -275,8 +292,8 @@ def render_appearance_settings(opts: AnimateOpts, key_prefix: str
                                ) -> tuple[bool, bool]:
     """Render the evolution-animation appearance & resolution widgets into *opts*.
 
-    Shared by the Constraints/BC tab (the look the post-run animation will use) and
-    the 🎬 Re-animate tab (an on-demand re-render), so the two can never drift — the
+    Shared by the Optimiser / Output tab (the look the post-run animation will use)
+    and the 🎬 Re-animate tab (an on-demand re-render), so the two can never drift — the
     same split as :func:`render_camera_settings`. Returns ``(color_ok, bg_ok)`` from
     the two colour pickers so the caller can gate its action button on valid
     colours. *key_prefix* namespaces the widgets so both instances coexist.
@@ -312,15 +329,10 @@ def render_appearance_settings(opts: AnimateOpts, key_prefix: str
     return color_ok, bg_ok
 
 
-# ---- Constraints / BC tab --------------------------------------------------
+# ---- Optimiser / Output tab ------------------------------------------------
 def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
-    st.subheader("Constraints")
-    a, b = st.columns(2)
-    cfg.constraints.sigma_allow = a.number_input(
-        "Max von-Mises σ_allow [MPa]", value=float(cfg.constraints.sigma_allow))
-    cfg.constraints.d_allow = b.number_input(
-        "Max displacement d_allow [mm]", value=float(cfg.constraints.d_allow))
-
+    st.caption("Feasibility limits (σ_allow / d_allow) are now set **per load "
+               "case** on the 🔀 Load cases tab.")
     st.subheader("Optimiser")
     _opts = ["beso", "levelset", "tobs"]
     _opt_labels = {"beso": "BESO — bi-directional element removal",
@@ -550,9 +562,11 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
         k = st.columns(4)
         k[0].metric("Volume fraction", f"{status.volume_fraction:.3f}")
         k[1].metric("σ_max [MPa]", f"{status.sigma_max:.1f}",
-                    f"limit {status.sigma_allow:.0f}", delta_color="off")
+                    f"limit {_fmt_limit(status.sigma_allow, '{:.0f}')}",
+                    delta_color="off")
         k[2].metric("disp [mm]", f"{status.disp:.4f}",
-                    f"limit {status.d_allow:.2f}", delta_color="off")
+                    f"limit {_fmt_limit(status.d_allow, '{:.2f}')}",
+                    delta_color="off")
         eta = status.eta_s / 60 if status.eta_s == status.eta_s else float("nan")
         k[3].metric("ETA [min]", "—" if eta != eta else f"{eta:.0f}",
                     f"elapsed {status.elapsed_s/60:.0f} min", delta_color="off")
@@ -564,8 +578,10 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
                        "(below). Each case's animation is under `solve/case_<i>/`.")
             cdf = pd.DataFrame([{
                 "case": c["name"],
-                "σ_max [MPa]": c["sigma_max"], "σ_allow [MPa]": c["sigma_allow"],
-                "disp [mm]": c["disp"], "d_allow [mm]": c["d_allow"],
+                "σ_max [MPa]": c["sigma_max"],
+                "σ_allow [MPa]": _fmt_limit(c["sigma_allow"], "{:.0f}"),
+                "disp [mm]": c["disp"],
+                "d_allow [mm]": _fmt_limit(c["d_allow"], "{:.2f}"),
                 "feasible": "✅" if c["feasible"] else "⚠️",
             } for c in cases])
             st.dataframe(cdf, hide_index=True, use_container_width=True)
@@ -911,12 +927,12 @@ if qcol[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive)
 
 # ---- tabs (each body lives in a render_*_tab function above) ---------------
 tab_in, tab_lc, tab_con, tab_mon, tab_anim, tab_q = st.tabs(
-    ["📥 Input", "🔀 Load cases", "🎚 Constraints / BC", "📊 Monitor",
+    ["📥 Input", "🔀 Load cases", "🎚 Optimiser / Output", "📊 Monitor",
      "🎬 Re-animate", "🧮 Queue"])
 with tab_in:
     render_input_tab(cfg)
 with tab_lc:
-    render_load_cases_tab(cfg)
+    render_load_cases_tab(cfg, cfg_path)
 with tab_con:
     render_constraints_tab(cfg, cfg_path)
 with tab_mon:

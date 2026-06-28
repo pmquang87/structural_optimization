@@ -134,8 +134,10 @@ in progress.
 
 ## Configuration highlights (`configs/elevator_linkage.yaml`)
 
-* `constraints.sigma_allow`, `constraints.d_allow` — the mass-minimisation limits,
-  enforced on OpenRadioss's high-fidelity values each iteration.
+* Feasibility limits `sigma_allow` / `d_allow` (enforced on OpenRadioss's
+  high-fidelity values each iteration) are defined **per load case** in
+  `load_cases:` — see *Multiple load cases* below. There is no global
+  `constraints` block; even a single-load run is one load case.
 * `beso.evolution_rate`, `target_volume_fraction`, `filter_radius`,
   `history_weight`, `sensitivity` (`energy`|`vonmises`|`blend`).
 * `optimizer` (default `beso`) — selects the discrete topology optimiser. All
@@ -164,26 +166,31 @@ in progress.
   `{axis: x|y|z, offset: <coord>}`, mirrored *either-alive ⇒ both-alive*), and
   overhang self-support via `build_direction` (`[x,y,z]`, `null` = off) +
   `max_overhang_angle` (cone half-angle in degrees from the build direction).
-* **Multiple load cases** (`load_cases:`, empty by default) — optimise one
-  structure against several loads (the elevator linkage pulled in different
-  directions) by minimising a **weighted-sum compliance**. Each entry is a
-  separate deck pair sharing the same mesh, differing only in its applied-load
-  cards:
+* **Load cases** (`load_cases:`, at least one required) — the single source of
+  truth for each deck's `stem`, its constrained `disp_node_id`, and its
+  feasibility limits `sigma_allow` / `d_allow`. A single-load run is just **one**
+  load case; add more to optimise one structure against several loads (the
+  elevator linkage pulled in different directions) by minimising a **weighted-sum
+  compliance**. Each entry is a separate deck pair sharing the same mesh,
+  differing only in its applied-load cards:
 
   ```yaml
   load_cases:
-    - {name: pull_z, stem: implicit_pull_z, weight: 1.0}
-    - {name: pull_x, stem: implicit_pull_x, weight: 0.5, sigma_allow: 480.0}
-    - {name: side,   stem: implicit_side,   weight: 0.5, disp_node_id: 10021400}
+    - {name: pull_z, stem: implicit_pull_z, weight: 1.0, disp_node_id: 10021367, sigma_allow: 250.0, d_allow: 1.0}
+    - {name: pull_x, stem: implicit_pull_x, weight: 0.5, disp_node_id: 10021367, sigma_allow: 480.0, d_allow: 1.0}
+    - {name: side,   stem: implicit_side,   weight: 0.5, disp_node_id: 10021400, sigma_allow: 250.0, d_allow: 2.0}
   ```
 
-  Blank per-case fields inherit the single-case defaults — `stem` → `model.stem`,
-  `disp_node_id` → `model.disp_node_id`, `sigma_allow`/`d_allow` → `constraints`.
+  `stem` is **required** on every row; `weight` defaults to 1, and `disp_node_id`,
+  `sigma_allow` and `d_allow` may be omitted — a blank `sigma_allow`/`d_allow`
+  leaves that quantity **unconstrained** (no feasibility limit), and a blank
+  `disp_node_id` tracks no displacement node.
   All cases must share the same design-part element ids (only the load differs).
-  Leave `load_cases` empty for the classic single-solve run (byte-identical
-  behaviour). Editable on the GUI's dedicated **Load cases** tab (add/remove rows;
-  blank optional cells inherit defaults); the *Monitor* tab then flags that
-  σ_max/disp are the worst across all cases. See
+  Editable on the GUI's dedicated **Load cases** tab (add/remove rows); the
+  *Monitor* tab then flags that σ_max/disp are the worst across all cases, with a
+  per-case breakdown. A legacy single-case config (old `model.stem` +
+  `constraints:` block, no `load_cases`) is migrated into one load case on read.
+  See
   **[How multiple load cases work](#how-multiple-load-cases-work)** below for the
   per-iteration solve → combine → update flow.
 * **Keep-out / non-design regions** — `model.freeze_group_ids` (e.g. `[99999999]`,
@@ -203,14 +210,14 @@ in progress.
   cylinder) so that local artefact can't keep the design infeasible or distort the
   loop's back-off. Unlike the keep-out set these elements are **not frozen** — they
   still take part in the optimisation; list them in `freeze_*` as well if you also
-  want to protect them from removal. Editable on the GUI's *Constraints / BC* tab;
+  want to protect them from removal. Editable on the GUI's *Optimiser / Output* tab;
   the *Monitor* and report then note how many elements σ_max is ignoring.
 * `beso.protect_bc_nodes` (default `true`) — whether elements touching the BC
   node-group (`model.bc_group_id`) are frozen. Set it `false` to **allow the
   optimiser to delete material at the BC nodes** too; those nodes stay fixed via
   their own `/BCS` (so the solve is still well-posed) and continue to anchor
   connectivity, so floating islands are still dropped. Exposed as **Allow
-  deleting elements at BC nodes** on the GUI's *Constraints / BC* tab.
+  deleting elements at BC nodes** on the GUI's *Optimiser / Output* tab.
 * `work_dir` — the run/output folder for scratch, checkpoints and status files.
   **Leave it blank to default to the input deck folder (`model.case_dir`)
   itself**, so a run writes its artefacts right next to the deck it optimises;
@@ -229,7 +236,7 @@ in progress.
   picks `tool_root/.venv` (where lasso-python/tqdm live), so oropt's own
   environment stays clean. It is best-effort: a missing tool, interpreter or
   dependency is logged and skipped, never failing the run. Also exposed as
-  **Post-processing — d3plot** on the GUI's *Constraints / BC* tab.
+  **Post-processing — d3plot** on the GUI's *Optimiser / Output* tab.
 * `smooth` — surface smoothing of the optimised geometry, **on by default**
   (`smooth.enabled: true`). Extracts the design surface, smooths it
   (`method: taubin` volume-preserving, or `laplacian`; `iterations` passes) and
@@ -335,9 +342,9 @@ sequentially, not in parallel).
 Post-processing covers **every** case: the per-iteration archive
 (`iter_NNNN/<stem>…`) and the final-design d3plot (`d3plot/<stem>.d3plot`) are
 written per case, while surface smoothing emits the one shared design (the final
-`topology_smoothed.<ext>` plus each `topology_smoothed_iterNNNN.<ext>`). Leave
-`load_cases` empty for the classic single-solve run — the multi-case path then
-collapses to exactly the original single-solve behaviour (byte-identical).
+`topology_smoothed.<ext>` plus each `topology_smoothed_iterNNNN.<ext>`). A single
+load case is the classic single-solve run — with one case the multi-case path
+collapses to exactly that behaviour.
 
 ## Outputs
 

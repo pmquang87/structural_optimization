@@ -70,19 +70,20 @@ def test_numeric_strings_are_coerced():
 
 
 def test_editor_output_resolves_through_config(tmp_path):
+    # Each load case is the single source of truth for its stem/disp/limits;
+    # there is no inheritance from a global model/constraints.
     cfg = Config()
-    cfg.model.stem = "base"
-    cfg.model.disp_node_id = 7
-    cfg.constraints.sigma_allow = 250.0
-    cfg.constraints.d_allow = 1.0
     cfg.load_cases = load_cases_from_records([
-        {"name": "z", "stem": "lc_z", "weight": 1.0},          # inherit limits
-        {"name": "uses_model_deck", "stem": "", "weight": 0.5},  # blank stem
+        {"name": "z", "stem": "lc_z", "weight": 1.0,
+         "disp_node_id": 7, "sigma_allow": 250.0, "d_allow": 1.0},
+        {"name": "push", "stem": "lc_push", "weight": 0.5,
+         "disp_node_id": 9, "sigma_allow": 300.0, "d_allow": 2.0},
     ])
     resolved = cfg.load_case_list()
-    assert [c.stem for c in resolved] == ["lc_z", "base"]       # blank -> model.stem
-    assert resolved[0].disp_node_id == 7                        # inherited
+    assert [c.stem for c in resolved] == ["lc_z", "lc_push"]
+    assert resolved[0].disp_node_id == 7
     assert resolved[0].sigma_allow == 250.0 and resolved[0].d_allow == 1.0
+    assert resolved[1].sigma_allow == 300.0 and resolved[1].d_allow == 2.0
     # survives a YAML roundtrip (Save config -> reload)
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)
