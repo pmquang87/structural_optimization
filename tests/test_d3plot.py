@@ -9,7 +9,6 @@ import sys
 
 from oropt.config import Config, D3plotOpts
 from oropt.d3plot import _resolve_python, convert_final, convert_stem
-from oropt.loop import _case_config
 
 
 def test_d3plot_defaults_on_and_roundtrips(tmp_path):
@@ -66,24 +65,36 @@ def test_convert_final_disabled_is_noop(tmp_path):
     assert convert_final(cfg, tmp_path, tmp_path, lambda *_: None) is None
 
 
-def test_convert_final_resolves_primary_case_stem_multiload(tmp_path):
-    """In a multi-load config model.stem is blank and the real stem lives on the
-    load case. The loop passes a primary-case cfg, so convert_final must key off
-    the PRIMARY case's stem and look for ``<primary.stem>A0*`` (not a blank-stem
-    ``A0*`` that would find no animation)."""
+def test_convert_final_uses_passed_case_stem_multiload(tmp_path):
+    """The deck stem lives on the load case; the loop passes each case's stem to
+    convert_final, which must look for ``<stem>A0*`` (not a blank-stem ``A0*``
+    that would find no animation)."""
     cfg = Config.from_dict({
-        "model": {"stem": ""},
         "d3plot": {"enabled": True},
-        "load_cases": [{"name": "pull", "stem": "implicit_elevator-linkage_pull"}],
+        "load_cases": [{"name": "pull", "stem": "implicit_elevator-linkage_pull",
+                        "sigma_allow": 300.0, "d_allow": 1.0}],
     })
     primary = cfg.load_case_list()[0]
-    case_cfg = _case_config(cfg, primary)
-    assert case_cfg.model.stem == primary.stem        # the helper threads the stem
 
     solve_dir = tmp_path / "case_0"
     solve_dir.mkdir()
     logs: list[str] = []
     # No animation present -> guard path returns None, but the logged path proves
-    # it targeted the primary case's <stem>A0* glob.
-    assert convert_final(case_cfg, solve_dir, tmp_path, logs.append) is None
+    # it targeted the passed case's <stem>A0* glob.
+    assert convert_final(cfg, solve_dir, tmp_path, stem=primary.stem,
+                         log=logs.append) is None
     assert any(f"{primary.stem}A0*" in m for m in logs)
+
+
+def test_convert_final_defaults_to_primary_case_stem(tmp_path):
+    """Omitting *stem* falls back to the primary (first) load case's stem."""
+    cfg = Config.from_dict({
+        "d3plot": {"enabled": True},
+        "load_cases": [{"name": "pull", "stem": "deck_pull",
+                        "sigma_allow": 300.0, "d_allow": 1.0}],
+    })
+    solve_dir = tmp_path / "case_0"
+    solve_dir.mkdir()
+    logs: list[str] = []
+    assert convert_final(cfg, solve_dir, tmp_path, log=logs.append) is None
+    assert any("deck_pullA0*" in m for m in logs)

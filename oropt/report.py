@@ -172,6 +172,15 @@ def _summarise(cfg: Config, status: Optional[st.Status],
     else:
         feasible = None
 
+    # Last-resort limits (status almost always supplies them): the primary load
+    # case's limits, or NaN if none/blank.
+    cases = cfg.load_case_list()
+    primary = cases[0] if cases else None
+    sig_fallback = (primary.sigma_allow if primary and primary.sigma_allow is not None
+                    else float("nan"))
+    d_fallback = (primary.d_allow if primary and primary.d_allow is not None
+                  else float("nan"))
+
     return Summary(
         optimizer=cfg.optimizer_name(),
         iterations=(len(history) if history
@@ -183,9 +192,9 @@ def _summarise(cfg: Config, status: Optional[st.Status],
         final_vf=final_vf,
         mass_removed_pct=mass_removed,
         sigma_max=_from("sigma_max", "sigma_max", float("nan")),
-        sigma_allow=_from("sigma_allow", "", cfg.constraints.sigma_allow),
+        sigma_allow=_from("sigma_allow", "", sig_fallback),
         disp=_from("disp", "disp", float("nan")),
-        d_allow=_from("d_allow", "", cfg.constraints.d_allow),
+        d_allow=_from("d_allow", "", d_fallback),
         total_wall_s=total_wall,
         n_cases=len(cfg.load_cases),
         stress_excluded=(int(getattr(status, "stress_excluded_elems", 0))

@@ -27,6 +27,10 @@ F_VONMISES = "3DELEM_Von_Mises"
 P_NODE_ID = "NODE_ID"
 P_DISP = "Displacement"
 
+# Sentinel for extract()'s disp_node_id default, so an explicit None (a case that
+# tracks no displacement node) is distinct from "argument omitted".
+_UNSET = object()
+
 
 @dataclass
 class Results:
@@ -107,23 +111,28 @@ def parse_vtk(vtk_path: Path, design_part_id: int,
 
 
 def extract(cfg: Config, run_dir: str | Path, keep_vtk: bool = False,
-            stem: Optional[str] = None,
+            stem: Optional[str] = None, disp_node_id=_UNSET,
             exclude_element_ids: Optional[np.ndarray] = None) -> Results:
     """Convert the latest animation in *run_dir* and parse it into Results.
 
-    *stem* selects which case's animation/VTK to read, defaulting to
-    ``cfg.model.stem`` (the multi-load-case loop passes a per-case stem).
-    *exclude_element_ids* is forwarded to :func:`parse_vtk` so the stress-exclusion
-    region is dropped from the reported ``sigma_max``.
+    *stem* selects which case's animation/VTK to read and *disp_node_id* which
+    node's displacement to report; the loop passes each case's own values. When
+    *stem* / *disp_node_id* are omitted they default to the primary (first) load
+    case; an explicit ``disp_node_id=None`` is respected (the case tracks no
+    displacement node). *exclude_element_ids* is forwarded to :func:`parse_vtk` so
+    the stress-exclusion region is dropped from the reported ``sigma_max``.
     """
     run_dir = Path(run_dir)
-    stem = stem if stem is not None else cfg.model.stem
+    if stem is None:
+        stem = cfg.primary_case().stem
+    if disp_node_id is _UNSET:
+        disp_node_id = cfg.primary_case().disp_node_id
     anim = find_last_anim(run_dir, stem)
     if anim is None:
         raise FileNotFoundError(f"no animation file <{stem}A0NN> in {run_dir}")
     out_vtk = run_dir / f"{stem}_last.vtk"
     run_anim_to_vtk(cfg, anim, out_vtk)
-    res = parse_vtk(out_vtk, cfg.model.design_part_id, cfg.model.disp_node_id,
+    res = parse_vtk(out_vtk, cfg.model.design_part_id, disp_node_id,
                     exclude_element_ids=exclude_element_ids)
     if not keep_vtk:
         out_vtk.unlink(missing_ok=True)

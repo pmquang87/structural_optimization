@@ -111,8 +111,8 @@ def check_config(cfg: Config, *, raw: dict | None = None,
 
     # --- model directory / decks ---
     m = cfg.model
-    if not (m.stem or "").strip() and not cfg.load_cases:
-        err("model.stem is blank and no load_cases are defined -- nothing to solve")
+    if not cfg.load_cases:
+        err("no load cases defined -- define at least one load case (Load cases tab)")
 
     case_dir = Path(m.case_dir).resolve()
     if not case_dir.exists():
@@ -120,8 +120,11 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     elif not case_dir.is_dir():
         err(f"model.case_dir is not a directory: {case_dir}")
 
-    cases = cfg.load_case_list()                 # includes the single default case
+    cases = cfg.load_case_list()
     for c in cases:
+        if not (c.stem or "").strip():
+            err(f"load case {c.name!r}: deck stem is required")
+            continue
         if not c.starter.exists():
             err(f"load case {c.name!r}: starter deck not found: {c.starter}")
         if not c.engine.exists():
@@ -162,6 +165,8 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             err(f"load case {c.name!r}: weight must be >= 0: got {c.weight}")
     if weights and not any(w > 0 for w in weights):
         err("all load-case weights are zero -- the sensitivity has no objective")
+    # sigma_allow / d_allow are optional: a blank limit (None) leaves that quantity
+    # unconstrained. Only a set, non-positive limit is an error.
     for c in cases:
         if c.sigma_allow is not None and c.sigma_allow <= 0:
             err(f"load case {c.name!r}: sigma_allow must be > 0: got {c.sigma_allow}")

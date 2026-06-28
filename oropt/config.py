@@ -74,12 +74,13 @@ class DockerOpts:
 
 @dataclass
 class Model:
-    """The converted deck and what it contains."""
-    case_dir: str = "."                 # folder holding <stem>_0000.rad / _0001.rad
-    stem: str = "implicit_elevator-linkage"
+    """The shared geometry of the design: which part is the design domain and
+    which nodes anchor it. The deck identity (``stem``) and the constrained
+    displacement node live per load case (see :class:`LoadCase`), not here, so a
+    single-load run is just one load case."""
+    case_dir: str = "."                 # folder holding <stem>_0000.rad / _0001.rad for each load case
     design_part_id: int = 60000000      # /TETRA4/<id> block to optimise
     design_node_min: int = 60000000     # design nodes have ids >= this (rigid parts are 10xxxxxx)
-    disp_node_id: Optional[int] = None  # node whose displacement is constrained (default: load rigid-body master)
     bc_group_id: int = 60000000         # /GRNOD/NODE/<id> holding the BC/symmetry nodes to protect
     # User-defined keep-out / non-design regions: any design element touching one
     # of these nodes is frozen (never deleted). Give /GRNOD/NODE/<id> group ids
@@ -97,19 +98,6 @@ class Model:
     # also want to protect them from removal.
     stress_exclude_group_ids: list = field(default_factory=list)
     stress_exclude_node_ids: list = field(default_factory=list)
-
-    def starter(self) -> Path:
-        return Path(self.case_dir).resolve() / f"{self.stem}_0000.rad"
-
-    def engine(self) -> Path:
-        return Path(self.case_dir).resolve() / f"{self.stem}_0001.rad"
-
-
-@dataclass
-class Constraints:
-    """High-fidelity feasibility limits, checked against OpenRadioss output."""
-    sigma_allow: float = 250.0   # max von-Mises [MPa]
-    d_allow: float = 1.0         # max |displacement| at disp_node_id [mm]
 
 
 @dataclass
@@ -401,18 +389,23 @@ class LoadCase:
     cases, so each iteration writes the same alive set into every case's deck and
     only the load cards differ.
 
-    Blank/None fields fall back to the single-case defaults: ``stem`` ->
-    ``model.stem``, ``disp_node_id`` -> ``model.disp_node_id``, ``sigma_allow`` /
-    ``d_allow`` -> the global ``constraints``. The combined sensitivity is the
-    per-case-normalised weighted sum ``sum_i weight_i * energy_i`` and a design is
-    feasible only when *every* case is feasible against its own limits.
+    A load case is the **single source of truth** for the deck ``stem`` and the
+    feasibility limits ``sigma_allow`` / ``d_allow`` (and the constrained
+    ``disp_node_id``): every run defines at least one. The classic single-load run
+    is simply one load case. The combined sensitivity is the per-case-normalised
+    weighted sum ``sum_i weight_i * energy_i`` and a design is feasible only when
+    *every* case is feasible against its own limits.
+
+    ``stem`` and the two limits are required (a blank value is a validation
+    error). ``disp_node_id`` is optional: ``None`` means no displacement node is
+    tracked for this case.
     """
     name: str = "default"
-    stem: str = ""                       # source deck stem; blank -> model.stem
+    stem: str = ""                       # source deck stem (<stem>_0000.rad / _0001.rad); required
     weight: float = 1.0                  # w_i in the weighted-sum sensitivity
-    disp_node_id: Optional[int] = None   # blank -> model.disp_node_id
-    sigma_allow: Optional[float] = None  # blank -> constraints.sigma_allow
-    d_allow: Optional[float] = None      # blank -> constraints.d_allow
+    disp_node_id: Optional[int] = None   # constrained node; None -> no disp node tracked
+    sigma_allow: Optional[float] = None  # max von-Mises [MPa]; required
+    d_allow: Optional[float] = None      # max |displacement| at disp_node_id [mm]; required
 
 
 @dataclass
@@ -425,10 +418,44 @@ class ResolvedCase:
     stem: str
     weight: float
     disp_node_id: Optional[int]
-    sigma_allow: float
-    d_allow: float
+    sigma_allow: Optional[float]    # None only for an unvalidated config (validation requires it)
+    d_allow: Optional[float]        # None only for an unvalidated config (validation requires it)
     starter: Path
     engine: Path
+
+
+# Legacy keys folded into a load case by the migration shim. Older configs put the
+# deck stem + displacement node on ``model`` and the limits in a top-level
+# ``constraints`` block; those now live per load case. Kept here so both the shim
+# and :func:`unknown_keys` agree on what counts as recognised-legacy.
+_LEGACY_MODEL_KEYS = ("stem", "disp_node_id")
+_LEGACY_TOP_SECTIONS = ("constraints",)
+
+
+def _migrated_load_cases(data: dict) -> list:
+    """Raw ``load_cases`` rows, migrating a legacy single-case config.
+
+    When ``load_cases`` is absent/empty but a legacy ``model.stem`` or
+    ``constraints`` block is present, synthesise one load case from them so an old
+    single-case YAML keeps running and does not silently lose its deck/limits. An
+    explicit ``load_cases`` list is returned unchanged (any legacy
+    ``model``/``constraints`` keys are then ignored).
+    """
+    rows = data.get("load_cases") or []
+    if rows:
+        return rows
+    m = data.get("model") or {}
+    c = data.get("constraints") or {}
+    if not (m.get("stem") or c):
+        return []
+    return [{
+        "name": "default",
+        "stem": m.get("stem", ""),
+        "weight": 1.0,
+        "disp_node_id": m.get("disp_node_id"),
+        "sigma_allow": c.get("sigma_allow"),
+        "d_allow": c.get("d_allow"),
+    }]
 
 
 @dataclass
@@ -437,7 +464,6 @@ class Config:
     run: RunOpts = field(default_factory=RunOpts)
     docker: DockerOpts = field(default_factory=DockerOpts)
     model: Model = field(default_factory=Model)
-    constraints: Constraints = field(default_factory=Constraints)
     beso: Beso = field(default_factory=Beso)
     levelset: LevelSet = field(default_factory=LevelSet)
     tobs: TobsOpts = field(default_factory=TobsOpts)
@@ -478,7 +504,6 @@ class Config:
             run=build(RunOpts, data.get("run")),
             docker=build(DockerOpts, data.get("docker")),
             model=build(Model, data.get("model")),
-            constraints=build(Constraints, data.get("constraints")),
             beso=build(Beso, data.get("beso")),
             levelset=build(LevelSet, data.get("levelset")),
             tobs=build(TobsOpts, data.get("tobs")),
@@ -487,7 +512,7 @@ class Config:
             smooth=build(SmoothOpts, data.get("smooth")),
             report=build(ReportOpts, data.get("report")),
             animate=build(AnimateOpts, data.get("animate")),
-            load_cases=[build(LoadCase, lc) for lc in (data.get("load_cases") or [])],
+            load_cases=[build(LoadCase, lc) for lc in _migrated_load_cases(data)],
             optimizer=(data.get("optimizer") or "beso"),
             work_dir=data.get("work_dir") or "",
         )
@@ -526,33 +551,37 @@ class Config:
         return self.beso
 
     def load_case_list(self) -> list[ResolvedCase]:
-        """Resolve :attr:`load_cases` into concrete cases with fallbacks applied.
+        """Resolve :attr:`load_cases` into concrete cases with deck paths.
 
-        With no configured cases this returns the single implicit case (the
-        ``model`` deck, weight 1) so the optimiser's multi-case path collapses to
-        exactly the classic single-solve behaviour.
+        The load cases are the single source of truth — there is no synthesised
+        default. Returns ``[]`` when none are defined (validation requires at
+        least one before a run starts; a legacy single-case YAML is migrated into
+        one load case on read, see :func:`_migrated_load_cases`).
         """
-        m, c = self.model, self.constraints
-        case_dir = Path(m.case_dir).resolve()
-        specs = self.load_cases or [
-            LoadCase(name="default", stem=m.stem, weight=1.0,
-                     disp_node_id=m.disp_node_id,
-                     sigma_allow=c.sigma_allow, d_allow=c.d_allow)]
+        case_dir = Path(self.model.case_dir).resolve()
         out: list[ResolvedCase] = []
-        for lc in specs:
-            stem = lc.stem or m.stem
+        for lc in self.load_cases:
+            stem = lc.stem
             out.append(ResolvedCase(
                 name=lc.name or stem,
                 stem=stem,
                 weight=float(lc.weight),
-                disp_node_id=(lc.disp_node_id if lc.disp_node_id is not None
-                              else m.disp_node_id),
-                sigma_allow=(lc.sigma_allow if lc.sigma_allow is not None
-                             else c.sigma_allow),
-                d_allow=(lc.d_allow if lc.d_allow is not None else c.d_allow),
+                disp_node_id=lc.disp_node_id,
+                sigma_allow=lc.sigma_allow,
+                d_allow=lc.d_allow,
                 starter=case_dir / f"{stem}_0000.rad",
                 engine=case_dir / f"{stem}_0001.rad"))
         return out
+
+    def primary_case(self) -> ResolvedCase:
+        """The first resolved load case (the deck whose mesh anchors the run).
+
+        Raises if no load cases are defined — callers past validation always have
+        at least one."""
+        cases = self.load_case_list()
+        if not cases:
+            raise ValueError("no load cases defined (need at least one)")
+        return cases[0]
 
     def run_folder(self) -> str:
         """The configured run/output folder *as written* (may be relative).
@@ -611,13 +640,16 @@ def unknown_keys(data: dict) -> list[str]:
     sections = _section_types()
     out: list[str] = []
 
-    top_known = set(sections) | {"load_cases", "optimizer", "work_dir"}
+    top_known = (set(sections) | {"load_cases", "optimizer", "work_dir"}
+                 | set(_LEGACY_TOP_SECTIONS))    # constraints: migrated, not flagged
     out.extend(k for k in data if k not in top_known)
 
     for name, klass in sections.items():
         sub = data.get(name)
         if isinstance(sub, dict):
             known = _field_names(klass)
+            if name == "model":
+                known = known | set(_LEGACY_MODEL_KEYS)   # stem/disp_node_id: migrated
             out.extend(f"{name}.{k}" for k in sub if k not in known)
 
     def _list_of(parent_key: str, items, klass) -> None:

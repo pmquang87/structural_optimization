@@ -33,7 +33,8 @@ def _good_cfg(tmp_path: Path, sub: str = "g") -> Config:
 
     cfg = Config()
     cfg.model.case_dir = str(case)
-    cfg.model.stem = "demo"
+    cfg.load_cases = [LoadCase(name="demo", stem="demo",
+                               sigma_allow=250.0, d_allow=1.0)]
     cfg.or_paths.root = str(root / "or")
     cfg.run.use_mpi = False          # native backend, no mpiexec needed
     return cfg
@@ -91,18 +92,23 @@ def test_bad_optimizer_is_error(tmp_path):
 # ---- decks / model directory ----------------------------------------------
 def test_missing_decks_reported_by_full_path(tmp_path):
     cfg = _good_cfg(tmp_path)
-    cfg.model.stem = "absent"            # no absent_0000/_0001 in the case dir
+    cfg.load_cases[0].stem = "absent"    # no absent_0000/_0001 in the case dir
     errs = _errors(cfg)
     base = Path(cfg.model.case_dir).resolve()
     assert any(str(base / "absent_0000.rad") in e for e in errs)
     assert any(str(base / "absent_0001.rad") in e for e in errs)
 
 
-def test_blank_stem_and_no_load_cases_is_error(tmp_path):
+def test_no_load_cases_is_error(tmp_path):
     cfg = _good_cfg(tmp_path)
-    cfg.model.stem = ""
     cfg.load_cases = []
-    assert any("model.stem is blank" in e for e in _errors(cfg))
+    assert any("no load cases defined" in e for e in _errors(cfg))
+
+
+def test_blank_stem_on_load_case_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases[0].stem = ""
+    assert any("deck stem is required" in e for e in _errors(cfg))
 
 
 def test_missing_case_dir_is_error(tmp_path):
@@ -185,14 +191,23 @@ def test_all_zero_weights_is_error(tmp_path):
 
 def test_nonpositive_sigma_allow_is_error(tmp_path):
     cfg = _good_cfg(tmp_path)
-    cfg.constraints.sigma_allow = 0.0
+    cfg.load_cases[0].sigma_allow = 0.0
     assert any("sigma_allow must be > 0" in e for e in _errors(cfg))
 
 
 def test_nonpositive_d_allow_is_error(tmp_path):
     cfg = _good_cfg(tmp_path)
-    cfg.constraints.d_allow = -1.0
+    cfg.load_cases[0].d_allow = -1.0
     assert any("d_allow must be > 0" in e for e in _errors(cfg))
+
+
+def test_blank_per_case_limits_are_allowed(tmp_path):
+    # sigma_allow / d_allow are optional: a blank limit leaves that quantity
+    # unconstrained and is not an error.
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases[0].sigma_allow = None
+    cfg.load_cases[0].d_allow = None
+    assert _errors(cfg) == []
 
 
 # ---- solver backend --------------------------------------------------------

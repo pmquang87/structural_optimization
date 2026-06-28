@@ -35,16 +35,24 @@ def _make_case_dir(case_dir: Path, deck_text: str, engine_text: str, stems) -> N
 def _cfg(case_dir: Path, out_dir: Path, stem: str, load_cases, max_iter=1) -> Config:
     cfg = Config()
     cfg.model.case_dir = str(case_dir)
-    cfg.model.stem = stem
     cfg.model.design_part_id = 60000000
     cfg.model.design_node_min = 60000000
     cfg.model.bc_group_id = 60000000
-    cfg.model.disp_node_id = 60000001
-    cfg.constraints.sigma_allow = 250.0
-    cfg.constraints.d_allow = 1.0
     cfg.beso.max_iter = max_iter
     cfg.beso.filter_radius = 0.0      # identity filter: keep the test reasoning simple
-    cfg.load_cases = list(load_cases)
+    # Load cases are the single source of truth; an empty list means the classic
+    # single case (stem given). Fill in the per-case defaults these tests assume so
+    # a case only has to spell out what it overrides.
+    specs = list(load_cases) or [LoadCase(name="default", stem=stem)]
+    for lc in specs:
+        lc.stem = lc.stem or stem
+        if lc.disp_node_id is None:
+            lc.disp_node_id = 60000001
+        if lc.sigma_allow is None:
+            lc.sigma_allow = 250.0
+        if lc.d_allow is None:
+            lc.d_allow = 1.0
+    cfg.load_cases = specs
     cfg.work_dir = str(out_dir)
     return cfg
 
@@ -57,15 +65,15 @@ def _results(sigma: float, disp: float, energy) -> Results:
 
 
 def _stub_solver(monkeypatch, results_by_stem, calls, fail_stems=()):
-    def fake_run_solver(cfg, run_dir):
-        calls.append((cfg.model.stem, Path(run_dir)))
-        if cfg.model.stem in fail_stems:
+    def fake_run_solver(cfg, run_dir, stem=None):
+        calls.append((stem, Path(run_dir)))
+        if stem in fail_stems:
             return RunResult(False, "engine", "ERROR TERMINATION")
         return RunResult(True, "ok", "NORMAL TERMINATION")
 
-    def fake_extract(cfg, run_dir, keep_vtk=False, stem=None,
+    def fake_extract(cfg, run_dir, keep_vtk=False, stem=None, disp_node_id=None,
                      exclude_element_ids=None):
-        return results_by_stem[cfg.model.stem]
+        return results_by_stem[stem]
 
     monkeypatch.setattr(loop_mod, "run_solver", fake_run_solver)
     monkeypatch.setattr(loop_mod, "extract", fake_extract)
@@ -200,7 +208,7 @@ def test_per_case_limit_override_relaxes_gate(case_env, monkeypatch):
 def test_status_reports_per_case_limits_not_global(case_env, monkeypatch):
     """The Monitor reads status.sigma_allow/d_allow + status.cases; these must
     carry each case's OWN limit so the displayed limit matches what gated
-    feasibility, not the global Constraints/BC value."""
+    feasibility (the worst-stress / worst-disp case's limit at the headline)."""
     case_dir, out = case_env(("lc_a", "lc_b"))
     cfg = _cfg(case_dir, out, "lc_a", [
         LoadCase(name="a", stem="lc_a", weight=1.0),                 # -> global 250
@@ -220,6 +228,25 @@ def test_status_reports_per_case_limits_not_global(case_env, monkeypatch):
     by_name = {c["name"]: c for c in status.cases}
     assert by_name["a"]["sigma_allow"] == 250.0 and by_name["b"]["sigma_allow"] == 500.0
     assert by_name["a"]["feasible"] and by_name["b"]["feasible"]
+
+
+def test_blank_limits_leave_case_unconstrained(case_env, monkeypatch):
+    """A load case with blank (None) sigma_allow/d_allow is unconstrained on those
+    quantities -> always feasible, however high the stress/displacement, and the
+    published limits are NaN / None ('no limit')."""
+    case_dir, out = case_env(("lc_a",))
+    cfg = _cfg(case_dir, out, "lc_a", [])
+    cfg.load_cases[0].sigma_allow = None
+    cfg.load_cases[0].d_allow = None
+    _stub_solver(monkeypatch,
+                 {"lc_a": _results(9999.0, 9999.0, energy=[1.0, 0.0])}, calls=[])
+    status = loop_mod.run_optimization(cfg, log=lambda *_: None)
+
+    assert status.feasible is True                       # nothing to violate
+    assert status.sigma_allow != status.sigma_allow      # headline limit is NaN
+    assert status.d_allow != status.d_allow
+    assert status.cases[0]["sigma_allow"] is None        # per-case breakdown: no limit
+    assert status.cases[0]["d_allow"] is None
 
 
 def test_solve_failure_in_one_case_fails_iteration(case_env, monkeypatch):
@@ -334,7 +361,7 @@ def test_run_writes_config_snapshot_into_run_folder(case_env, monkeypatch):
 
     snap = cfg.work() / "config_used.yaml"
     assert snap.is_file()
-    assert Config.from_yaml(snap).model.stem == "lc_a"      # round-trips
+    assert Config.from_yaml(snap).load_cases[0].stem == "lc_a"   # round-trips
 
 
 def test_multi_case_converts_d3plot_for_every_case(case_env, monkeypatch):
@@ -351,7 +378,7 @@ def test_multi_case_converts_d3plot_for_every_case(case_env, monkeypatch):
     }, calls=[])
     conv_calls = []
     monkeypatch.setattr(loop_mod, "convert_final",
-                        lambda c, sd, w, log: conv_calls.append((c.model.stem, Path(sd))))
+                        lambda c, sd, w, stem, log: conv_calls.append((stem, Path(sd))))
     loop_mod.run_optimization(cfg, log=lambda *_: None)
 
     work = cfg.work()
@@ -371,45 +398,53 @@ def test_single_case_converts_d3plot_once_with_plain_solve_dir(case_env, monkeyp
                  calls=[])
     conv_calls = []
     monkeypatch.setattr(loop_mod, "convert_final",
-                        lambda c, sd, w, log: conv_calls.append((c.model.stem, Path(sd))))
+                        lambda c, sd, w, stem, log: conv_calls.append((stem, Path(sd))))
     loop_mod.run_optimization(cfg, log=lambda *_: None)
 
     assert conv_calls == [("implicit_demo", cfg.work() / "solve")]
 
 
-# ---- (d) config roundtrip --------------------------------------------------
-def test_load_cases_default_empty_and_single_resolution():
+# ---- (d) load-case resolution (single source of truth, no fallbacks) -------
+def test_empty_load_cases_resolve_to_nothing():
     cfg = Config()
-    assert cfg.load_cases == []                  # opt-in; classic run by default
-    cfg.model.stem = "demo"
-    cfg.model.disp_node_id = 42
-    cfg.constraints.sigma_allow = 200.0
-    cfg.constraints.d_allow = 3.0
+    assert cfg.load_cases == []
+    assert cfg.load_case_list() == []        # no synthesised default any more
+
+
+def test_single_load_case_resolves_to_its_own_values():
+    cfg = Config()
+    cfg.load_cases = [LoadCase(name="pull", stem="demo", weight=2.0,
+                               disp_node_id=42, sigma_allow=200.0, d_allow=3.0)]
     cases = cfg.load_case_list()
     assert len(cases) == 1
     c = cases[0]
-    assert c.name == "default" and c.stem == "demo" and c.weight == 1.0
+    assert c.name == "pull" and c.stem == "demo" and c.weight == 2.0
     assert c.disp_node_id == 42
     assert c.sigma_allow == 200.0 and c.d_allow == 3.0
     assert c.starter.name == "demo_0000.rad" and c.engine.name == "demo_0001.rad"
 
 
-def test_load_case_fallbacks_fill_from_model_and_constraints():
+def test_load_case_has_no_model_or_constraints_fallback():
+    # Blank stem / unset limits stay as-is (validation rejects them); there is no
+    # inheritance from a global model/constraints any more.
     cfg = Config()
-    cfg.model.stem = "base"
-    cfg.model.disp_node_id = 7
-    cfg.constraints.sigma_allow = 250.0
-    cfg.constraints.d_allow = 1.0
-    cfg.load_cases = [
-        LoadCase(name="x", stem="lc_x", weight=2.0),               # inherit all limits
-        LoadCase(name="y", stem="", disp_node_id=9, sigma_allow=99.0),  # blank stem
-    ]
+    cfg.load_cases = [LoadCase(name="x", stem="", sigma_allow=None, d_allow=None)]
+    c = cfg.load_case_list()[0]
+    assert c.stem == "" and c.sigma_allow is None and c.d_allow is None
+
+
+def test_legacy_config_migrates_into_one_load_case():
+    # Back-compat: an old single-case YAML (model.stem + constraints, no
+    # load_cases) is folded into one explicit load case on read.
+    cfg = Config.from_dict({
+        "model": {"stem": "base", "disp_node_id": 7},
+        "constraints": {"sigma_allow": 250.0, "d_allow": 1.0},
+    })
     cases = cfg.load_case_list()
-    assert cases[0].stem == "lc_x" and cases[0].disp_node_id == 7
-    assert cases[0].sigma_allow == 250.0 and cases[0].d_allow == 1.0
-    assert cases[1].stem == "base"          # blank stem -> model.stem
-    assert cases[1].disp_node_id == 9
-    assert cases[1].sigma_allow == 99.0 and cases[1].d_allow == 1.0   # global d_allow
+    assert len(cases) == 1
+    c = cases[0]
+    assert c.stem == "base" and c.disp_node_id == 7
+    assert c.sigma_allow == 250.0 and c.d_allow == 1.0
 
 
 def test_load_cases_yaml_roundtrip(tmp_path):
