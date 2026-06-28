@@ -556,11 +556,19 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
         eta = status.eta_s / 60 if status.eta_s == status.eta_s else float("nan")
         k[3].metric("ETA [min]", "—" if eta != eta else f"{eta:.0f}",
                     f"elapsed {status.elapsed_s/60:.0f} min", delta_color="off")
-        if len(cfg.load_cases) > 1:
-            st.caption(f"σ_max and disp are the **worst across "
-                       f"{len(cfg.load_cases)} load cases**; the design is "
-                       "feasible only when every case is. Each case's animation "
-                       "is under `solve/case_<i>/`.")
+        cases = getattr(status, "cases", None) or []
+        if len(cases) > 1:
+            st.caption(f"σ_max and disp above are the **worst across "
+                       f"{len(cases)} load cases**, each shown with that case's "
+                       "own limit; the design is feasible only when every case is "
+                       "(below). Each case's animation is under `solve/case_<i>/`.")
+            cdf = pd.DataFrame([{
+                "case": c["name"],
+                "σ_max [MPa]": c["sigma_max"], "σ_allow [MPa]": c["sigma_allow"],
+                "disp [mm]": c["disp"], "d_allow [mm]": c["d_allow"],
+                "feasible": "✅" if c["feasible"] else "⚠️",
+            } for c in cases])
+            st.dataframe(cdf, hide_index=True, use_container_width=True)
         if getattr(status, "stress_excluded_elems", 0):
             st.caption(f"σ_max ignores **{status.stress_excluded_elems} elements** "
                        "in the configured stress-exclusion region(s).")

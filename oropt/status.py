@@ -18,7 +18,7 @@ import csv
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +48,14 @@ class Status:
     elements_alive: int = 0
     elements_total: int = 0
     stress_excluded_elems: int = 0    # design elements whose von-Mises is ignored (stress-exclusion region)
+    # Per-load-case feasibility breakdown, one dict per case with keys
+    # name/sigma_max/sigma_allow/disp/d_allow/feasible. Each case is checked
+    # against its OWN limits (model/load-case overrides, falling back to the
+    # global constraints), so the GUI can show what actually gated feasibility
+    # instead of the global Constraints/BC value. The headline sigma_allow/d_allow
+    # above are the limits of the worst-stress / worst-disp case respectively (for
+    # a single-case run this is just that case). Empty until the first iteration.
+    cases: list = field(default_factory=list)
     or_termination: str = ""
     iter_wall_s: float = 0.0
     elapsed_s: float = 0.0

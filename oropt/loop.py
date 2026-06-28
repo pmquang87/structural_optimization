@@ -277,8 +277,8 @@ def run_optimization(cfg: Config, resume: bool = False,
     status = st.Status(state="running", max_iter=oc.max_iter,
                        elements_total=deck.n_design_elements,
                        stress_excluded_elems=n_excluded,
-                       sigma_allow=cfg.constraints.sigma_allow,
-                       d_allow=cfg.constraints.d_allow, pid=pid)
+                       sigma_allow=primary.sigma_allow,
+                       d_allow=primary.d_allow, pid=pid)
     st.write_status(work, status)
 
     vfs: list[float] = []
@@ -322,11 +322,24 @@ def run_optimization(cfg: Config, resume: bool = False,
             raws = [opt.raw_sensitivity(r, deck.elem_ids, alive)
                     for r in case_results]
             raw = combine_sensitivity(raws, [c.weight for c in cases])
-            sigma_max = max(r.sigma_max for r in case_results)   # worst over cases
-            disp = max(r.disp for r in case_results)             # worst over cases
-            feasible = all(r.sigma_max <= case.sigma_allow
-                           and r.disp <= case.d_allow
-                           for case, r in zip(cases, case_results))
+            # Each case is gated against its OWN limits (load-case/model overrides,
+            # falling back to the global constraints); a design is feasible only
+            # when every case is. per_case carries the full breakdown for the GUI.
+            per_case = [
+                {"name": case.name,
+                 "sigma_max": float(r.sigma_max), "sigma_allow": float(case.sigma_allow),
+                 "disp": float(r.disp), "d_allow": float(case.d_allow),
+                 "feasible": bool(r.sigma_max <= case.sigma_allow
+                                  and r.disp <= case.d_allow)}
+                for case, r in zip(cases, case_results)]
+            feasible = all(c["feasible"] for c in per_case)
+            # Headline sigma_max/disp stay the worst across cases, but each is
+            # reported with the limit of the case it came from (not the global
+            # constraints) so the Monitor's "limit" matches what gated feasibility.
+            si = max(range(n_cases), key=lambda i: case_results[i].sigma_max)
+            di = max(range(n_cases), key=lambda i: case_results[i].disp)
+            sigma_max, sigma_allow = case_results[si].sigma_max, cases[si].sigma_allow
+            disp, d_allow = case_results[di].disp, cases[di].d_allow
             vf = opt.volume_fraction(alive)
             vfs.append(vf)
 
@@ -335,11 +348,11 @@ def run_optimization(cfg: Config, resume: bool = False,
             status = st.Status(
                 state="running", iteration=it, max_iter=oc.max_iter,
                 volume_fraction=vf, sigma_max=sigma_max,
-                sigma_allow=cfg.constraints.sigma_allow, disp=disp,
-                d_allow=cfg.constraints.d_allow, feasible=feasible,
+                sigma_allow=sigma_allow, disp=disp,
+                d_allow=d_allow, feasible=feasible,
                 elements_alive=int(alive.sum()),
                 elements_total=deck.n_design_elements,
-                stress_excluded_elems=n_excluded,
+                stress_excluded_elems=n_excluded, cases=per_case,
                 or_termination=res.message, iter_wall_s=iter_wall,
                 elapsed_s=elapsed, eta_s=iter_wall * remaining,
                 message=("feasible" if feasible else "INFEASIBLE - backing off"),
@@ -375,8 +388,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                                        keep_restart=oc.archive_restart,
                                        subdir=case.stem if n_cases > 1 else None)
             log(f"[oropt] iter {it}: sigma_max={sigma_max:.2f}/"
-                f"{cfg.constraints.sigma_allow} disp={disp:.4f}/"
-                f"{cfg.constraints.d_allow} feasible={feasible} "
+                f"{sigma_allow} disp={disp:.4f}/"
+                f"{d_allow} feasible={feasible} "
                 f"({iter_wall:.0f}s)")
 
             # ---- convergence ----------------------------------------------
