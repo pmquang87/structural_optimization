@@ -216,7 +216,11 @@ def _rows(s: Summary) -> list[tuple[str, str]]:
                         + (f" — {s.message}" if s.message else "")),
         ("Iterations", str(s.iterations)),
         ("Volume fraction", f"{_num(s.start_vf, 3)} → {_num(s.final_vf, 3)}"),
-        ("Mass removed", _pct(s.mass_removed_pct, 1)),
+        # A growth-box run can end with net *added* material (negative removal);
+        # flip the label rather than report "-x% removed".
+        ("Mass removed" if _isnan(s.mass_removed_pct) or s.mass_removed_pct >= 0
+         else "Mass added (net growth)",
+         _pct(abs(s.mass_removed_pct), 1)),   # abs(nan) is nan -> still "n/a"
         (f"Final σ_max{' (worst case)' if s.multi_load else ''}", sigma),
         (f"Final disp{' (worst case)' if s.multi_load else ''}", disp),
         ("Feasible", verdict),

@@ -51,7 +51,7 @@ oropt/
   runner.py   run starter + engine (native np=1, or the Docker MUMPS backend); termination checks
   results.py  anim_to_vtk -> pyvista: per-element energy & von-Mises, loaded-node displacement
   deck.py     parse /NODE + /TETRA4 once; verbatim filtered re-write; free-node pinning; engine trim
-  mesh.py     centroids, volumes, sensitivity-filter matrix, connectivity, protected/keep-out regions
+  mesh.py     centroids, volumes, sensitivity-filter matrix, connectivity, protected/keep-out regions, growth-box selection
   beso.py     sensitivity -> filter + history average -> volume-target threshold + add-back + connectivity
   levelset.py nodal level-set alternative: energy -> nodal velocity -> phi evolution + smoothing -> bisected threshold
   tobs.py     binary-ILP alternative: per-iteration element flips chosen by an integer linear program (scipy HiGHS)
@@ -212,6 +212,35 @@ in progress.
   still take part in the optimisation; list them in `freeze_*` as well if you also
   want to protect them from removal. Editable on the GUI's *Optimiser / Output* tab;
   the *Monitor* and report then note how many elements σ_max is ignoring.
+* **Growth boxes — add material** (`model.growth_boxes`, none by default) —
+  axis-aligned boxes (two opposite corners, like LS-DYNA `*DEFINE_BOX` /
+  Radioss `/BOX/RECTA`; multiple boxes act as a union) marking **candidate
+  growth material**: every design element whose centroid lies inside a box
+  starts the run **void**, and the optimiser's bi-directional update (BESO
+  add-back, TOBS `{0,+1}` flips, level-set growth) may *add* it where the load
+  path wants — so the design can grow material where the original part had
+  none, e.g. a reinforcement rib beyond the original envelope. The box volume
+  must be **pre-meshed** into the design part first (same
+  `/TETRA4/<design_part_id>` block, node-conformal interface with the part —
+  imprint + merge coincident interface nodes — and node ids ≥
+  `design_node_min`); run start validates this and errors on an empty box, on
+  non-design node ids, and on candidates not node-connected to the structure.
+  Candidates are never frozen (a box overlapping a keep-out region stays
+  growable, not force-materialised), iteration 0 solves exactly the original
+  part, and volume fractions are then relative to the **enlarged**
+  (part + boxes) design space. With BESO, keep `max_add_ratio` ≥
+  `evolution_rate` so growth isn't throttled below the feasibility back-off
+  step (validation warns otherwise). Editable as a table on the GUI's
+  *Optimiser / Output* tab; the *Monitor* shows how many candidate elements
+  have been grown. Full design study in
+  [`docs/add_material_boxes.md`](docs/add_material_boxes.md):
+
+  ```yaml
+  model:
+    growth_boxes:
+      - {name: rib_top,  x_min: 10.0, x_max: 40.0, y_min: -5.0, y_max: 5.0, z_min: 0.0, z_max: 25.0}
+      - {name: gusset_l, x_min: -20.0, x_max: 0.0, y_min: -5.0, y_max: 5.0, z_min: 0.0, z_max: 12.0}
+  ```
 * `beso.protect_bc_nodes` (default `true`) — whether elements touching the BC
   node-group (`model.bc_group_id`) are frozen. Set it `false` to **allow the
   optimiser to delete material at the BC nodes** too; those nodes stay fixed via
@@ -420,8 +449,10 @@ zoom/rotate viewer inlined into `report.html` (and also written as the standalon
   (σ_max = 308.305 MPa, disp = 1.229 mm, NORMAL TERMINATION).
 * A hand-deletion (−16 % volume, 16 352 freed nodes auto-pinned) produces a deck
   that OpenRadioss solves to NORMAL TERMINATION.
-* `pytest` (124 tests, all hermetic — no OpenRadioss needed) covers deck
+* `pytest` (285 tests, all hermetic — no OpenRadioss needed) covers deck
   round-trip/pinning, mesh geometry/connectivity/protection, BESO ranking/threshold,
+  the **growth boxes** (candidate selection, run-start guards, growth through
+  each optimiser's update),
   the **level-set** (bisected volume targeting / protected / φ-thresholding /
   connectivity) and **TOBS** (ILP feasibility / move-limit / volume targeting /
   protected) updates and optimiser selection, the **multi-load** weighted-sum and
