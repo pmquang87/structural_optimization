@@ -223,6 +223,16 @@ def test_next_target_vf_gate_matches_beso():
     assert hca.next_target_vf(0.8, feasible=True) < 0.8     # shrink while feasible
     assert hca.next_target_vf(0.8, feasible=False) > 0.8    # back off when infeasible
     assert hca.next_target_vf(0.61, feasible=True) == 0.6   # never below the floor
+    # default knobs: the violation ratio changes nothing (classic binary gate)
+    assert hca.next_target_vf(0.8, feasible=False, violation=3.0) \
+        == hca.next_target_vf(0.8, feasible=False)
+    # violation-aware controller: the same shared gate as BESO
+    hca.cfg.backoff_gain = 5.0
+    hca.cfg.damping_threshold = 0.9
+    assert hca.next_target_vf(0.8, feasible=False, violation=1.1) \
+        == pytest.approx(0.8 * (1 + 0.2 * 0.5))      # ER*gain*(v-1) = 0.2*5*0.1
+    assert hca.next_target_vf(0.8, feasible=True, violation=0.95) \
+        == pytest.approx(0.8 * (1 - 0.2 * 0.5))      # half-damped removal
 
 
 # ---- (f) config roundtrip + loop selection by optimizer name -------------------

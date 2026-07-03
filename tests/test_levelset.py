@@ -144,6 +144,23 @@ def test_raw_sensitivity_and_filter_match_beso():
     assert np.allclose(ls.filter_history(raw, np.zeros(5)), 0.5 * raw)  # history 0.5
 
 
+def test_next_target_vf_gate_matches_beso():
+    ls = _ls(_fan_mesh(6), np.zeros(6, bool), target_vf=0.6, evolution_rate=0.2)
+    assert ls.next_target_vf(0.8, feasible=True) < 0.8       # shrink while feasible
+    assert ls.next_target_vf(0.8, feasible=False) > 0.8      # back off when infeasible
+    assert ls.next_target_vf(0.61, feasible=True) == 0.6     # never below the floor
+    # default knobs: the violation ratio changes nothing (classic binary gate)
+    assert ls.next_target_vf(0.8, feasible=False, violation=3.0) \
+        == ls.next_target_vf(0.8, feasible=False)
+    # violation-aware controller: the same shared gate as BESO
+    ls.cfg.backoff_gain = 5.0
+    ls.cfg.damping_threshold = 0.9
+    assert ls.next_target_vf(0.8, feasible=False, violation=1.1) \
+        == pytest.approx(0.8 * (1 + 0.2 * 0.5))      # ER*gain*(v-1) = 0.2*5*0.1
+    assert ls.next_target_vf(0.8, feasible=True, violation=0.95) \
+        == pytest.approx(0.8 * (1 - 0.2 * 0.5))      # half-damped removal
+
+
 # ---- (e) config roundtrip + loop selection by optimizer name ------------------
 def test_config_roundtrip_and_active_opts(tmp_path):
     cfg = Config()

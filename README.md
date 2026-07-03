@@ -173,7 +173,28 @@ in progress.
 
   Each optimiser's `<name>:` block also mirrors the shared knobs
   (`target_volume_fraction`, `evolution_rate`, `filter_radius`, `history_weight`,
-  `max_iter`, `convergence_*`, `protect_*`, `archive_*`). Selectable on the GUI.
+  `max_iter`, `convergence_*`, `protect_*`, `archive_*`, and the feasibility
+  back-off controller below). Selectable on the GUI.
+* **Feasibility back-off controller** (`backoff_gain` / `backoff_cap` /
+  `damping_threshold`, mirrored on each optimiser block; defaults reproduce the
+  classic binary gate exactly) — how the per-iteration volume target reacts to
+  the constraint *values*. By default any violated limit grows the target by one
+  full `evolution_rate` step and any feasible design shrinks it by one — an
+  on/off gate that tends to ping-pong across the limit. With `backoff_gain > 0`
+  the growth step becomes proportional to the worst constraint-utilisation
+  ratio `v = max(σ_max/σ_allow, d/d_allow)` over the load cases,
+  `ER·min(gain·(v−1), cap)`, the way TOSCA's controller mode / LS-TaSC's
+  constrained scaling react to the stress level rather than a flag (size the
+  gain so `gain·(typical overshoot) ≈ 1`, e.g. 10–20). With
+  `damping_threshold < 1` (0.9–0.95 typical) removal slows by
+  `(1−v)/(1−threshold)` once `v` exceeds the threshold, so the design glides
+  into the limit instead of overshooting and oscillating feasible/infeasible.
+  `addback_stress_bias > 0` additionally makes the *add-back stress-responsive*:
+  whenever a stress limit is violated, the sensitivity driving that update is
+  scaled by `(1 + bias·σ_vm/σ_allow)` (spatially filtered so the overstress
+  bleeds into the neighbouring void elements), so the material the back-off
+  recovers lands near the overstressed region instead of wherever the energy
+  ranking happens to point.
 * **Additive-manufacturing constraints** (`manufacturing:`, all OFF by default) —
   applied to the alive mask each iteration after the optimiser update, for parts
   printed by powder-bed fusion (e.g. AlSi10Mg). `min_member_layers` (morphological

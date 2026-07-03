@@ -30,7 +30,7 @@ from __future__ import annotations
 import numpy as np
 from scipy import sparse
 
-from .beso import blend_history, map_sensitivity
+from .beso import blend_history, gate_target_vf, map_sensitivity
 from .config import LevelSet as LevelSetCfg
 from .mesh import Mesh
 from .results import Results
@@ -142,12 +142,10 @@ class LevelSet:
                        sens_prev: np.ndarray | None) -> np.ndarray:
         return blend_history(self._W, raw, sens_prev, self.cfg.history_weight)
 
-    # ---- target volume & constraint gate (mirrors Beso) -------------------
-    def next_target_vf(self, current_vf: float, feasible: bool) -> float:
-        er = self.cfg.evolution_rate
-        if feasible:
-            return max(self.cfg.target_volume_fraction, current_vf * (1.0 - er))
-        return min(1.0, current_vf * (1.0 + er))    # back off toward feasibility
+    # ---- target volume & constraint gate (shared with Beso) ---------------
+    def next_target_vf(self, current_vf: float, feasible: bool,
+                       violation: float | None = None) -> float:
+        return gate_target_vf(self.cfg, current_vf, feasible, violation)
 
     # ---- lambda bisection --------------------------------------------------
     def _removable_vol_at(self, phi_base: np.ndarray, tau: float) -> float:
