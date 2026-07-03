@@ -164,43 +164,124 @@ class Deck:
             j += 1
         return np.asarray(ids, dtype=np.int64)
 
-    def box_recta(self, box_id: int) -> Optional[tuple]:
-        """Two opposite corners of a ``/BOX/RECTA/<box_id>`` card in the deck as
-        ``(x_min, x_max, y_min, y_max, z_min, z_max)`` (normalised so min <= max),
-        or ``None`` when no such box card is present.
+    def _find_header(self, prefix: str) -> int:
+        """Index of the first line whose section header is *prefix* (optionally
+        with a trailing ``/unit_ID``), or ``-1``."""
+        for k, ln in enumerate(self.lines):
+            s = ln.strip()
+            if s == prefix or s.startswith(prefix + "/"):
+                return k
+        return -1
 
-        Lets a growth box authored in the pre-processor travel with the model and
-        be referenced by id from the config (:attr:`~oropt.config.GrowthBox.deck_box_id`)
-        instead of literal coordinates. The header may carry a trailing ``/unit_ID``
-        (``/BOX/RECTA/<id>`` or ``/BOX/RECTA/<id>/<unit>``). The two corner points
-        are read as the first two lines in the block whose tokens are all numeric
-        and number three or more (``Xp Yp Zp``) — so the title and any leading
-        ``skew_ID`` / ``diam`` line are skipped regardless of layout."""
-        prefix = f"/BOX/RECTA/{box_id}"
-        n = len(self.lines)
-        try:
-            i = next(k for k in range(n)
-                     if self.lines[k].strip() == prefix
-                     or self.lines[k].strip().startswith(prefix + "/"))
-        except StopIteration:
-            return None
+    def _box_block(self, start: int
+                   ) -> tuple[list, Optional[int], Optional[float]]:
+        """Parse the body of a ``/BOX/...`` card starting one line after *start*.
+
+        Returns ``(points, skew_id, diam)``: the coordinate points (each line with
+        three or more numeric tokens ``Xp Yp Zp``), plus the ``skew_ID`` and
+        ``Diam`` read from the single ``skew_ID [Diam]`` line (one or two numeric
+        tokens). The title and any comment lines are skipped, so layout order does
+        not matter."""
         pts: list[tuple[float, float, float]] = []
-        j = i + 1
-        while j < n and not _is_section(self.lines[j]) and len(pts) < 2:
+        skew_id: Optional[int] = None
+        diam: Optional[float] = None
+        n = len(self.lines)
+        j = start + 1
+        while j < n and not _is_section(self.lines[j]):
             if not _is_comment(self.lines[j]):
                 toks = self.lines[j].split()
                 try:
                     vals = [float(t) for t in toks]
                 except ValueError:
-                    vals = []
-                if len(vals) >= 3:                   # a coordinate line (not title/skew)
+                    vals = []                        # non-numeric -> the title
+                if len(vals) >= 3:
                     pts.append((vals[0], vals[1], vals[2]))
+                elif vals and skew_id is None:       # 1-2 tokens: skew_ID [Diam]
+                    skew_id = int(vals[0])
+                    if len(vals) >= 2:
+                        diam = vals[1]
             j += 1
-        if len(pts) < 2:
+        return pts, skew_id, diam
+
+    def skew_fix(self, skew_id: int) -> Optional[tuple]:
+        """Local frame of a ``/SKEW/FIX/<skew_id>`` card as
+        ``(origin, x_axis, xy_axis)`` — each a ``[x, y, z]`` list — or ``None``.
+
+        Reads the block's first three coordinate lines as the frame origin, the
+        local ``+x`` direction and a vector in the local ``+xy`` plane
+        (Gram-Schmidt-orthonormalised downstream, in :func:`oropt.mesh.local_frame_basis`),
+        so a ``/BOX/RECTA`` that references this skew becomes an *oriented* growth
+        box (LS-DYNA ``*DEFINE_BOX_LOCAL`` -> ``/BOX/RECTA`` + ``/SKEW/FIX``)."""
+        i = self._find_header(f"/SKEW/FIX/{skew_id}")
+        if i < 0:
             return None
-        (ax, ay, az), (bx, by, bz) = pts[0], pts[1]
-        return (min(ax, bx), max(ax, bx), min(ay, by), max(ay, by),
-                min(az, bz), max(az, bz))
+        pts, _, _ = self._box_block(i)
+        if len(pts) < 3:
+            return None
+        return [list(pts[0]), list(pts[1]), list(pts[2])]
+
+    def box(self, box_id: int) -> Optional[dict]:
+        """Resolve a ``/BOX/{RECTA,CYLIN,SPHER}/<box_id>`` card to a growth-region
+        spec (a dict of :class:`~oropt.config.GrowthBox` fields), or ``None`` when
+        no such card is present.
+
+        Lets a region authored in the pre-processor travel with the model and be
+        referenced by id from the config
+        (:attr:`~oropt.config.GrowthBox.deck_box_id`) instead of literal
+        coordinates, for every shape:
+
+        * ``/BOX/RECTA`` -> ``{"shape": "box", x_min..z_max}`` (two corner points,
+          normalised); a non-zero ``skew_ID`` referencing a ``/SKEW/FIX`` card
+          attaches the local frame (an oriented box);
+        * ``/BOX/SPHER`` -> ``{"shape": "sphere", cx, cy, cz, radius}`` (centre
+          point + ``Diam``/2);
+        * ``/BOX/CYLIN`` -> ``{"shape": "cylinder", x1..z2, radius}`` (two axis
+          end-points + ``Diam``/2).
+
+        The header may carry a trailing ``/unit_ID``."""
+        for kind in ("RECTA", "SPHER", "CYLIN"):
+            i = self._find_header(f"/BOX/{kind}/{box_id}")
+            if i < 0:
+                continue
+            pts, skew_id, diam = self._box_block(i)
+            if kind == "RECTA":
+                if len(pts) < 2:
+                    return None
+                (ax, ay, az), (bx, by, bz) = pts[0], pts[1]
+                spec = {"shape": "box",
+                        "x_min": min(ax, bx), "x_max": max(ax, bx),
+                        "y_min": min(ay, by), "y_max": max(ay, by),
+                        "z_min": min(az, bz), "z_max": max(az, bz)}
+                if skew_id:
+                    frame = self.skew_fix(skew_id)
+                    if frame is not None:
+                        spec["origin"], spec["x_axis"], spec["xy_axis"] = frame
+                return spec
+            if kind == "SPHER":
+                if not pts or diam is None:
+                    return None
+                cx, cy, cz = pts[0]
+                return {"shape": "sphere", "cx": cx, "cy": cy, "cz": cz,
+                        "radius": diam / 2.0}
+            if kind == "CYLIN":
+                if len(pts) < 2 or diam is None:
+                    return None
+                (x1, y1, z1), (x2, y2, z2) = pts[0], pts[1]
+                return {"shape": "cylinder", "x1": x1, "y1": y1, "z1": z1,
+                        "x2": x2, "y2": y2, "z2": z2, "radius": diam / 2.0}
+        return None
+
+    def box_recta(self, box_id: int) -> Optional[tuple]:
+        """Two opposite corners of a ``/BOX/RECTA/<box_id>`` card as
+        ``(x_min, x_max, y_min, y_max, z_min, z_max)`` (normalised), or ``None``.
+
+        A thin rectangular-only view over :meth:`box` (kept for callers that only
+        want axis-aligned bounds); use :meth:`box` for the full shape set."""
+        spec = self.box(box_id)
+        if spec is None or spec.get("shape") != "box":
+            return None
+        return (spec["x_min"], spec["x_max"], spec["y_min"], spec["y_max"],
+                spec["z_min"], spec["z_max"])
 
     # ---- rewrite -----------------------------------------------------------
     def write(self, out_path: str | Path, alive_mask: np.ndarray,

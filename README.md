@@ -285,34 +285,60 @@ in progress.
   still take part in the optimisation; list them in `freeze_*` as well if you also
   want to protect them from removal. Editable on the GUI's *Optimiser / Output* tab;
   the *Monitor* and report then note how many elements σ_max is ignoring.
-* **Growth boxes — add material** (`model.growth_boxes`, none by default) —
-  axis-aligned boxes (two opposite corners, like LS-DYNA `*DEFINE_BOX` /
-  Radioss `/BOX/RECTA`; multiple boxes act as a union) marking **candidate
-  growth material**: every design element whose centroid lies inside a box
-  starts the run **void**, and the optimiser's bi-directional update (BESO
-  add-back, TOBS `{0,+1}` flips, level-set growth) may *add* it where the load
-  path wants — so the design can grow material where the original part had
-  none, e.g. a reinforcement rib beyond the original envelope. The box volume
-  must be **pre-meshed** into the design part first (same
-  `/TETRA4/<design_part_id>` block, node-conformal interface with the part —
-  imprint + merge coincident interface nodes — and node ids ≥
-  `design_node_min`); run start validates this and errors on an empty box, on
-  non-design node ids, and on candidates not node-connected to the structure.
-  Candidates are never frozen (a box overlapping a keep-out region stays
-  growable, not force-materialised), iteration 0 solves exactly the original
-  part, and volume fractions are then relative to the **enlarged**
-  (part + boxes) design space. With BESO, keep `max_add_ratio` ≥
+* **Growth regions — add material** (`model.growth_boxes`, none by default) —
+  regions (the LS-DYNA `*DEFINE_BOX` / Radioss `/BOX/...` family; multiple
+  regions act as a union) marking **candidate growth material**: every design
+  element whose centroid lies inside a region starts the run **void**, and the
+  optimiser's bi-directional update (BESO add-back, TOBS `{0,+1}` flips,
+  level-set growth) may *add* it where the load path wants — so the design can
+  grow material where the original part had none, e.g. a reinforcement rib
+  beyond the original envelope. The region volume must be **pre-meshed** into
+  the design part first (same `/TETRA4/<design_part_id>` block, node-conformal
+  interface with the part — imprint + merge coincident interface nodes — and
+  node ids ≥ `design_node_min`); run start validates this and errors on an empty
+  region, on non-design node ids, and on candidates not node-connected to the
+  structure. Candidates are never frozen (a region overlapping a keep-out region
+  stays growable, not force-materialised), iteration 0 solves exactly the
+  original part, and volume fractions are then relative to the **enlarged**
+  (part + regions) design space. With BESO, keep `max_add_ratio` ≥
   `evolution_rate` so growth isn't throttled below the feasibility back-off
-  step (validation warns otherwise). Editable as a table on the GUI's
-  *Optimiser / Output* tab; the *Monitor* shows how many candidate elements
-  have been grown. Full design study in
+  step (validation warns otherwise).
+
+  Each region carries a **`shape`** — `box` (default; two opposite corners),
+  `sphere` (centre + `radius`) or `cylinder` (two axis end-points + `radius`,
+  finite/capped) — mirroring `/BOX/RECTA` · `/BOX/SPHER` · `/BOX/CYLIN`. A `box`
+  may be **oriented** by a local frame (`origin` + a local `x_axis` + an
+  `xy_axis` vector, Gram-Schmidt-orthonormalised, like `*DEFINE_BOX_LOCAL` →
+  `/BOX/RECTA` + `/SKEW/FIX`), so its bounds are measured in a skew system.
+  Instead of literal coordinates a region may set **`deck_box_id`** to reference
+  a `/BOX/{RECTA,SPHER,CYLIN}` card authored in the starter deck (a
+  `/SKEW/FIX` on a `/BOX/RECTA` is read as the local frame); it is resolved to
+  concrete geometry at run start.
+
+  Editable as a table on the GUI's *Optimiser / Output* tab (shape selector,
+  per-shape coordinate columns, a Deck /BOX id column, and an *Oriented box
+  frames* editor); a **🔍 Preview region element counts** button loads the deck
+  and reports, per region, how many elements it would void plus the run-start
+  guard verdict — before committing to a run. Every region is drawn as a
+  **red wireframe outline** over the 3D topology in the *Monitor*, the
+  `report.html` render and the evolution GIF, so coordinates can be placed
+  visually; the *Monitor* also shows how many candidate elements have been
+  grown. Full design study in
   [`docs/add_material_boxes.md`](docs/add_material_boxes.md):
 
   ```yaml
   model:
     growth_boxes:
-      - {name: rib_top,  x_min: 10.0, x_max: 40.0, y_min: -5.0, y_max: 5.0, z_min: 0.0, z_max: 25.0}
-      - {name: gusset_l, x_min: -20.0, x_max: 0.0, y_min: -5.0, y_max: 5.0, z_min: 0.0, z_max: 12.0}
+      # axis-aligned box (two opposite corners)
+      - {name: rib_top,  shape: box, x_min: 10.0, x_max: 40.0, y_min: -5.0, y_max: 5.0, z_min: 0.0, z_max: 25.0}
+      # sphere (centre + radius) and finite cylinder (two axis end-points + radius)
+      - {name: boss,     shape: sphere,   cx: 0.0, cy: 0.0, cz: 30.0, radius: 8.0}
+      - {name: pin,      shape: cylinder, x1: -20.0, y1: 0.0, z1: 0.0, x2: 20.0, y2: 0.0, z2: 0.0, radius: 4.0}
+      # oriented box: bounds measured in the local frame (origin + x-axis + xy-plane vector)
+      - {name: skew_rib, shape: box, x_min: 0.0, x_max: 30.0, y_min: -4.0, y_max: 4.0, z_min: -4.0, z_max: 4.0,
+         origin: [10.0, 0.0, 0.0], x_axis: [1.0, 1.0, 0.0], xy_axis: [-1.0, 1.0, 0.0]}
+      # reference a /BOX/RECTA card in the deck by id instead of coordinates
+      - {name: from_deck, deck_box_id: 7000001}
   ```
 * `beso.protect_bc_nodes` (default `true`) — whether elements touching the BC
   node-group (`model.bc_group_id`) are frozen. Set it `false` to **allow the

@@ -31,7 +31,8 @@ from oropt.animate import (VIEWS as _BUILTIN_VIEWS, frame_count,
 from oropt.config import AnimateOpts, Config, LoadCase
 from oropt.deck import Deck
 from oropt.gui import queue_store as qs
-from oropt.gui.boxes import (BOX_COLUMNS, growth_boxes_from_records,
+from oropt.gui.boxes import (BOX_COLUMNS, FRAME_COLUMNS, apply_frame_records,
+                             growth_boxes_from_records, records_from_frames,
                              records_from_growth_boxes)
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
@@ -402,20 +403,32 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "into the design part (same `/TETRA4` block, node-conformal interface, "
         "node ids ≥ design_node_min); a region over unmeshed space is an error at "
         "run start. Multiple regions act as a union; volume fractions are then "
-        "relative to the enlarged (part + regions) space. (Oriented/local-frame "
-        "boxes and `/BOX/RECTA` deck references are set in the YAML.)")
-    _num_cols = [c for c in BOX_COLUMNS if c not in ("name", "shape")]
+        "relative to the enlarged (part + regions) space. A row may reference a "
+        "`/BOX/{RECTA,SPHER,CYLIN}` card in the deck by **Deck /BOX id** instead of "
+        "coordinates; oriented (local-frame) boxes are set below.")
+    # Capture the oriented-frame rows BEFORE the main table below overwrites
+    # cfg.model.growth_boxes (which carries the loaded frames): the frame editor is
+    # seeded from here and its result is re-applied by name, so frames survive the
+    # main table's shape/coordinate round-trip instead of being silently dropped.
+    frame_records = records_from_frames(cfg.model.growth_boxes)
+    _num_cols = [c for c in BOX_COLUMNS if c not in ("name", "shape", "deck_box_id")]
     gb_df = pd.DataFrame(records_from_growth_boxes(cfg.model.growth_boxes),
                          columns=BOX_COLUMNS)
     gb_edited = st.data_editor(
         gb_df, num_rows="dynamic", width="stretch",
         key="growth_boxes_editor", column_config={
             "name": st.column_config.TextColumn(
-                "Name", help="Label for run-log / validation messages."),
+                "Name", help="Label for run-log / validation messages, and how a "
+                             "frame below is matched to a box."),
             "shape": st.column_config.SelectboxColumn(
                 "Shape", options=["box", "sphere", "cylinder"], default="box",
                 help="box = two corners; sphere = centre+radius; "
                      "cylinder = two axis end-points + radius."),
+            "deck_box_id": st.column_config.NumberColumn(
+                "Deck /BOX id", format="%d", step=1,
+                help="Reference a /BOX/{RECTA,SPHER,CYLIN} card in the deck by id "
+                     "instead of coordinates; resolved at run start. Leave blank "
+                     "to use the coordinates in this row."),
             **{k: st.column_config.NumberColumn(
                 k, format="%.3f",
                 help="Coordinate in model units (e.g. mm); fill the columns "
@@ -425,6 +438,28 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     cfg.model.growth_boxes = growth_boxes_from_records(
         gb_edited.to_dict("records"))
     if cfg.model.growth_boxes:
+        # Oriented boxes (advanced): a local frame turns the box bounds into a skew
+        # system (LS-DYNA *DEFINE_BOX_LOCAL). Edited in its own name-keyed table so
+        # the 3-vectors fit; applied back onto the matching box rows.
+        with st.expander("Oriented box frames (advanced)"):
+            st.caption(
+                "Give a **box** a local frame: an origin, a local +x direction "
+                "(`ax,ay,az`) and a vector in the local +xy plane (`bx,by,bz`) — "
+                "Gram-Schmidt-orthonormalised, so the box bounds are measured in "
+                "that skew system. Match a row to a box by **Region** (its Name); "
+                "leave a row blank for an axis-aligned box. Sphere/cylinder regions "
+                "can't be oriented.")
+            fr_df = pd.DataFrame(frame_records, columns=FRAME_COLUMNS)
+            fr_edited = st.data_editor(
+                fr_df, num_rows="dynamic", width="stretch",
+                key="growth_frames_editor", column_config={
+                    "name": st.column_config.TextColumn(
+                        "Region", help="Must match a box row's Name."),
+                    **{k: st.column_config.NumberColumn(k, format="%.3f")
+                       for k in FRAME_COLUMNS[1:]},
+                })
+            cfg.model.growth_boxes = apply_frame_records(
+                cfg.model.growth_boxes, fr_edited.to_dict("records"))
         st.info(f"{len(cfg.model.growth_boxes)} growth region(s): their elements "
                 "start void and may be grown into. With BESO, keep "
                 "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
@@ -686,6 +721,18 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         st.success(f"Saved to {cfg_path}")
 
 
+@st.cache_resource(show_spinner=False)
+def _load_deck_mesh(starter_str: str, mtime: float, part_id: int, node_min: int):
+    """Load + cache the (read-only) deck and mesh for the preview button.
+
+    Keyed on the starter path, its mtime and the design-part ids, so repeated
+    preview clicks (which only vary the regions) don't re-parse the deck — matters
+    for the 575k-element model. ``st.cache_resource`` returns the same objects
+    (no per-call copy); they are only read here, never mutated."""
+    deck = Deck.load(starter_str, part_id, node_min)
+    return deck, Mesh.from_deck(deck)
+
+
 def _render_growth_preview(cfg: Config) -> None:
     """On-demand button: count how many design elements each growth region would
     start *void*, by loading the primary load case's starter deck in-process (pure
@@ -693,7 +740,9 @@ def _render_growth_preview(cfg: Config) -> None:
 
     Lets a user confirm a region is actually pre-meshed — and that the run-start
     guards pass — before committing to a multi-hour run, instead of finding out
-    only when the loop aborts. Reads the live editor state on ``cfg``."""
+    only when the loop aborts. Reads the live editor state on ``cfg``. The deck
+    load is cached (:func:`_load_deck_mesh`) so re-clicking after only editing
+    regions is instant."""
     if not st.button(
             "🔍 Preview region element counts", key="growth_preview",
             help="Load the deck and count the design elements inside each region "
@@ -712,9 +761,10 @@ def _render_growth_preview(cfg: Config) -> None:
         return
     try:
         with st.spinner(f"Loading `{starter.name}` and counting …"):
-            deck = Deck.load(starter, cfg.model.design_part_id,
-                             cfg.model.design_node_min)
-            preview = preview_growth_boxes(deck, Mesh.from_deck(deck), cfg.model)
+            deck, mesh = _load_deck_mesh(
+                str(starter), starter.stat().st_mtime,
+                cfg.model.design_part_id, cfg.model.design_node_min)
+            preview = preview_growth_boxes(deck, mesh, cfg.model)
     except Exception as exc:  # noqa: BLE001
         st.error(f"Could not preview regions: {exc}")
         return
