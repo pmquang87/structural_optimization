@@ -1,4 +1,4 @@
-# oropt — OpenRadioss-coupled topology optimisation (BESO · level-set · TOBS)
+# oropt — OpenRadioss-coupled topology optimisation (BESO · level-set · TOBS · HCA)
 
 [![CI](https://github.com/pmquang87/structural_optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/pmquang87/structural_optimization/actions/workflows/ci.yml)
 
@@ -11,10 +11,11 @@ bi-directional add-back), and re-solves — removing material while the
 high-fidelity solver still reports peak von-Mises stress and a chosen node's
 displacement within limits.
 
-Three discrete optimisers plug into this same solve → delete → re-solve loop and
+Four discrete optimisers plug into this same solve → delete → re-solve loop and
 are picked with a single `optimizer:` key — **BESO** (default), a nodal
-**level-set** (smoother boundaries), and **TOBS** (integer-linear-programming
-binary flips) — all reusing the `/ANIM/ELEM/ENER` energy as their sensitivity.
+**level-set** (smoother boundaries), **TOBS** (integer-linear-programming
+binary flips), and **HCA** (hybrid cellular automata, the LS-TaSC method) — all
+reusing the `/ANIM/ELEM/ENER` energy as their sensitivity.
 
 Built for the AlSi10Mg additively-manufactured elevator linkage (575k TET4,
 6 kN pull through rigid cylinders via contact, implicit nonlinear quasi-static).
@@ -55,6 +56,7 @@ oropt/
   beso.py     sensitivity -> filter + history average -> volume-target threshold + add-back + connectivity
   levelset.py nodal level-set alternative: energy -> nodal velocity -> phi evolution + smoothing -> bisected threshold
   tobs.py     binary-ILP alternative: per-iteration element flips chosen by an integer linear program (scipy HiGHS)
+  hca.py      hybrid-cellular-automata alternative (LS-TaSC-style): per-element virtual density driven by a setpoint controller
   simp.py     EXPERIMENTAL SIMP/OC prototype — offline maths only, not wired into the loop (see docs/simp_spike.md)
   manufacturing.py additive-manufacturing constraints on the alive mask: min member size (open), symmetry, overhang
   smoothing.py / d3plot.py  post-run: smoothed-surface (STL/VTP) export; OpenRadioss anim -> LS-Dyna d3plot
@@ -141,7 +143,7 @@ in progress.
 * `beso.evolution_rate`, `target_volume_fraction`, `filter_radius`,
   `history_weight`, `sensitivity` (`energy`|`vonmises`|`blend`).
 * `optimizer` (default `beso`) — selects the discrete topology optimiser. All
-  three share the `/ANIM/ELEM/ENER` energy sensitivity, the element-deletion deck
+  four share the `/ANIM/ELEM/ENER` energy sensitivity, the element-deletion deck
   path, and the multi-load / AM-constraint / connectivity machinery; only the
   per-iteration update differs:
   * `beso` — the default bi-directional evolutionary scheme (`beso:` knobs).
@@ -155,6 +157,19 @@ in progress.
     ε-relaxed volume constraint, instead of a heuristic threshold. Specifics
     under `tobs:`: `flip_limit` (β, max fraction of elements flipped per step)
     and `constraint_relaxation` (ε volume band).
+  * `hca` — **HCA** (Hybrid Cellular Automata; Tovar et al. 2006, the method
+    behind LS-TaSC, designed for exactly this gradient-free nonlinear/contact
+    regime): every element keeps a persistent *virtual density* `x_e ∈ [0.01, 1]`
+    that a proportional controller drives toward a uniform energy-density
+    setpoint `S*` (`x_e += kp·(S_e − S*)/S*`, move-limited), the setpoint found
+    by bisection so the thresholded design (alive iff `x_e ≥ 0.5`) hits the
+    per-iteration volume target; the spatial filter doubles as the cellular
+    automaton's neighbourhood averaging. Specifics under `hca:`: `kp`
+    (controller gain), `move_limit` (max density change per iteration; keep
+    `min(kp, move_limit) > 0.5` so removal can track the target step-for-step,
+    lower values give damped multi-iteration decay), `field_history_weight`
+    (extra HCA-internal blend of the energy field with previous iterations,
+    LS-TaSC's multi-iteration weighted sum; `1.0` = off).
 
   Each optimiser's `<name>:` block also mirrors the shared knobs
   (`target_volume_fraction`, `evolution_rate`, `filter_radius`, `history_weight`,
@@ -357,7 +372,7 @@ Each iteration runs the same four steps:
    run — it sees only the combined sensitivity and the worst-case feasibility:
    spatial filter + history blend, convergence check, then the target-volume /
    `alive`-mask update. This combining sits in the loop **above** the optimiser, so
-   multiple load cases work with **any** optimiser (`beso`, `levelset`, `tobs`)
+   multiple load cases work with **any** optimiser (`beso`, `levelset`, `tobs`, `hca`)
    unchanged.
 4. **Next iteration** re-solves *all* cases against the new design, and the cycle
    repeats until convergence or `max_iter`.
@@ -449,13 +464,14 @@ zoom/rotate viewer inlined into `report.html` (and also written as the standalon
   (σ_max = 308.305 MPa, disp = 1.229 mm, NORMAL TERMINATION).
 * A hand-deletion (−16 % volume, 16 352 freed nodes auto-pinned) produces a deck
   that OpenRadioss solves to NORMAL TERMINATION.
-* `pytest` (285 tests, all hermetic — no OpenRadioss needed) covers deck
+* `pytest` (301 tests, all hermetic — no OpenRadioss needed) covers deck
   round-trip/pinning, mesh geometry/connectivity/protection, BESO ranking/threshold,
   the **growth boxes** (candidate selection, run-start guards, growth through
   each optimiser's update),
   the **level-set** (bisected volume targeting / protected / φ-thresholding /
-  connectivity) and **TOBS** (ILP feasibility / move-limit / volume targeting /
-  protected) updates and optimiser selection, the **multi-load** weighted-sum and
+  connectivity), **TOBS** (ILP feasibility / move-limit / volume targeting /
+  protected) and **HCA** (setpoint bisection / move-limited density decay /
+  candidate growth / protected) updates and optimiser selection, the **multi-load** weighted-sum and
   worst-case feasibility aggregation, the **additive-manufacturing** constraints,
   the **Docker** command construction, **d3plot**/**surface-smoothing** post-processing,
   the offline **SIMP** OC/bisection/projection prototype, status/checkpoint

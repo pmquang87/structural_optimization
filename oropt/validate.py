@@ -26,7 +26,7 @@ from .runner import backend_problems
 ERROR = "error"
 WARNING = "warning"
 
-VALID_OPTIMIZERS = ("beso", "levelset", "tobs")
+VALID_OPTIMIZERS = ("beso", "levelset", "tobs", "hca")
 
 
 @dataclass(frozen=True)

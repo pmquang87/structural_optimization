@@ -336,10 +336,11 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     st.caption("Feasibility limits (σ_allow / d_allow) are now set **per load "
                "case** on the 🔀 Load cases tab.")
     st.subheader("Optimiser")
-    _opts = ["beso", "levelset", "tobs"]
+    _opts = ["beso", "levelset", "tobs", "hca"]
     _opt_labels = {"beso": "BESO — bi-directional element removal",
                    "levelset": "Level-set — smoother boundaries",
-                   "tobs": "TOBS — binary ILP flips (Sivapuram & Picelli 2018)"}
+                   "tobs": "TOBS — binary ILP flips (Sivapuram & Picelli 2018)",
+                   "hca": "HCA — hybrid cellular automata (LS-TaSC-style)"}
     opt_name = st.selectbox(
         "Topology optimiser", _opts,
         index=_opts.index(cfg.optimizer_name()) if cfg.optimizer_name() in _opts else 0,
@@ -415,7 +416,8 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
                 "throttled (validation warns otherwise).")
 
-    _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS"}
+    _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS",
+                  "hca": "HCA"}
     st.subheader(f"{_opt_short[opt_name]} parameters")
     g = st.columns(3)
     aopt.evolution_rate = g[0].number_input(
@@ -462,6 +464,27 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         cfg.levelset.band_width = t[2].number_input(
             "Band width", value=float(cfg.levelset.band_width), step=0.5,
             help="Clamp |φ| to this each step to keep the field bounded.")
+    elif opt_name == "hca":
+        t = st.columns(3)
+        cfg.hca.kp = t[0].number_input(
+            "Controller gain Kp", value=float(cfg.hca.kp),
+            min_value=0.05, max_value=5.0, step=0.05, format="%.2f",
+            help="Proportional gain of the density controller "
+                 "Δx = Kp·(S−S*)/S*. Keep min(Kp, move limit) > 0.5 or no "
+                 "element can be removed in a single iteration (removal then "
+                 "lags the volume target over extra solves).")
+        cfg.hca.move_limit = t[1].number_input(
+            "Move limit (Δx/iter)", value=float(cfg.hca.move_limit),
+            min_value=0.05, max_value=1.0, step=0.05, format="%.2f",
+            help="Cap on each element's virtual-density change per iteration. "
+                 "1.0 = uncapped; lower it for smoother, more damped evolution.")
+        cfg.hca.field_history_weight = t[2].slider(
+            "Field history weight", 0.0, 1.0,
+            float(cfg.hca.field_history_weight),
+            help="Extra HCA-internal blend of the energy field with previous "
+                 "iterations (LS-TaSC's multi-iteration weighted sum). 1.0 = "
+                 "off — the shared history weight above already blends "
+                 "iterations.")
 
     arch = st.columns(2)
     aopt.archive_iterations = arch[0].checkbox(
