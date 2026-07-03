@@ -160,6 +160,41 @@ def test_zero_filter_radius_is_allowed(tmp_path):
     assert _errors(cfg) == []
 
 
+def test_negative_backoff_gain_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.backoff_gain = -1.0
+    assert any("backoff_gain must be >= 0" in e for e in _errors(cfg))
+
+
+def test_nonpositive_backoff_cap_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.backoff_cap = 0.0
+    assert any("backoff_cap must be > 0" in e for e in _errors(cfg))
+
+
+@pytest.mark.parametrize("dt", [0.0, -0.2, 1.5])
+def test_damping_threshold_out_of_range_is_error(tmp_path, dt):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.damping_threshold = dt
+    assert any("damping_threshold must be in (0, 1]" in e for e in _errors(cfg))
+
+
+def test_backoff_controller_valid_knobs_are_clean(tmp_path):
+    cfg = _good_cfg(tmp_path)             # the good config sets both limits
+    cfg.beso.backoff_gain = 10.0
+    cfg.beso.backoff_cap = 2.0
+    cfg.beso.damping_threshold = 0.95
+    assert validate_config(cfg) == []
+
+
+def test_backoff_controller_without_limits_is_warning(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases = [LoadCase(name="demo", stem="demo")]   # no limits at all
+    cfg.beso.backoff_gain = 10.0
+    assert _errors(cfg) == []
+    assert any("never engage" in w for w in _warnings(cfg))
+
+
 def test_numeric_sanity_follows_selected_optimizer(tmp_path):
     # the active (tobs) block is validated...
     cfg = _good_cfg(tmp_path)

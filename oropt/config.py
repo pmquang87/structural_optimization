@@ -156,6 +156,10 @@ class Beso:
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group (model.bc_group_id). False -> they may be deleted; the BC nodes stay fixed via their /BCS and still anchor connectivity
     archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default; see README disk cost)
     archive_restart: bool = False      # when archiving, also copy the ~345 MB restart (<stem>*.rst) into iter_NNNN/ -> full per-iteration solver state. OFF by default: ~345 MB/iter would be ~50 GB over a 150-iter run; opt in when you need replayable solver state
+    # --- feasibility back-off controller (defaults = the classic binary gate) ---
+    backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
+    backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
 
 
 @dataclass
@@ -190,6 +194,10 @@ class LevelSet:
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
     archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
     archive_restart: bool = False      # when archiving, also copy the restart (.rst). OFF by default (~345 MB/iter); opt in for replayable solver state
+    # --- feasibility back-off controller (defaults = the classic binary gate) ---
+    backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
+    backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     # --- level-set specific ---
     dt: float = 1.0                  # pseudo-time step for the phi evolution
     smoothing_passes: int = 3        # Laplacian/Jacobi smoothing passes per iteration (regularisation)
@@ -237,6 +245,10 @@ class TobsOpts:
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
     archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
     archive_restart: bool = False      # when archiving, also copy the restart (.rst). OFF by default (~345 MB/iter); opt in for replayable solver state
+    # --- feasibility back-off controller (defaults = the classic binary gate) ---
+    backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
+    backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     # --- TOBS specific ---
     flip_limit: float = 0.05         # beta: max fraction of elements flipped per ILP step (Sum|dx| <= beta*N)
     constraint_relaxation: float = 0.01  # epsilon: relaxation band (x V0) on the linearised volume constraint
@@ -279,6 +291,10 @@ class HcaOpts:
     protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
     archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
     archive_restart: bool = False      # when archiving, also copy the restart (.rst). OFF by default (~345 MB/iter); opt in for replayable solver state
+    # --- feasibility back-off controller (defaults = the classic binary gate) ---
+    backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
+    backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     # --- HCA specific ---
     kp: float = 1.0                  # proportional gain of the density controller
     move_limit: float = 1.0          # cap on |dx_e| per iteration (1.0 = uncapped). Keep min(kp, move_limit) > 0.5 or no element can be removed in a single step

@@ -174,6 +174,52 @@ def test_infeasible_if_any_case_violates(case_env, monkeypatch):
     assert status.disp == 0.20
 
 
+def test_worst_violation_worst_ratio_across_cases_and_quantities():
+    cases = [LoadCase(name="a", stem="a", sigma_allow=200.0, d_allow=None),
+             LoadCase(name="b", stem="b", sigma_allow=None, d_allow=0.5)]
+    results = [_results(300.0, 9.9, energy=[1.0, 0.0]),   # 300/200 = 1.5; disp unconstrained
+               _results(999.0, 0.25, energy=[0.0, 1.0])]  # sigma unconstrained; 0.25/0.5 = 0.5
+    assert loop_mod.worst_violation(cases, results) == pytest.approx(1.5)
+    # no limits anywhere -> nothing to violate -> trivially feasible 0.0
+    free = [LoadCase(name="a", stem="a")]
+    assert loop_mod.worst_violation(free, [results[0]]) == 0.0
+
+
+def test_loop_passes_worst_violation_ratio_to_next_target_vf(case_env, monkeypatch):
+    """The per-iteration violation magnitude (worst value/limit over cases and
+    both quantities) reaches next_target_vf, so a violation-aware optimiser can
+    back off proportionally instead of by the binary feasible flag alone."""
+    case_dir, out = case_env(("lc_a", "lc_b"))
+    cfg = _cfg(case_dir, out, "lc_a", [
+        LoadCase(name="a", stem="lc_a", weight=1.0),                  # 250 / 1.0 limits
+        LoadCase(name="b", stem="lc_b", weight=1.0, sigma_allow=500.0),
+    ])
+    _stub_solver(monkeypatch, {
+        "lc_a": _results(100.0, 0.30, energy=[1.0, 0.0]),   # ratios 0.4 and 0.3
+        "lc_b": _results(400.0, 0.20, energy=[0.0, 1.0]),   # ratios 0.8 and 0.2
+    }, calls=[])
+
+    captured = {}
+    real_build = loop_mod.build_optimizer
+
+    def spy_build(*args, **kwargs):
+        opt = real_build(*args, **kwargs)
+        real_next = opt.next_target_vf
+
+        def spy_next(current_vf, feasible, violation=None):
+            captured["feasible"] = feasible
+            captured["violation"] = violation
+            return real_next(current_vf, feasible, violation)
+
+        opt.next_target_vf = spy_next
+        return opt
+
+    monkeypatch.setattr(loop_mod, "build_optimizer", spy_build)
+    loop_mod.run_optimization(cfg, log=lambda *_: None)
+    assert captured["feasible"] is True
+    assert captured["violation"] == pytest.approx(0.8)   # 400/500, the worst ratio
+
+
 def test_infeasible_if_displacement_case_violates(case_env, monkeypatch):
     case_dir, out = case_env(("lc_a", "lc_b"))
     cfg = _cfg(case_dir, out, "lc_a", [

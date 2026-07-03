@@ -183,6 +183,22 @@ def _within(value: float, limit: Optional[float]) -> bool:
     return limit is None or value <= limit
 
 
+def worst_violation(cases, case_results) -> float:
+    """Worst constraint-utilisation ratio ``value/limit`` over all load cases and
+    both limit types (``sigma_max/sigma_allow``, ``disp/d_allow``). A blank limit
+    (``None``) is unconstrained and skipped; with no limits at all the design is
+    trivially feasible and 0.0 is returned. ``v <= 1`` <=> feasible — this is the
+    violation *magnitude* the proportional back-off controller reacts to (see
+    :func:`oropt.beso.gate_target_vf`), where the feasible flag only says on/off.
+    """
+    ratios = [value / limit
+              for case, res in zip(cases, case_results)
+              for value, limit in ((res.sigma_max, case.sigma_allow),
+                                   (res.disp, case.d_allow))
+              if limit is not None]
+    return max(ratios, default=0.0)
+
+
 def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
                 no_pin: set, solve_dir: Path, anim_dt: float,
                 exclude_elem_ids: Optional[np.ndarray] = None):
@@ -432,6 +448,7 @@ def run_optimization(cfg: Config, resume: bool = False,
                                   and _within(r.disp, case.d_allow))}
                 for case, r in zip(cases, case_results)]
             feasible = all(c["feasible"] for c in per_case)
+            violation = worst_violation(cases, case_results)
             # Headline sigma_max/disp stay the worst across cases, each reported with
             # the limit of the case it came from (a blank limit -> NaN, "no limit")
             # so the Monitor's "limit" matches what gated feasibility.
@@ -507,7 +524,7 @@ def run_optimization(cfg: Config, resume: bool = False,
 
             # ---- next design ----------------------------------------------
             sens_prev = sens
-            target_vf = opt.next_target_vf(vf, feasible)
+            target_vf = opt.next_target_vf(vf, feasible, violation=violation)
             alive = opt.update(alive, sens, target_vf)
             # Additive-manufacturing printability constraints (min member size,
             # symmetry, overhang) on the fresh alive mask; re-drop islands a

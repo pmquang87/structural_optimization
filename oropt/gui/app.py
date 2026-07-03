@@ -439,6 +439,34 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         index=["energy", "vonmises", "blend"].index(aopt.sensitivity),
         key=f"sens_{opt_name}")
 
+    st.markdown("**Feasibility back-off** — how the volume target reacts to the "
+                "constraint values. v is the worst utilisation ratio across load "
+                "cases (σ_max/σ_allow and d/d_allow; v ≤ 1 = feasible). Defaults "
+                "= the classic binary gate (fixed ±ER step from feasible/"
+                "infeasible alone), which is known to ping-pong across the limit.")
+    b = st.columns(3)
+    aopt.backoff_gain = b[0].number_input(
+        "Back-off gain", value=float(aopt.backoff_gain), min_value=0.0,
+        step=0.5, format="%.2f", key=f"bogain_{opt_name}",
+        help="0 = classic gate: any violation grows the target by one full "
+             "evolution-rate step. > 0 = proportional: the growth step is "
+             "ER·min(gain·(v−1), cap), so a 1 % violation triggers a nudge and "
+             "a large one a capped surge. Size it so gain·(typical overshoot) "
+             "≈ 1, e.g. 10–20.")
+    aopt.backoff_cap = b[1].number_input(
+        "Back-off cap (×ER)", value=float(aopt.backoff_cap), min_value=0.1,
+        step=0.5, format="%.1f", key=f"bocap_{opt_name}",
+        help="Cap on the proportional growth step, in multiples of the "
+             "evolution rate. Only used when the gain is > 0.")
+    aopt.damping_threshold = b[2].number_input(
+        "Damping threshold", value=float(aopt.damping_threshold),
+        min_value=0.05, max_value=1.0, step=0.01, format="%.2f",
+        key=f"damp_{opt_name}",
+        help="While feasible with v above this, removal slows by "
+             "(1−v)/(1−threshold) so the design glides into the limit instead "
+             "of overshooting and oscillating. 1.0 = off (full rate until "
+             "infeasible); 0.9–0.95 is typical.")
+
     # ---- optimiser-specific knobs -----------------------------------------
     if opt_name == "tobs":
         t = st.columns(2)

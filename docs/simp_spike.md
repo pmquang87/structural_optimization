@@ -45,7 +45,7 @@ class Opt:
     def volume_fraction(self, alive_mask) -> float
     def raw_sensitivity(self, results, elem_ids, alive_mask) -> np.ndarray   # map_sensitivity
     def filter_history(self, raw, sens_prev) -> np.ndarray                   # blend_history
-    def next_target_vf(self, current_vf, feasible) -> float
+    def next_target_vf(self, current_vf, feasible, violation=None) -> float
     def update(self, alive_mask, sens, target_vf) -> alive_mask              # boolean -> boolean
 ```
 
