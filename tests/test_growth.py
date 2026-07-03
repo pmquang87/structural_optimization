@@ -21,7 +21,8 @@ from oropt.config import (Beso as BesoCfg, Config, GrowthBox,
 from oropt.deck import Deck
 from oropt.gui.boxes import growth_boxes_from_records, records_from_growth_boxes
 from oropt.levelset import LevelSet
-from oropt.loop import growth_candidate_mask, resolve_growth_boxes
+from oropt.loop import (growth_candidate_mask, preview_growth_boxes,
+                        resolve_growth_boxes)
 from oropt.mesh import Mesh, local_frame_basis, overlay_primitives
 from oropt.tobs import Tobs
 from oropt.validate import check_config
@@ -506,3 +507,69 @@ def test_gui_partial_and_unknown_shape_rows_dropped():
          "x2": 1.0, "y2": 0.0, "z2": 0.0, "radius": 0.5}]         # complete
     out = growth_boxes_from_records(rows)
     assert [b.shape_kind() for b in out] == ["cylinder"]
+
+
+# ---- "preview regions" element counts (GUI button backend) ------------------
+def test_preview_growth_boxes_counts_and_run_ready(tmp_path):
+    deck, mesh = _load(tmp_path)
+    pv = preview_growth_boxes(deck, mesh, Model(growth_boxes=[BOX_E2, BOX_E3]))
+    assert [(r.name, r.count, r.note) for r in pv.rows] == [
+        ("b2", 1, ""), ("b3", 1, "")]
+    assert pv.total_candidates == 2 and pv.total_elements == 4
+    assert pv.guard == ""                       # chain b2->b3 is reachable
+
+
+def test_preview_growth_boxes_empty_region_noted_and_guarded(tmp_path):
+    deck, mesh = _load(tmp_path)
+    pv = preview_growth_boxes(deck, mesh, Model(growth_boxes=[BOX_EMPTY]))
+    assert pv.rows[0].count == 0 and "no design elements" in pv.rows[0].note
+    assert "offside" in pv.guard                # the run-start guard would abort
+
+
+def test_preview_growth_boxes_unreachable_region_guarded(tmp_path):
+    deck, mesh = _load(tmp_path)
+    pv = preview_growth_boxes(deck, mesh,
+                              Model(growth_boxes=[BOX_E2, BOX_ISLAND]))
+    counts = {r.name: r.count for r in pv.rows}
+    assert counts == {"b2": 1, "island": 1}     # both regions have elements ...
+    assert "island" in pv.guard                 # ... but the island is unreachable
+
+
+def test_preview_growth_boxes_deck_ref_and_missing_card(tmp_path):
+    deck, mesh = _load_with_box(tmp_path)
+    pv = preview_growth_boxes(deck, mesh, Model(growth_boxes=[
+        GrowthBox(name="ref", deck_box_id=7001),
+        GrowthBox(name="missing", deck_box_id=424242)]))
+    rows = {r.name: r for r in pv.rows}
+    assert rows["ref"].count == 1               # resolved from /BOX/RECTA/7001
+    assert rows["missing"].count == 0
+    assert "/BOX/RECTA/424242" in rows["missing"].note
+
+
+def test_app_growth_preview_button(tmp_path):
+    """The GUI's 'Preview region element counts' button loads the deck and renders
+    the per-region table without error (end-to-end wiring, on the 4-tet fixture)."""
+    import oropt
+    from pathlib import Path
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+
+    (tmp_path / "gp_0000.rad").write_text(GROWTH_DECK, encoding="utf-8")
+    cfg = Config()
+    cfg.model.case_dir = str(tmp_path)
+    cfg.work_dir = str(tmp_path / "work")
+    cfg.load_cases = [LoadCase(name="a", stem="gp", sigma_allow=1.0)]
+    cfg.model.growth_boxes = [BOX_E2]
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg.to_yaml(cfg_path)
+
+    app_file = Path(oropt.__file__).resolve().parent / "gui" / "app.py"
+    at = AppTest.from_file(str(app_file), default_timeout=60)
+    at.run()
+    at.sidebar.text_input[0].set_value(str(cfg_path)).run()
+    assert not at.exception
+    btns = [b for b in at.button if b.key == "growth_preview"]
+    assert btns, "preview button should render when regions are configured"
+    before = len(at.dataframe)
+    btns[0].click().run()
+    assert not at.exception
+    assert len(at.dataframe) > before           # the per-region count table rendered

@@ -29,6 +29,7 @@ from oropt import status as st_io
 from oropt.animate import (VIEWS as _BUILTIN_VIEWS, frame_count,
                            make_animation, selectable_views)
 from oropt.config import AnimateOpts, Config, LoadCase
+from oropt.deck import Deck
 from oropt.gui import queue_store as qs
 from oropt.gui.boxes import (BOX_COLUMNS, growth_boxes_from_records,
                              records_from_growth_boxes)
@@ -36,7 +37,8 @@ from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
 from oropt.gui.runstate import find_active_run
-from oropt.mesh import overlay_primitives
+from oropt.loop import preview_growth_boxes
+from oropt.mesh import Mesh, overlay_primitives
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
                              records_from_custom_views)
 from oropt.validate import ERROR, check_config, has_errors
@@ -428,6 +430,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
                 "throttled (validation warns otherwise). The Monitor's 3D view "
                 "outlines each region so you can place coordinates visually.")
+        _render_growth_preview(cfg)
 
     _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS",
                   "hca": "HCA"}
@@ -681,6 +684,54 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     if st.button("💾 Save config", disabled=not (color_ok and bg_ok)):
         cfg.to_yaml(cfg_path)
         st.success(f"Saved to {cfg_path}")
+
+
+def _render_growth_preview(cfg: Config) -> None:
+    """On-demand button: count how many design elements each growth region would
+    start *void*, by loading the primary load case's starter deck in-process (pure
+    Python, no VTK) and running :func:`oropt.loop.preview_growth_boxes`.
+
+    Lets a user confirm a region is actually pre-meshed — and that the run-start
+    guards pass — before committing to a multi-hour run, instead of finding out
+    only when the loop aborts. Reads the live editor state on ``cfg``."""
+    if not st.button(
+            "🔍 Preview region element counts", key="growth_preview",
+            help="Load the deck and count the design elements inside each region "
+                 "(they start void). Also runs the run-start guards, so a "
+                 "mis-placed or un-meshed region is caught now, not hours in."):
+        return
+    cases = cfg.load_case_list()
+    if not cases:
+        st.warning("Define a load case (🔀 Load cases tab) first — the preview "
+                   "reads that case's starter deck.")
+        return
+    starter = cases[0].starter
+    if not starter.exists():
+        st.warning(f"Starter deck not found: `{starter}`. Check the case "
+                   "directory and the load case's stem.")
+        return
+    try:
+        with st.spinner(f"Loading `{starter.name}` and counting …"):
+            deck = Deck.load(starter, cfg.model.design_part_id,
+                             cfg.model.design_node_min)
+            preview = preview_growth_boxes(deck, Mesh.from_deck(deck), cfg.model)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not preview regions: {exc}")
+        return
+    st.dataframe(
+        pd.DataFrame([{"region": r.name, "shape": r.shape,
+                       "elements": r.count, "note": r.note or "✓"}
+                      for r in preview.rows]),
+        hide_index=True, use_container_width=True)
+    pct = (100.0 * preview.total_candidates / preview.total_elements
+           if preview.total_elements else 0.0)
+    if preview.guard:
+        st.error(f"⚠ Run-start guard would abort: {preview.guard}")
+    else:
+        st.success(
+            f"{preview.total_candidates} of {preview.total_elements} design "
+            f"elements ({pct:.1f}%) start void across all regions — regions are "
+            "run-ready.")
 
 
 def _add_growth_overlay(pl, pv, boxes) -> int:

@@ -197,6 +197,60 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
     return candidate
 
 
+@dataclasses.dataclass
+class BoxPreview:
+    """One growth region's preview row: how many design elements it would void."""
+    name: str
+    shape: str
+    count: int          # design elements whose centroid lies inside the region
+    note: str = ""      # a per-region issue (empty region / unresolved deck box)
+
+
+@dataclasses.dataclass
+class GrowthPreview:
+    """Result of previewing a config's growth regions against a loaded deck."""
+    rows: list          # list[BoxPreview], one per configured region
+    total_candidates: int   # unique elements across all regions (0 if a guard trips)
+    total_elements: int     # deck.n_design_elements
+    guard: str = ""         # run-start guard error that would abort a run, if any
+
+
+def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
+    """Count the design elements each growth region would start *void*, without
+    launching a run — the data behind the GUI's "preview regions" button.
+
+    Per region: the centroid-in-region element count (0 flags a region whose
+    volume was not pre-meshed into the design part), plus a note for a region
+    referencing a ``/BOX/RECTA`` card absent from the deck. Also runs the real
+    run-start guards (:func:`growth_candidate_mask`) and reports, in ``guard``, the
+    first error that would abort a run (an empty region, candidate nodes below
+    ``design_node_min``, or an unreachable candidate); ``guard`` is ``""`` when the
+    regions are run-ready, with ``total_candidates`` the unique element count that
+    would then start void. Never raises."""
+    boxes = getattr(model, "growth_boxes", []) or []
+    rows: list = []
+    for i, b in enumerate(boxes):
+        label = b.name or f"#{i + 1}"
+        try:
+            resolved = resolve_growth_boxes(deck, [b])[0]
+        except ValueError as exc:
+            rows.append(BoxPreview(label, b.shape_kind(), 0, str(exc)))
+            continue
+        count = int(mesh.in_boxes_mask([resolved]).sum())
+        note = ("" if count else "no design elements inside -- the region volume "
+                "is not pre-meshed into the design part")
+        rows.append(BoxPreview(label, resolved.shape_kind(), count, note))
+    total, guard = 0, ""
+    if boxes:
+        try:
+            total = int(growth_candidate_mask(
+                deck, mesh, model, log=lambda _m: None).sum())
+        except ValueError as exc:
+            guard = str(exc)
+    return GrowthPreview(rows=rows, total_candidates=total,
+                         total_elements=deck.n_design_elements, guard=guard)
+
+
 def _clean_solve_dir(run_dir: Path) -> None:
     if run_dir.exists():
         shutil.rmtree(run_dir, ignore_errors=True)

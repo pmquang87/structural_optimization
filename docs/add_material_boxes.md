@@ -270,8 +270,7 @@ Every optimiser's `V0 = mesh.volumes.sum()` becomes the **envelope** volume, so:
   resume-shape guard). Everything is testable without OpenRadioss, matching the
   existing 124-test hermetic suite. Rough size: a few hundred lines including
   tests — comparable to the stress-exclusion feature.
-* **Phase 1.5 (nice-to-have) — implemented** except the GUI "preview boxes"
-  element-count button:
+* **Phase 1.5 (nice-to-have) — implemented:**
   * **Shapes** — `GrowthBox.shape` is `box` (default) / `cylinder` / `sphere`
     (mirroring `/BOX/RECTA` / `/BOX/CYLIN` / `/BOX/SPHER`). Sphere = centre +
     radius; cylinder = two axis end-points + radius (finite, capped). The six
@@ -293,8 +292,11 @@ Every optimiser's `V0 = mesh.volumes.sum()` becomes the **envelope** volume, so:
     (a `group_nodes`-style helper); a `GrowthBox.deck_box_id` references it and is
     resolved to concrete corners at run start (`loop.resolve_growth_boxes`), as an
     alternative to literal coordinates.
-  * *Still open:* a GUI "preview boxes" button that reports each region's element
-    count before a run (needs the deck loaded in the GUI process).
+  * **GUI "preview regions" button** — on the Input tab, loads the primary case's
+    starter deck in-process (pure Python, no VTK) and reports each region's
+    centroid-in-region element count plus the run-start guard verdict
+    (`loop.preview_growth_boxes`), so a mis-placed or un-meshed region is caught
+    before a multi-hour run instead of when the loop aborts.
 * **Phase 2 (only if pre-meshing is a proven pain):** auto-generated box mesh +
   `/INTER/TYPE2` tie + adjacency augmentation. Re-evaluate then; today the
   cost/risk is not justified.
