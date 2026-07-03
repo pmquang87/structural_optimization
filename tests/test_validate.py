@@ -56,7 +56,8 @@ def test_well_formed_config_is_clean(tmp_path):
     assert has_errors(check_config(cfg)) is False
 
 
-@pytest.mark.parametrize("name", ["beso", "levelset", "tobs", "BESO", "  Tobs "])
+@pytest.mark.parametrize("name", ["beso", "levelset", "tobs", "hca",
+                                  "BESO", "  Tobs ", "HCA"])
 def test_valid_optimizers_accepted(tmp_path, name):
     cfg = _good_cfg(tmp_path)
     cfg.optimizer = name

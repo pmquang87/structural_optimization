@@ -2,7 +2,7 @@
 
     >>> THIS MODULE IS A RESEARCH-SPIKE PROTOTYPE. <<<
     It is deliberately NOT wired into the loop: ``loop.build_optimizer`` only
-    knows ``beso`` / ``levelset`` / ``tobs``, and this file is not imported by any
+    knows ``beso`` / ``levelset`` / ``tobs`` / ``hca``, and this file is not imported by any
     of them. It does NOT talk to OpenRadioss. It exercises the SIMP/OC mathematics
     against a *synthetic* compliance model so the update, the bisection and the
     projection can be validated hermetically (see ``tests/test_simp.py``). The

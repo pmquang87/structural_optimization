@@ -243,6 +243,49 @@ class TobsOpts:
 
 
 @dataclass
+class HcaOpts:
+    """HCA (Hybrid Cellular Automata) optimiser knobs — a config-selectable
+    alternative to BESO (Tovar et al., *J. Mech. Des.* 128(6), 2006; the method
+    behind LS-TaSC, built for nonlinear/contact problems with no design
+    gradients — exactly this regime).
+
+    Every element keeps a continuous *virtual density* ``x_e in [0.01, 1]``
+    that persists between iterations. Each iteration a proportional controller
+    drives it toward a uniform energy-density setpoint ``S*``
+    (``x_e += kp * (S_e - S*)/S*``, move-limited), with ``S*`` found by
+    bisection so the thresholded design (alive iff ``x_e >= 0.5``) hits the
+    per-iteration volume target (``evolution_rate``/``target_volume_fraction``,
+    same gate as BESO). ``S_e`` is the filtered/history-averaged strain-energy
+    density shared with BESO — the filter doubles as the cellular automaton's
+    neighbourhood averaging.
+
+    Protected elements are pinned at full density and forced alive, and
+    disconnected islands are dropped, exactly like BESO. The first block
+    mirrors the BESO/level-set/TOBS shared knobs (so an HCA run is fully
+    specified by its own config block); the second block is HCA specific.
+    """
+    # --- shared semantics with BESO ---
+    evolution_rate: float = 0.02     # ER: target volume fraction removed per iteration
+    filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm] (= the CA neighbourhood)
+    history_weight: float = 0.5      # blend of current & previous-iteration sensitivity
+    target_volume_fraction: float = 0.5  # stop reducing once this volume fraction remains
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
+    max_iter: int = 150
+    convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
+    convergence_window: int = 5
+    protect_layers: int = 2          # element layers around protected nodes to freeze
+    contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid node
+    protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
+    archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
+    archive_restart: bool = False      # when archiving, also copy the restart (.rst). OFF by default (~345 MB/iter); opt in for replayable solver state
+    # --- HCA specific ---
+    kp: float = 1.0                  # proportional gain of the density controller
+    move_limit: float = 1.0          # cap on |dx_e| per iteration (1.0 = uncapped). Keep min(kp, move_limit) > 0.5 or no element can be removed in a single step
+    field_history_weight: float = 1.0  # extra HCA-internal blend of the energy field with previous iterations (LS-TaSC's multi-iteration weighted sum); 1.0 = off (the shared history_weight already blends iterations)
+
+
+@dataclass
 class D3plotOpts:
     """Optional post-run conversion of the final OpenRadioss animation into an
     LS-Dyna ``d3plot`` (viewable in LS-PrePost etc.).
@@ -505,6 +548,7 @@ class Config:
     beso: Beso = field(default_factory=Beso)
     levelset: LevelSet = field(default_factory=LevelSet)
     tobs: TobsOpts = field(default_factory=TobsOpts)
+    hca: HcaOpts = field(default_factory=HcaOpts)
     manufacturing: ManufacturingOpts = field(default_factory=ManufacturingOpts)
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     smooth: SmoothOpts = field(default_factory=SmoothOpts)
@@ -516,8 +560,9 @@ class Config:
     # weighted-sum compliance over several loads. See :class:`LoadCase`.
     load_cases: list = field(default_factory=list)
     # Which topology optimiser to drive the loop: "beso" (default, bi-directional
-    # element removal), "levelset" (nodal level-set, smoother boundaries) or "tobs"
-    # (binary ILP flips, Sivapuram & Picelli 2018). The active block's shared knobs
+    # element removal), "levelset" (nodal level-set, smoother boundaries), "tobs"
+    # (binary ILP flips, Sivapuram & Picelli 2018) or "hca" (hybrid cellular
+    # automata, LS-TaSC-style density controller). The active block's shared knobs
     # (target_volume_fraction, max_iter, convergence, protect_*, archive_*) are read
     # via ``active_opts()``.
     optimizer: str = "beso"
@@ -545,6 +590,7 @@ class Config:
             beso=build(Beso, data.get("beso")),
             levelset=build(LevelSet, data.get("levelset")),
             tobs=build(TobsOpts, data.get("tobs")),
+            hca=build(HcaOpts, data.get("hca")),
             manufacturing=build(ManufacturingOpts, data.get("manufacturing")),
             d3plot=build(D3plotOpts, data.get("d3plot")),
             smooth=build(SmoothOpts, data.get("smooth")),
@@ -573,7 +619,8 @@ class Config:
 
     # ---- optimiser selection ----------------------------------------------
     def optimizer_name(self) -> str:
-        """Normalised optimiser selector: ``"beso"``, ``"levelset"`` or ``"tobs"``."""
+        """Normalised optimiser selector: ``"beso"``, ``"levelset"``, ``"tobs"``
+        or ``"hca"``."""
         return (self.optimizer or "beso").strip().lower()
 
     def active_opts(self):
@@ -586,6 +633,8 @@ class Config:
             return self.levelset
         if name == "tobs":
             return self.tobs
+        if name == "hca":
+            return self.hca
         return self.beso
 
     def load_case_list(self) -> list[ResolvedCase]:

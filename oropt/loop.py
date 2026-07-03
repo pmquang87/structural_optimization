@@ -17,6 +17,7 @@ from .beso import Beso, combine_sensitivity
 from .config import Config, ResolvedCase
 from .d3plot import convert_final
 from .deck import Deck, prepare_engine
+from .hca import Hca
 from .levelset import LevelSet
 from .manufacturing import apply_manufacturing, manufacturing_active
 from .animate import make_animation
@@ -41,10 +42,13 @@ def build_optimizer(cfg: Config, mesh: Mesh, protected: np.ndarray,
         return LevelSet(mesh, cfg.levelset, protected, anchor=anchor)
     if name == "tobs":
         return Tobs(mesh, cfg.tobs, protected, anchor=anchor)
+    if name == "hca":
+        return Hca(mesh, cfg.hca, protected, anchor=anchor)
     if name == "beso":
         return Beso(mesh, cfg.beso, protected, anchor=anchor)
     raise ValueError(
-        f"unknown optimizer {cfg.optimizer!r} (expected 'beso', 'levelset' or 'tobs')")
+        f"unknown optimizer {cfg.optimizer!r} "
+        "(expected 'beso', 'levelset', 'tobs' or 'hca')")
 
 
 def collect_protect_nodes(deck: Deck, model, include_bc: bool = True) -> np.ndarray:
