@@ -30,6 +30,8 @@ from oropt.animate import (VIEWS as _BUILTIN_VIEWS, frame_count,
                            make_animation, selectable_views)
 from oropt.config import AnimateOpts, Config, LoadCase
 from oropt.gui import queue_store as qs
+from oropt.gui.boxes import (BOX_COLUMNS, growth_boxes_from_records,
+                             records_from_growth_boxes)
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
@@ -382,6 +384,37 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     cfg.model.stress_exclude_node_ids = [
         int(x) for x in sn.replace(" ", "").split(",") if x]
 
+    st.subheader("Growth boxes — add material")
+    st.caption(
+        "Axis-aligned boxes (two opposite corners, like LS-DYNA `*DEFINE_BOX` / "
+        "Radioss `/BOX/RECTA`) marking **candidate growth material**: design "
+        "elements whose centroid lies inside a box start the run **void**, and "
+        "the optimiser may *add* them where the load path wants — so the design "
+        "can grow material where the original part had none. The box volume must "
+        "be **pre-meshed** into the design part (same `/TETRA4` block, "
+        "node-conformal interface, node ids ≥ design_node_min); a box over "
+        "unmeshed space is an error at run start. Multiple boxes act as a union; "
+        "volume fractions are then relative to the enlarged (part + boxes) space.")
+    gb_df = pd.DataFrame(records_from_growth_boxes(cfg.model.growth_boxes),
+                         columns=BOX_COLUMNS)
+    gb_edited = st.data_editor(
+        gb_df, num_rows="dynamic", width="stretch",
+        key="growth_boxes_editor", column_config={
+            "name": st.column_config.TextColumn(
+                "Name", help="Label for run-log / validation messages."),
+            **{k: st.column_config.NumberColumn(
+                k, format="%.3f",
+                help="Box bound in model units (e.g. mm). All six are required.")
+               for k in BOX_COLUMNS[1:]},
+        })
+    cfg.model.growth_boxes = growth_boxes_from_records(
+        gb_edited.to_dict("records"))
+    if cfg.model.growth_boxes:
+        st.info(f"{len(cfg.model.growth_boxes)} growth box(es): their elements "
+                "start void and may be grown into. With BESO, keep "
+                "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
+                "throttled (validation warns otherwise).")
+
     _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS"}
     st.subheader(f"{_opt_short[opt_name]} parameters")
     g = st.columns(3)
@@ -588,6 +621,11 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
         if getattr(status, "stress_excluded_elems", 0):
             st.caption(f"σ_max ignores **{status.stress_excluded_elems} elements** "
                        "in the configured stress-exclusion region(s).")
+        if getattr(status, "elements_candidate", 0):
+            st.caption(
+                f"Growth boxes: **{getattr(status, 'elements_grown', 0)}** of "
+                f"**{status.elements_candidate}** candidate elements grown "
+                "(material added beyond the original part).")
 
         hist = st_io.read_history(work)
         if hist:

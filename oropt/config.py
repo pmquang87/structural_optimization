@@ -73,6 +73,31 @@ class DockerOpts:
 
 
 @dataclass
+class GrowthBox:
+    """A user-defined axis-aligned box (two opposite corners, like LS-DYNA's
+    ``*DEFINE_BOX`` / Radioss ``/BOX/RECTA``) marking part of the design mesh as
+    **candidate growth material**: design elements whose centroid lies inside any
+    growth box start the run *void* (removed from the deck) and may be **added**
+    by the optimiser's bi-directional update wherever the load path wants them —
+    letting the design grow material where the original part had none.
+
+    The box volume must be **pre-meshed** into the design part (same
+    ``/TETRA4/<design_part_id>`` block, node-conformal interface with the original
+    part, node ids >= ``design_node_min``); a box over unmeshed space selects no
+    elements and is an error at run start. Multiple boxes act as a union. Bounds
+    are inclusive; a box overlapping the original part volume voids those
+    elements at start too (deliberate carve-and-regrow).
+    """
+    name: str = ""
+    x_min: float = 0.0
+    x_max: float = 0.0
+    y_min: float = 0.0
+    y_max: float = 0.0
+    z_min: float = 0.0
+    z_max: float = 0.0
+
+
+@dataclass
 class Model:
     """The shared geometry of the design: which part is the design domain and
     which nodes anchor it. The deck identity (``stem``) and the constrained
@@ -98,6 +123,19 @@ class Model:
     # also want to protect them from removal.
     stress_exclude_group_ids: list = field(default_factory=list)
     stress_exclude_node_ids: list = field(default_factory=list)
+    # User-defined growth boxes (add-material regions): design elements whose
+    # centroid lies inside any box start VOID and may be grown into by the
+    # optimiser. The box volumes must be pre-meshed into the design part; see
+    # :class:`GrowthBox`. Stored as GrowthBox, but coerced from plain dicts too
+    # so YAML round-trips and the GUI editor (dict rows) both work.
+    growth_boxes: list = field(default_factory=list)
+
+    def __post_init__(self):
+        fields = {f.name for f in dataclasses.fields(GrowthBox)}
+        self.growth_boxes = [
+            b if isinstance(b, GrowthBox)
+            else GrowthBox(**{k: v for k, v in dict(b).items() if k in fields})
+            for b in (self.growth_boxes or [])]
 
 
 @dataclass
@@ -664,5 +702,8 @@ def unknown_keys(data: dict) -> list[str]:
     anim = data.get("animate")
     if isinstance(anim, dict):
         _list_of("animate.custom_views", anim.get("custom_views"), CustomView)
+    mdl = data.get("model")
+    if isinstance(mdl, dict):
+        _list_of("model.growth_boxes", mdl.get("growth_boxes"), GrowthBox)
 
     return out

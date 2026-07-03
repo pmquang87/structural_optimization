@@ -48,6 +48,8 @@ class Status:
     elements_alive: int = 0
     elements_total: int = 0
     stress_excluded_elems: int = 0    # design elements whose von-Mises is ignored (stress-exclusion region)
+    elements_candidate: int = 0       # growth-box candidate elements (start void, growable)
+    elements_grown: int = 0           # candidates currently alive -- material grown into the boxes
     # Per-load-case feasibility breakdown, one dict per case with keys
     # name/sigma_max/sigma_allow/disp/d_allow/feasible. Each case is checked
     # against its OWN limits (every load case defines its sigma_allow/d_allow), so

@@ -173,6 +173,25 @@ def check_config(cfg: Config, *, raw: dict | None = None,
         if c.d_allow is not None and c.d_allow <= 0:
             err(f"load case {c.name!r}: d_allow must be > 0: got {c.d_allow}")
 
+    # --- growth boxes (add-material regions) ---
+    boxes = m.growth_boxes or []
+    for i, b in enumerate(boxes):
+        label = b.name or f"#{i + 1}"
+        for axis in ("x", "y", "z"):
+            lo = getattr(b, f"{axis}_min")
+            hi = getattr(b, f"{axis}_max")
+            if lo > hi:
+                err(f"growth box {label!r}: {axis}_min ({lo}) > {axis}_max ({hi})")
+            elif lo == hi:
+                warn(f"growth box {label!r}: {axis}_min == {axis}_max ({lo}) -- "
+                     "the box is degenerate and will select no elements")
+    if boxes and cfg.optimizer_name() == "beso" \
+            and cfg.beso.max_add_ratio < cfg.beso.evolution_rate:
+        warn(f"growth boxes with beso.max_add_ratio={cfg.beso.max_add_ratio} < "
+             f"evolution_rate={cfg.beso.evolution_rate}: per-iteration growth "
+             "into the boxes is capped below the feasibility back-off step; "
+             "consider max_add_ratio >= evolution_rate")
+
     return problems
 
 

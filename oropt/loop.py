@@ -92,6 +92,75 @@ def stress_exclude_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
     return mesh.protected_mask(deck, nodes, contact_dist=0.0, layers=0)
 
 
+def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
+                          log: Callable[[str], None] = print) -> np.ndarray:
+    """Boolean mask (aligned with ``deck.elem_ids``) of growth-candidate
+    elements: those whose centroid lies inside one of ``model.growth_boxes``.
+    Candidates start the run *void* and may be grown into by the optimiser's
+    bi-directional update. All-False when no boxes are configured.
+
+    Raises ``ValueError`` at run start — before any ~13-min solve — for the
+    setup mistakes that would otherwise waste (or silently no-op) a multi-hour
+    run:
+
+    * a box selecting **no** design elements: the box volume was not pre-meshed
+      into the design part;
+    * candidate connectivity referencing node ids below ``design_node_min``: the
+      free-node guard could not pin those nodes while the elements are void, so
+      the implicit tangent would go singular;
+    * candidates **unreachable** from the initial structure (no shared-node path,
+      even through other candidates): a non-conformal interface —
+      ``keep_connected`` would drop anything grown there as a floating island.
+    """
+    boxes = getattr(model, "growth_boxes", []) or []
+    if not boxes:
+        return np.zeros(deck.n_design_elements, dtype=bool)
+
+    candidate = np.zeros(deck.n_design_elements, dtype=bool)
+    box_masks = []
+    for i, b in enumerate(boxes):
+        bm = mesh.in_boxes_mask([b])
+        label = b.name or f"#{i + 1}"
+        if not bm.any():
+            raise ValueError(
+                f"growth box {label!r} contains no design elements -- the box "
+                "volume must be pre-meshed into the design part "
+                f"(/TETRA4/{deck.design_part_id}) before material can grow there")
+        log(f"[oropt] growth box {label!r}: {int(bm.sum())} candidate elements "
+            "start void")
+        box_masks.append((label, bm))
+        candidate |= bm
+
+    # Void-element nodes must be pinnable by the free-node guard, which only
+    # covers design nodes (ids >= design_node_min).
+    cand_nodes = deck.elem_conn[candidate]
+    bad = cand_nodes < deck.design_node_min
+    if bad.any():
+        raise ValueError(
+            f"growth-box candidate elements reference "
+            f"{int(np.unique(cand_nodes[bad]).size)} node id(s) below "
+            f"design_node_min={deck.design_node_min}; the free-node guard cannot "
+            "pin them while the elements are void (singular implicit tangent). "
+            "Renumber the expansion-mesh nodes to ids >= design_node_min")
+
+    # Every candidate must be connected (via shared nodes, possibly through
+    # other candidates) to the initially-alive structure, or it can never be
+    # grown: keep_connected would drop it as a floating island every iteration.
+    alive0 = ~candidate
+    reachable = mesh.keep_connected(np.ones_like(candidate), alive0)
+    unreachable = candidate & ~reachable
+    if unreachable.any():
+        names = [label for label, bm in box_masks if (bm & unreachable).any()]
+        raise ValueError(
+            f"{int(unreachable.sum())} growth-box candidate element(s) in "
+            f"box(es) {', '.join(repr(n) for n in names)} share no nodes with "
+            "the initial structure (directly or through other candidates), so "
+            "they could never be grown. Make the expansion mesh node-conformal "
+            "with the part (imprint the part surface, then merge/equivalence "
+            "the coincident interface nodes)")
+    return candidate
+
+
 def _clean_solve_dir(run_dir: Path) -> None:
     if run_dir.exists():
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -246,6 +315,21 @@ def run_optimization(cfg: Config, resume: bool = False,
         anchor = mesh.protected_mask(deck, anchor_nodes,
                                      contact_dist=oc.contact_protect_dist,
                                      layers=oc.protect_layers)
+    # Growth boxes: candidate elements start void and may be grown into. They are
+    # never protected -- a candidate inside the protected dilation would otherwise
+    # be force-materialised at iteration 1 regardless of sensitivity. (New array,
+    # so the anchor mask above keeps its own view.)
+    candidate = growth_candidate_mask(deck, mesh, m, log=log)
+    n_candidate = int(candidate.sum())
+    if n_candidate:
+        overlap = int((protected & candidate).sum())
+        if overlap:
+            log(f"[oropt] growth: {overlap} candidate elements overlapped the "
+                "protected set -> left unprotected (candidates are never frozen)")
+        protected = protected & ~candidate
+        log(f"[oropt] growth: {n_candidate} candidate elements "
+            f"({100 * candidate.mean():.1f}% of the design space) start void; "
+            "volume fractions are relative to the enlarged (part + boxes) space")
     opt = build_optimizer(cfg, mesh, protected, anchor=anchor)
     log(f"[oropt] optimizer={cfg.optimizer_name()}; protected elements: "
         f"{int(protected.sum())} ({100*protected.mean():.1f}%); V0={opt.V0:.3f}")
@@ -263,12 +347,19 @@ def run_optimization(cfg: Config, resume: bool = False,
             "feasibility / monitor / report")
 
     # ---- initial / resumed state ------------------------------------------
-    alive = np.ones(deck.n_design_elements, dtype=bool)
+    alive = ~candidate            # everything alive except growth-box candidates
     sens_prev: Optional[np.ndarray] = None
     start_iter = 0
     if resume:
         ckpt = st.load_checkpoint(work)
         if ckpt is not None:
+            if ckpt["alive_mask"].shape != alive.shape:
+                raise ValueError(
+                    f"checkpoint alive mask has {ckpt['alive_mask'].size} "
+                    f"elements but the deck has {deck.n_design_elements} -- the "
+                    "design mesh changed since this run was checkpointed (e.g. "
+                    "growth boxes were pre-meshed in); start a fresh run instead "
+                    "of resuming")
             alive = ckpt["alive_mask"]; sens_prev = ckpt["sens_prev"]
             start_iter = ckpt["iteration"]
             log(f"[oropt] resumed at iteration {start_iter}, "
@@ -278,6 +369,7 @@ def run_optimization(cfg: Config, resume: bool = False,
     status = st.Status(state="running", max_iter=oc.max_iter,
                        elements_total=deck.n_design_elements,
                        stress_excluded_elems=n_excluded,
+                       elements_candidate=n_candidate,
                        sigma_allow=(primary.sigma_allow if primary.sigma_allow
                                     is not None else float("nan")),
                        d_allow=(primary.d_allow if primary.d_allow
@@ -359,7 +451,10 @@ def run_optimization(cfg: Config, resume: bool = False,
                 d_allow=d_allow, feasible=feasible,
                 elements_alive=int(alive.sum()),
                 elements_total=deck.n_design_elements,
-                stress_excluded_elems=n_excluded, cases=per_case,
+                stress_excluded_elems=n_excluded,
+                elements_candidate=n_candidate,
+                elements_grown=int((alive & candidate).sum()),
+                cases=per_case,
                 or_termination=res.message, iter_wall_s=iter_wall,
                 elapsed_s=elapsed, eta_s=iter_wall * remaining,
                 message=("feasible" if feasible else "INFEASIBLE - backing off"),

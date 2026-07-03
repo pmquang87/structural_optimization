@@ -64,6 +64,21 @@ class Mesh:
         rowsum[rowsum == 0] = 1.0
         return sparse.diags(1.0 / rowsum) @ W
 
+    # ---- growth boxes --------------------------------------------------------
+    def in_boxes_mask(self, boxes) -> np.ndarray:
+        """Elements whose centroid lies inside any of *boxes* (axis-aligned,
+        inclusive bounds) — the growth-box candidate set. Union over the boxes;
+        an empty/None list returns all-False. Each box needs ``x_min``/``x_max``/
+        ``y_min``/``y_max``/``z_min``/``z_max`` (a :class:`~oropt.config.GrowthBox`).
+        """
+        mask = np.zeros(self.n_elements, dtype=bool)
+        c = self.centroids
+        for b in boxes or []:
+            mask |= ((c[:, 0] >= b.x_min) & (c[:, 0] <= b.x_max)
+                     & (c[:, 1] >= b.y_min) & (c[:, 1] <= b.y_max)
+                     & (c[:, 2] >= b.z_min) & (c[:, 2] <= b.z_max))
+        return mask
+
     # ---- connectivity ------------------------------------------------------
     def _incidence(self, elem_subset: np.ndarray) -> sparse.csr_matrix:
         """Bipartite element-node incidence for the given element indices."""
