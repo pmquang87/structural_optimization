@@ -5,6 +5,7 @@ monitor without ever touching the run. Resumable from ``checkpoint.npz``.
 """
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import time
 from pathlib import Path
@@ -96,6 +97,37 @@ def stress_exclude_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
     return mesh.protected_mask(deck, nodes, contact_dist=0.0, layers=0)
 
 
+def resolve_growth_boxes(deck: Deck, boxes) -> list:
+    """Return *boxes* with every ``deck_box_id`` reference resolved to concrete
+    ``/BOX/RECTA`` corner coordinates read from the starter deck.
+
+    A growth box may name a ``/BOX/RECTA`` card authored in the pre-processor
+    (``deck_box_id``) instead of literal coordinates; here that box's
+    ``x_min``..``z_max`` are filled from :meth:`oropt.deck.Deck.box_recta` (and its
+    ``shape`` forced to ``"box"``), so everything downstream — selection, guards,
+    the overlay — treats it exactly like a coordinate box. Boxes without a
+    ``deck_box_id`` are returned unchanged. Raises ``ValueError`` when the
+    referenced card is absent from the deck."""
+    out = []
+    for i, b in enumerate(boxes or []):
+        if getattr(b, "deck_box_id", None) is None:
+            out.append(b)
+            continue
+        bounds = deck.box_recta(b.deck_box_id)
+        label = b.name or f"#{i + 1}"
+        if bounds is None:
+            raise ValueError(
+                f"growth box {label!r} references /BOX/RECTA/{b.deck_box_id} but "
+                "no such box card is in the deck; author it in the pre-processor "
+                "or give literal coordinates instead")
+        x_min, x_max, y_min, y_max, z_min, z_max = bounds
+        out.append(dataclasses.replace(
+            b, shape="box", deck_box_id=None,
+            x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
+            z_min=z_min, z_max=z_max))
+    return out
+
+
 def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
                           log: Callable[[str], None] = print) -> np.ndarray:
     """Boolean mask (aligned with ``deck.elem_ids``) of growth-candidate
@@ -116,7 +148,7 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
       even through other candidates): a non-conformal interface —
       ``keep_connected`` would drop anything grown there as a floating island.
     """
-    boxes = getattr(model, "growth_boxes", []) or []
+    boxes = resolve_growth_boxes(deck, getattr(model, "growth_boxes", []) or [])
     if not boxes:
         return np.zeros(deck.n_design_elements, dtype=bool)
 
@@ -127,7 +159,7 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
         label = b.name or f"#{i + 1}"
         if not bm.any():
             raise ValueError(
-                f"growth box {label!r} contains no design elements -- the box "
+                f"growth box {label!r} contains no design elements -- the region "
                 "volume must be pre-meshed into the design part "
                 f"(/TETRA4/{deck.design_part_id}) before material can grow there")
         log(f"[oropt] growth box {label!r}: {int(bm.sum())} candidate elements "
