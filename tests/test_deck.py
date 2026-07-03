@@ -81,6 +81,25 @@ growth_rib
 gusset
         -20.0   -5.0    0.0
           0.0    5.0   12.0
+/BOX/SPHER/7000003
+ball
+                    0                 4.0
+          1.0    2.0    3.0
+/BOX/CYLIN/7000004
+rod
+                    0                 6.0
+          0.0    0.0    0.0
+         10.0    0.0    0.0
+/BOX/RECTA/7000005
+oriented
+                    9                 0.0
+          0.0    0.0    0.0
+          2.0    1.0    1.0
+/SKEW/FIX/9
+frame9
+          5.0    0.0    0.0
+          0.0    1.0    0.0
+          0.0    0.0    1.0
 /END
 """
 
@@ -105,3 +124,35 @@ def test_box_recta_header_with_unit_id(tmp_path):
 def test_box_recta_absent_returns_none(tmp_path):
     d = _box_deck(tmp_path)
     assert d.box_recta(9999999) is None
+
+
+def test_box_sphere_card(tmp_path):
+    d = _box_deck(tmp_path)
+    spec = d.box(7000003)
+    assert spec == {"shape": "sphere", "cx": 1.0, "cy": 2.0, "cz": 3.0,
+                    "radius": 2.0}                 # Diam 4.0 -> radius 2.0
+    assert d.box_recta(7000003) is None            # not a rectangular box
+
+
+def test_box_cylinder_card(tmp_path):
+    d = _box_deck(tmp_path)
+    spec = d.box(7000004)
+    assert spec == {"shape": "cylinder", "x1": 0.0, "y1": 0.0, "z1": 0.0,
+                    "x2": 10.0, "y2": 0.0, "z2": 0.0, "radius": 3.0}
+
+
+def test_box_recta_with_skew_is_oriented(tmp_path):
+    d = _box_deck(tmp_path)
+    spec = d.box(7000005)
+    assert spec["shape"] == "box"
+    assert (spec["x_min"], spec["x_max"]) == (0.0, 2.0)
+    # skew_ID 9 -> /SKEW/FIX/9 frame attached
+    assert spec["origin"] == [5.0, 0.0, 0.0]
+    assert spec["x_axis"] == [0.0, 1.0, 0.0]
+    assert spec["xy_axis"] == [0.0, 0.0, 1.0]
+
+
+def test_skew_fix_reads_frame(tmp_path):
+    d = _box_deck(tmp_path)
+    assert d.skew_fix(9) == [[5.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    assert d.skew_fix(404) is None

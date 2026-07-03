@@ -36,6 +36,7 @@ from typing import Callable, Optional
 
 from ._render import run_render
 from .config import AnimateOpts, Config
+from .mesh import overlay_primitives
 
 ANIM_GIF = "topology_evolution.gif"
 
@@ -136,6 +137,44 @@ union = [b[:, 0].min(), b[:, 1].max(),
          b[:, 2].min(), b[:, 3].max(),
          b[:, 4].min(), b[:, 5].max()]
 
+# Growth-region wireframe outlines, drawn (fixed) over every frame so the user
+# can see where material was allowed to grow. Their bounds extend the framing
+# union so an outline stays in view even where nothing grew.
+_boxes = spec.get("boxes", [])
+
+def _box_bounds(pr):
+    if pr["kind"] == "box":
+        pb = np.asarray(pr["corners"], dtype=float)
+        return pb.min(0), pb.max(0)
+    if pr["kind"] == "sphere":
+        c = np.asarray(pr["center"], dtype=float); r = float(pr["radius"])
+        return c - r, c + r
+    a = np.asarray(pr["p1"], dtype=float); z = np.asarray(pr["p2"], dtype=float)
+    r = float(pr["radius"])
+    return np.minimum(a, z) - r, np.maximum(a, z) + r
+
+for pr in _boxes:
+    lo, hi = _box_bounds(pr)
+    union = [min(union[0], lo[0]), max(union[1], hi[0]),
+             min(union[2], lo[1]), max(union[3], hi[1]),
+             min(union[4], lo[2]), max(union[5], hi[2])]
+
+def _add_boxes(p):
+    for pr in _boxes:
+        k = pr["kind"]
+        if k == "box":
+            pts = np.asarray(pr["corners"], dtype=float)
+            lines = np.hstack([[2, i, j] for i, j in pr["edges"]]).astype(int)
+            m = pv.PolyData(pts, lines=lines)
+        elif k == "sphere":
+            m = pv.Sphere(radius=pr["radius"], center=pr["center"])
+        else:
+            a = np.asarray(pr["p1"], dtype=float); z = np.asarray(pr["p2"], dtype=float)
+            m = pv.Cylinder(center=(a + z) / 2.0, direction=z - a,
+                            radius=pr["radius"], height=float(np.linalg.norm(z - a)))
+        p.add_mesh(m, color="red", style="wireframe", line_width=2,
+                   opacity=0.7, reset_camera=False)
+
 opacity = float(spec.get("opacity", 1.0))
 p = pv.Plotter(off_screen=True, window_size=spec["window_size"])
 p.background_color = spec["background"]
@@ -168,6 +207,7 @@ for surf, out, label in zip(surfaces, spec["pngs"], spec["labels"]):
     p.clear()
     p.add_mesh(surf, color=spec["color"], show_edges=spec["show_edges"],
                opacity=opacity, smooth_shading=True, reset_camera=False)
+    _add_boxes(p)
     p.camera_position = cam
     if label:
         p.add_text(label, position="upper_left", font_size=12, color="black")
@@ -210,9 +250,11 @@ def _label_for(src: Path) -> str:
 
 
 def _render_frames(frames: list[Path], opts: AnimateOpts, tmp: Path,
-                   log: Callable[[str], None]) -> Optional[list[Path]]:
+                   log: Callable[[str], None], boxes=None) -> Optional[list[Path]]:
     """Render *frames* to ``<tmp>/frame_NNNN.png`` via the isolated subprocess.
 
+    *boxes* is the growth-region overlay spec (:func:`oropt.mesh.overlay_primitives`);
+    each region is drawn as a fixed red wireframe outline over every frame.
     Returns the list of PNG paths (in order) on success, else ``None`` (reason
     logged): there is nothing the run depends on here, so any failure of the
     crash-prone GL render degrades to "no animation" rather than aborting.
@@ -232,6 +274,7 @@ def _render_frames(frames: list[Path], opts: AnimateOpts, tmp: Path,
         "view_negative": view_negative,
         "azimuth": azimuth,
         "elevation": elevation,
+        "boxes": boxes or [],
     }
     spec_path = tmp / "anim_spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -297,8 +340,9 @@ def make_animation(cfg: Config, work: Path,
                 f"(found {len(frames)}) - skipped")
             return None
         dest = work / out_name
+        boxes = overlay_primitives(getattr(cfg.model, "growth_boxes", None))
         with tempfile.TemporaryDirectory(prefix="oropt_anim_", dir=work) as td:
-            pngs = _render_frames(frames, opts, Path(td), log)
+            pngs = _render_frames(frames, opts, Path(td), log, boxes=boxes)
             if not pngs:
                 return None
             out = _encode_gif(pngs, dest, opts, log)

@@ -99,32 +99,28 @@ def stress_exclude_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
 
 def resolve_growth_boxes(deck: Deck, boxes) -> list:
     """Return *boxes* with every ``deck_box_id`` reference resolved to concrete
-    ``/BOX/RECTA`` corner coordinates read from the starter deck.
+    geometry read from the starter deck's ``/BOX/{RECTA,SPHER,CYLIN}`` cards.
 
-    A growth box may name a ``/BOX/RECTA`` card authored in the pre-processor
-    (``deck_box_id``) instead of literal coordinates; here that box's
-    ``x_min``..``z_max`` are filled from :meth:`oropt.deck.Deck.box_recta` (and its
-    ``shape`` forced to ``"box"``), so everything downstream — selection, guards,
-    the overlay — treats it exactly like a coordinate box. Boxes without a
-    ``deck_box_id`` are returned unchanged. Raises ``ValueError`` when the
-    referenced card is absent from the deck."""
+    A growth region may name a ``/BOX/...`` card authored in the pre-processor
+    (``deck_box_id``) instead of literal coordinates; here that region's ``shape``
+    and coordinates (and, for a ``/BOX/RECTA`` with a ``/SKEW/FIX`` skew, its local
+    frame) are filled from :meth:`oropt.deck.Deck.box`, so everything downstream —
+    selection, guards, the overlay — treats it exactly like a coordinate region.
+    Regions without a ``deck_box_id`` are returned unchanged. Raises ``ValueError``
+    when the referenced card is absent from the deck."""
     out = []
     for i, b in enumerate(boxes or []):
         if getattr(b, "deck_box_id", None) is None:
             out.append(b)
             continue
-        bounds = deck.box_recta(b.deck_box_id)
+        spec = deck.box(b.deck_box_id)
         label = b.name or f"#{i + 1}"
-        if bounds is None:
+        if spec is None:
             raise ValueError(
-                f"growth box {label!r} references /BOX/RECTA/{b.deck_box_id} but "
-                "no such box card is in the deck; author it in the pre-processor "
-                "or give literal coordinates instead")
-        x_min, x_max, y_min, y_max, z_min, z_max = bounds
-        out.append(dataclasses.replace(
-            b, shape="box", deck_box_id=None,
-            x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
-            z_min=z_min, z_max=z_max))
+                f"growth box {label!r} references box id {b.deck_box_id} but no "
+                "/BOX/RECTA, /BOX/SPHER or /BOX/CYLIN card with that id is in the "
+                "deck; author it in the pre-processor or give literal coordinates")
+        out.append(dataclasses.replace(b, deck_box_id=None, **spec))
     return out
 
 

@@ -19,7 +19,8 @@ from oropt.config import (Beso as BesoCfg, Config, GrowthBox,
                           LevelSet as LevelSetCfg, LoadCase, Model,
                           TobsOpts as TobsCfg, unknown_keys)
 from oropt.deck import Deck
-from oropt.gui.boxes import growth_boxes_from_records, records_from_growth_boxes
+from oropt.gui.boxes import (apply_frame_records, growth_boxes_from_records,
+                            records_from_frames, records_from_growth_boxes)
 from oropt.levelset import LevelSet
 from oropt.loop import (growth_candidate_mask, preview_growth_boxes,
                         resolve_growth_boxes)
@@ -407,6 +408,10 @@ _DECK_WITH_BOX = GROWTH_DECK.replace("/END", (
     "e2_box\n"
     "        0.6    0.6    0.6\n"          # reversed corners on purpose
     "        0.4    0.4    0.4\n"
+    "/BOX/SPHER/7002\n"
+    "e2_ball\n"
+    "                    0                 0.2\n"   # Diam 0.2 -> radius 0.1
+    "        0.5    0.5    0.5\n"
     "/END"))
 
 
@@ -432,8 +437,15 @@ def test_resolve_growth_boxes_passthrough(tmp_path):
 
 def test_resolve_growth_boxes_missing_card_raises(tmp_path):
     deck, _ = _load(tmp_path)
-    with pytest.raises(ValueError, match="/BOX/RECTA/424242"):
+    with pytest.raises(ValueError, match="box id 424242"):
         resolve_growth_boxes(deck, [GrowthBox(name="x", deck_box_id=424242)])
+
+
+def test_resolve_growth_boxes_deck_sphere_shape(tmp_path):
+    deck, _ = _load_with_box(tmp_path)
+    [rb] = resolve_growth_boxes(deck, [GrowthBox(name="s", deck_box_id=7002)])
+    assert rb.shape_kind() == "sphere" and rb.radius == 0.1
+    assert (rb.cx, rb.cy, rb.cz) == (0.5, 0.5, 0.5)
 
 
 def test_candidate_mask_via_deck_box_id(tmp_path):
@@ -509,6 +521,42 @@ def test_gui_partial_and_unknown_shape_rows_dropped():
     assert [b.shape_kind() for b in out] == ["cylinder"]
 
 
+def test_gui_deck_box_id_roundtrips():
+    boxes = [GrowthBox(name="ref", deck_box_id=7001)]
+    recs = records_from_growth_boxes(boxes)
+    assert recs[0]["deck_box_id"] == 7001
+    assert recs[0]["x_min"] is None                # coords blank for a deck ref
+    assert growth_boxes_from_records(recs) == boxes
+
+
+def test_gui_frame_records_roundtrip_and_omits_non_box():
+    boxes = [
+        GrowthBox(name="orb", shape="box", x_min=0.0, x_max=1.0, y_min=0.0,
+                  y_max=1.0, z_min=0.0, z_max=1.0, origin=[1.0, 2.0, 3.0],
+                  x_axis=[1.0, 1.0, 0.0], xy_axis=[-1.0, 1.0, 0.0]),
+        GrowthBox(name="plain", shape="box", x_min=0.0, x_max=1.0, y_min=0.0,
+                  y_max=1.0, z_min=0.0, z_max=1.0),
+        GrowthBox(name="ball", shape="sphere", cx=0.0, cy=0.0, cz=0.0, radius=1.0)]
+    recs = records_from_frames(boxes)
+    assert [r["name"] for r in recs] == ["orb", "plain"]      # sphere omitted
+    applied = apply_frame_records(boxes, recs)
+    assert applied[0].origin == [1.0, 2.0, 3.0]
+    assert applied[0].x_axis == [1.0, 1.0, 0.0] and applied[0].has_local_frame()
+    assert applied[1].x_axis is None                          # plain stays frameless
+    assert applied[2].shape_kind() == "sphere"                # sphere untouched
+
+
+def test_gui_frame_cleared_by_blank_row():
+    b = GrowthBox(name="orb", shape="box", x_min=0.0, x_max=1.0, y_min=0.0,
+                  y_max=1.0, z_min=0.0, z_max=1.0, origin=[1.0, 2.0, 3.0],
+                  x_axis=[1.0, 1.0, 0.0], xy_axis=[-1.0, 1.0, 0.0])
+    blank = [{"name": "orb", "ox": None, "oy": None, "oz": None, "ax": None,
+              "ay": None, "az": None, "bx": None, "by": None, "bz": None}]
+    [applied] = apply_frame_records([b], blank)
+    assert applied.x_axis is None and applied.origin is None
+    assert not applied.has_local_frame()
+
+
 # ---- "preview regions" element counts (GUI button backend) ------------------
 def test_preview_growth_boxes_counts_and_run_ready(tmp_path):
     deck, mesh = _load(tmp_path)
@@ -543,7 +591,7 @@ def test_preview_growth_boxes_deck_ref_and_missing_card(tmp_path):
     rows = {r.name: r for r in pv.rows}
     assert rows["ref"].count == 1               # resolved from /BOX/RECTA/7001
     assert rows["missing"].count == 0
-    assert "/BOX/RECTA/424242" in rows["missing"].note
+    assert "box id 424242" in rows["missing"].note
 
 
 def test_app_growth_preview_button(tmp_path):

@@ -171,7 +171,7 @@ def _fake_render_frames(monkeypatch):
     the rest of make_animation (frame globbing, encode, naming) runs hermetically."""
     from PIL import Image
 
-    def fake(frames, opts, tmp, log):
+    def fake(frames, opts, tmp, log, boxes=None):
         pngs = []
         for i in range(len(frames)):
             p = tmp / f"frame_{i:04d}.png"
@@ -189,6 +189,39 @@ def test_make_animation_writes_custom_out_name(tmp_path, monkeypatch):
                          out_name="topology_evolution_reanim.gif")
     assert out == tmp_path / "topology_evolution_reanim.gif" and out.is_file()
     assert not (tmp_path / ANIM_GIF).exists()        # the run's original is untouched
+
+
+def test_render_frames_includes_growth_boxes_in_spec(tmp_path, monkeypatch):
+    """Growth regions reach the render spec as overlay primitives (drawn as fixed
+    wireframe outlines over every frame). The GL render itself is faked."""
+    import json
+    from pathlib import Path
+
+    from PIL import Image
+
+    from oropt._render import RenderResult
+    from oropt.config import GrowthBox
+    from oropt.mesh import overlay_primitives
+
+    captured: dict = {}
+
+    def fake_run_render(script, args, timeout):
+        spec = json.loads(Path(args[0]).read_text(encoding="utf-8"))
+        captured["spec"] = spec
+        for pstr in spec["pngs"]:
+            Image.new("RGB", (8, 8), (0, 0, 0)).save(pstr)
+        return RenderResult(True, 0, "")
+    monkeypatch.setattr(anim, "run_render", fake_run_render)
+
+    frames = [_touch(tmp_path, f"topology_iter000{i}.vtu") for i in range(2)]
+    boxes = overlay_primitives([GrowthBox(
+        name="b", shape="box", x_min=0.0, x_max=1.0, y_min=0.0, y_max=1.0,
+        z_min=0.0, z_max=1.0)])
+    out = anim._render_frames(frames, AnimateOpts(), tmp_path, lambda *_: None,
+                              boxes=boxes)
+    assert out and len(out) == 2
+    assert captured["spec"]["boxes"] == boxes
+    assert captured["spec"]["boxes"][0]["kind"] == "box"
 
 
 def test_cli_out_flag_passes_through(tmp_path, monkeypatch):
