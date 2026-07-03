@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from oropt.config import Config, LoadCase
+from oropt.config import Config, DispConstraint, LoadCase
 from oropt.runner import backend_problems, run_solver
 from oropt.validate import (ERROR, WARNING, Problem, check_config, has_errors,
                             validate_config)
@@ -250,19 +250,33 @@ def test_nonpositive_sigma_allow_is_error(tmp_path):
     assert any("sigma_allow must be > 0" in e for e in _errors(cfg))
 
 
-def test_nonpositive_d_allow_is_error(tmp_path):
-    cfg = _good_cfg(tmp_path)
-    cfg.load_cases[0].d_allow = -1.0
-    assert any("d_allow must be > 0" in e for e in _errors(cfg))
-
-
 def test_blank_per_case_limits_are_allowed(tmp_path):
     # sigma_allow / d_allow are optional: a blank limit leaves that quantity
     # unconstrained and is not an error.
     cfg = _good_cfg(tmp_path)
     cfg.load_cases[0].sigma_allow = None
-    cfg.load_cases[0].d_allow = None
+    cfg.load_cases[0].disp_constraints = []
     assert _errors(cfg) == []
+
+
+def test_disp_constraint_missing_node_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases[0].disp_constraints = [DispConstraint(node_id=None, d_allow=1.0)]
+    assert any("node id is required" in e for e in _errors(cfg))
+
+
+def test_disp_constraint_nonpositive_d_allow_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases[0].disp_constraints = [DispConstraint(node_id=42, d_allow=0.0)]
+    assert any("d_allow must be > 0" in e for e in _errors(cfg))
+
+
+def test_multiple_disp_constraints_are_clean(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases[0].disp_constraints = [
+        DispConstraint(node_id=10021367, d_allow=1.0),
+        DispConstraint(node_id=10021400, d_allow=2.0)]
+    assert validate_config(cfg) == []
 
 
 # ---- solver backend --------------------------------------------------------

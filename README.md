@@ -225,24 +225,39 @@ in progress.
   a residual feature around them; islands a constraint creates are re-dropped by
   the loop's `keep_connected`.
 * **Load cases** (`load_cases:`, at least one required) — the single source of
-  truth for each deck's `stem`, its constrained `disp_node_id`, and its
-  feasibility limits `sigma_allow` / `d_allow`. A single-load run is just **one**
-  load case; add more to optimise one structure against several loads (the
-  elevator linkage pulled in different directions) by minimising a **weighted-sum
-  compliance**. Each entry is a separate deck pair sharing the same mesh,
-  differing only in its applied-load cards:
+  truth for each deck's `stem`, its displacement constraints, and its stress
+  limit `sigma_allow`. A single-load run is just **one** load case; add more to
+  optimise one structure against several loads (the elevator linkage pulled in
+  different directions) by minimising a **weighted-sum compliance**. Each entry is
+  a separate deck pair sharing the same mesh, differing only in its applied-load
+  cards:
 
   ```yaml
   load_cases:
-    - {name: pull_z, stem: implicit_pull_z, weight: 1.0, disp_node_id: 10021367, sigma_allow: 250.0, d_allow: 1.0}
-    - {name: pull_x, stem: implicit_pull_x, weight: 0.5, disp_node_id: 10021367, sigma_allow: 480.0, d_allow: 1.0}
-    - {name: side,   stem: implicit_side,   weight: 0.5, disp_node_id: 10021400, sigma_allow: 250.0, d_allow: 2.0}
+    - name: pull_z
+      stem: implicit_pull_z
+      weight: 1.0
+      sigma_allow: 250.0
+      disp_constraints:                 # constrain several nodes, each with its own limit
+        - {node_id: 10021367, d_allow: 1.0}
+        - {node_id: 10021400, d_allow: 2.0}
+    - {name: pull_x, stem: implicit_pull_x, weight: 0.5, sigma_allow: 480.0,
+       disp_constraints: [{node_id: 10021367, d_allow: 1.0}]}
+    # legacy single-node form still works and is migrated on read:
+    - {name: side, stem: implicit_side, weight: 0.5, sigma_allow: 250.0, disp_node_id: 10021400, d_allow: 2.0}
   ```
 
-  `stem` is **required** on every row; `weight` defaults to 1, and `disp_node_id`,
-  `sigma_allow` and `d_allow` may be omitted — a blank `sigma_allow`/`d_allow`
-  leaves that quantity **unconstrained** (no feasibility limit), and a blank
-  `disp_node_id` tracks no displacement node.
+  `stem` is **required** on every row; `weight` defaults to 1, and `sigma_allow`
+  and `disp_constraints` may be omitted — a blank `sigma_allow` (or a
+  `disp_constraints` entry with a blank `d_allow`) leaves that quantity
+  **unconstrained** (no feasibility limit), and no `disp_constraints` tracks no
+  displacement node. A load case is feasible only when **every** one of its
+  displacement constraints holds; the reported `disp` is the worst utilisation
+  ratio across its nodes. The legacy scalar `disp_node_id` / `d_allow` (one node,
+  one limit) are still accepted and folded into a one-entry `disp_constraints`
+  list on read, so existing configs keep working unchanged. On the GUI's **Load
+  cases** tab the per-node limits live in one `node:limit; node:limit` column
+  (e.g. `10021367:1.0; 10021400:2.0`).
   All cases must share the same design-part element ids (only the load differs).
   Editable on the GUI's dedicated **Load cases** tab (add/remove rows); the
   *Monitor* tab then flags that σ_max/disp are the worst across all cases, with a

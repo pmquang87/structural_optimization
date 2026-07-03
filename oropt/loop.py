@@ -183,6 +183,34 @@ def _within(value: float, limit: Optional[float]) -> bool:
     return limit is None or value <= limit
 
 
+def disp_breakdown(case, res) -> list[tuple]:
+    """Per-node displacement rows for a case: ``(node_id, |disp|, d_allow,
+    feasible)`` for each of the case's displacement constraints. The displacement
+    is read from ``res.disps`` (``nan`` for a node absent from the animation, which
+    fails any set limit)."""
+    rows = []
+    for dc in case.disp_constraints:
+        val = float(res.disps.get(dc.node_id, float("nan")))
+        rows.append((dc.node_id, val, dc.d_allow, _within(val, dc.d_allow)))
+    return rows
+
+
+def worst_disp(rows) -> tuple[float, Optional[float]]:
+    """Headline ``(disp, d_allow)`` for a set of :func:`disp_breakdown` rows: the
+    constraint with the worst utilisation ratio ``value/limit``. Unconstrained rows
+    (blank limit) rank below any constrained one; among only-unconstrained rows the
+    largest displacement is surfaced. ``(nan, None)`` when there are no rows."""
+    if not rows:
+        return float("nan"), None
+    constrained = [(v, lim) for _, v, lim, _ in rows if lim is not None]
+    if constrained:
+        return max(constrained, key=lambda p: p[0] / p[1])
+    finite = [(v, None) for _, v, _, _ in rows if v == v]
+    if finite:
+        return max(finite, key=lambda p: p[0])
+    return float("nan"), None
+
+
 def stress_ratio_field(cases, case_results, elem_ids: np.ndarray
                        ) -> Optional[np.ndarray]:
     """Per-element worst ``vonmises/sigma_allow`` across the stress-limited load
@@ -201,17 +229,20 @@ def stress_ratio_field(cases, case_results, elem_ids: np.ndarray
 
 def worst_violation(cases, case_results) -> float:
     """Worst constraint-utilisation ratio ``value/limit`` over all load cases and
-    both limit types (``sigma_max/sigma_allow``, ``disp/d_allow``). A blank limit
-    (``None``) is unconstrained and skipped; with no limits at all the design is
-    trivially feasible and 0.0 is returned. ``v <= 1`` <=> feasible — this is the
-    violation *magnitude* the proportional back-off controller reacts to (see
+    both limit types (``sigma_max/sigma_allow`` and, for *every* displacement
+    constraint, ``disp/d_allow``). A blank limit (``None``) is unconstrained and
+    skipped; with no limits at all the design is trivially feasible and 0.0 is
+    returned. ``v <= 1`` <=> feasible — this is the violation *magnitude* the
+    proportional back-off controller reacts to (see
     :func:`oropt.beso.gate_target_vf`), where the feasible flag only says on/off.
     """
-    ratios = [value / limit
-              for case, res in zip(cases, case_results)
-              for value, limit in ((res.sigma_max, case.sigma_allow),
-                                   (res.disp, case.d_allow))
-              if limit is not None]
+    ratios = []
+    for case, res in zip(cases, case_results):
+        if case.sigma_allow is not None:
+            ratios.append(res.sigma_max / case.sigma_allow)
+        for _nid, val, limit, _feas in disp_breakdown(case, res):
+            if limit is not None:
+                ratios.append(val / limit)
     return max(ratios, default=0.0)
 
 
@@ -234,7 +265,7 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
     if not res.ok:
         return res, None
     return res, extract(cfg, solve_dir, stem=case.stem,
-                        disp_node_id=case.disp_node_id,
+                        disp_node_ids=[dc.node_id for dc in case.disp_constraints],
                         exclude_element_ids=exclude_elem_ids)
 
 
@@ -402,14 +433,18 @@ def run_optimization(cfg: Config, resume: bool = False,
                 f"vf={opt.volume_fraction(alive):.3f}")
 
     pid = st.write_pid(work)
+    # Placeholder headline limits until the first iteration publishes real ones:
+    # the primary case's stress limit and its tightest displacement limit.
+    primary_d_limits = [dc.d_allow for dc in primary.disp_constraints
+                        if dc.d_allow is not None]
     status = st.Status(state="running", max_iter=oc.max_iter,
                        elements_total=deck.n_design_elements,
                        stress_excluded_elems=n_excluded,
                        elements_candidate=n_candidate,
                        sigma_allow=(primary.sigma_allow if primary.sigma_allow
                                     is not None else float("nan")),
-                       d_allow=(primary.d_allow if primary.d_allow
-                                is not None else float("nan")), pid=pid)
+                       d_allow=(min(primary_d_limits) if primary_d_limits
+                                else float("nan")), pid=pid)
     st.write_status(work, status)
 
     vfs: list[float] = []
@@ -454,27 +489,39 @@ def run_optimization(cfg: Config, resume: bool = False,
                     for r in case_results]
             raw = combine_sensitivity(raws, [c.weight for c in cases])
             # Each case is gated against its OWN limits; a blank limit (None) leaves
-            # that quantity unconstrained. A design is feasible only when every case
-            # is. per_case carries the full breakdown for the GUI.
-            per_case = [
-                {"name": case.name,
-                 "sigma_max": float(r.sigma_max), "sigma_allow": case.sigma_allow,
-                 "disp": float(r.disp), "d_allow": case.d_allow,
-                 "feasible": bool(_within(r.sigma_max, case.sigma_allow)
-                                  and _within(r.disp, case.d_allow))}
-                for case, r in zip(cases, case_results)]
+            # that quantity unconstrained. A case with several displacement
+            # constraints is feasible only when EVERY one holds. A design is
+            # feasible only when every case is. per_case carries the full
+            # per-node breakdown for the GUI; each case's headline disp/d_allow is
+            # its worst-ratio displacement constraint.
+            disp_rows = [disp_breakdown(case, r)
+                         for case, r in zip(cases, case_results)]
+            per_case = []
+            for case, r, rows in zip(cases, case_results, disp_rows):
+                c_disp, c_d_allow = worst_disp(rows)
+                disp_feasible = all(feas for *_, feas in rows)
+                per_case.append({
+                    "name": case.name,
+                    "sigma_max": float(r.sigma_max), "sigma_allow": case.sigma_allow,
+                    "disp": float(c_disp), "d_allow": c_d_allow,
+                    "disp_constraints": [
+                        {"node_id": nid, "disp": float(val), "d_allow": lim,
+                         "feasible": bool(feas)}
+                        for nid, val, lim, feas in rows],
+                    "feasible": bool(_within(r.sigma_max, case.sigma_allow)
+                                     and disp_feasible)})
             feasible = all(c["feasible"] for c in per_case)
             violation = worst_violation(cases, case_results)
-            # Headline sigma_max/disp stay the worst across cases, each reported with
-            # the limit of the case it came from (a blank limit -> NaN, "no limit")
-            # so the Monitor's "limit" matches what gated feasibility.
+            # Headline sigma_max stays the worst raw stress across cases; headline
+            # disp is the worst *ratio* displacement constraint over every case and
+            # every node. Each is reported with the limit of the constraint it came
+            # from (a blank limit -> NaN, "no limit") so the Monitor's "limit"
+            # matches what gated feasibility.
             si = max(range(n_cases), key=lambda i: case_results[i].sigma_max)
-            di = max(range(n_cases), key=lambda i: case_results[i].disp)
             sigma_max = case_results[si].sigma_max
-            disp = case_results[di].disp
             sigma_allow = cases[si].sigma_allow
             sigma_allow = float("nan") if sigma_allow is None else sigma_allow
-            d_allow = cases[di].d_allow
+            disp, d_allow = worst_disp([row for rows in disp_rows for row in rows])
             d_allow = float("nan") if d_allow is None else d_allow
             vf = opt.volume_fraction(alive)
             vfs.append(vf)

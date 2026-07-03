@@ -142,15 +142,17 @@ def render_load_cases_tab(cfg: Config, cfg_path: Path) -> None:
     st.caption(
         "Define the load case(s) the part is optimised against — the **single "
         "source of truth** for each deck's stem, the constrained displacement "
-        "node and the σ/d limits. A single-load run is just **one** row. Add more "
-        "rows to optimise a **weighted-sum compliance** over several loads (the "
-        "linkage pulled in different directions); each row is a separate deck pair "
-        "in the case directory that shares the same mesh — only its load differs. "
-        "*Deck stem* is required; leave *σ_allow* / *d_allow* blank to leave that "
-        "quantity unconstrained.")
+        "node(s) and the σ/d limits. A single-load run is just **one** row. Add "
+        "more rows to optimise a **weighted-sum compliance** over several loads "
+        "(the linkage pulled in different directions); each row is a separate deck "
+        "pair in the case directory that shares the same mesh — only its load "
+        "differs. *Deck stem* is required; leave *σ_allow* blank to leave stress "
+        "unconstrained. Constrain the displacement at **several nodes** by listing "
+        "`node:limit` pairs separated by `;` (e.g. `10021367:1.0; 10021400:2.0`); "
+        "a bare `node` tracks it without a limit — the design is feasible only "
+        "when every one holds.")
     if not cfg.load_cases:               # always offer at least one row to fill in
-        cfg.load_cases = [LoadCase(name="case", weight=1.0,
-                                   sigma_allow=250.0, d_allow=1.0)]
+        cfg.load_cases = [LoadCase(name="case", weight=1.0, sigma_allow=250.0)]
     lc_df = pd.DataFrame(records_from_load_cases(cfg.load_cases),
                          columns=CASE_COLUMNS)
     lc_edited = st.data_editor(
@@ -164,15 +166,14 @@ def render_load_cases_tab(cfg: Config, cfg_path: Path) -> None:
             "weight": st.column_config.NumberColumn(
                 "Weight", min_value=0.0, step=0.1, format="%.3f",
                 help="wᵢ in s_e = Σ wᵢ·(energyᵢ / max energyᵢ). Blank → 1."),
-            "disp_node_id": st.column_config.NumberColumn(
-                "Disp node id", step=1, format="%d",
-                help="Constrained node for this case. Blank → none tracked."),
+            "disp_constraints": st.column_config.TextColumn(
+                "Disp constraints (node:limit)",
+                help="Per-node displacement limits as `node:limit` pairs "
+                     "separated by `;` (e.g. `10021367:1.0; 10021400:2.0`). A "
+                     "bare `node` tracks it unconstrained. Blank → none tracked."),
             "sigma_allow": st.column_config.NumberColumn(
                 "σ_allow [MPa]", min_value=0.0, step=1.0,
                 help="Per-case von-Mises stress limit. Blank → no stress limit."),
-            "d_allow": st.column_config.NumberColumn(
-                "d_allow [mm]", min_value=0.0, step=0.1,
-                help="Per-case displacement limit. Blank → no displacement limit."),
         })
     cfg.load_cases = load_cases_from_records(lc_edited.to_dict("records"))
     n = len(cfg.load_cases)
@@ -710,6 +711,23 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
                 "feasible": "✅" if c["feasible"] else "⚠️",
             } for c in cases])
             st.dataframe(cdf, hide_index=True, use_container_width=True)
+        # Per-node displacement breakdown: a load case may constrain several nodes,
+        # each with its own limit. Shown whenever there's more than one such
+        # constraint (a classic single-node run keeps just the headline metric).
+        disp_rows = [(c["name"], dc) for c in cases
+                     for dc in c.get("disp_constraints", [])]
+        if len(disp_rows) > 1:
+            st.caption("Displacement constraints — each node is checked against "
+                       "its own limit; the design is feasible only when **every** "
+                       "one holds. The disp metric above is the worst ratio.")
+            ddf = pd.DataFrame([{
+                "case": name,
+                "node": str(dc["node_id"]),
+                "disp [mm]": dc["disp"],
+                "d_allow [mm]": _fmt_limit(dc["d_allow"], "{:.2f}"),
+                "feasible": "✅" if dc["feasible"] else "⚠️",
+            } for name, dc in disp_rows])
+            st.dataframe(ddf, hide_index=True, use_container_width=True)
         if getattr(status, "stress_excluded_elems", 0):
             st.caption(f"σ_max ignores **{status.stress_excluded_elems} elements** "
                        "in the configured stress-exclusion region(s).")

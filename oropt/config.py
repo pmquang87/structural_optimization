@@ -516,6 +516,26 @@ class ManufacturingOpts:
 
 
 @dataclass
+class DispConstraint:
+    """One displacement constraint for a load case: a node and its own limit.
+
+    A load case may carry **several** of these — constrain the displacement at
+    several nodes, each with its own ``d_allow`` (like TOSCA sensitivity mode /
+    OptiStruct, which allow arbitrarily many displacement responses). The
+    OpenRadioss animation already carries every nodal displacement, so this is
+    pure bookkeeping — no extra solves.
+
+    Stored as :class:`DispConstraint`, but coerced from plain dicts too (the
+    :class:`GrowthBox` / :class:`CustomView` pattern) so YAML round-trips and the
+    GUI editor (dict rows) both work. ``node_id`` is required (a constraint with
+    no node is meaningless); ``d_allow`` blank (``None``) tracks the node but
+    leaves it unconstrained, mirroring the per-case ``sigma_allow`` semantics.
+    """
+    node_id: Optional[int] = None        # constrained node id; required
+    d_allow: Optional[float] = None       # max |displacement| at node_id [mm]; blank -> unconstrained
+
+
+@dataclass
 class LoadCase:
     """One load case: a *separate* deck pair that shares the design mesh but
     applies a different load (the elevator linkage pulled in another direction).
@@ -530,22 +550,51 @@ class LoadCase:
     only the load cards differ.
 
     A load case is the **single source of truth** for the deck ``stem`` and the
-    feasibility limits ``sigma_allow`` / ``d_allow`` (and the constrained
-    ``disp_node_id``): every run defines at least one. The classic single-load run
-    is simply one load case. The combined sensitivity is the per-case-normalised
-    weighted sum ``sum_i weight_i * energy_i`` and a design is feasible only when
-    *every* case is feasible against its own limits.
+    feasibility limits ``sigma_allow`` and the displacement constraints
+    (:attr:`disp_constraints`): every run defines at least one. The classic
+    single-load run is simply one load case. The combined sensitivity is the
+    per-case-normalised weighted sum ``sum_i weight_i * energy_i`` and a design is
+    feasible only when *every* case is feasible against its own limits.
 
-    ``stem`` and the two limits are required (a blank value is a validation
-    error). ``disp_node_id`` is optional: ``None`` means no displacement node is
-    tracked for this case.
+    ``stem`` and ``sigma_allow`` are required (a blank value is a validation
+    error). :attr:`disp_constraints` is optional: an empty list means no
+    displacement node is tracked for this case; give one entry per constrained
+    node.
+
+    The legacy scalar ``disp_node_id`` / ``d_allow`` (one node, one limit) are
+    kept as *input* fields so existing YAMLs and the current GUI table keep
+    working: :meth:`__post_init__` folds them into a one-entry
+    :attr:`disp_constraints` list on read (and then clears them, so the canonical
+    representation is always the list).
     """
     name: str = "default"
     stem: str = ""                       # source deck stem (<stem>_0000.rad / _0001.rad); required
     weight: float = 1.0                  # w_i in the weighted-sum sensitivity
-    disp_node_id: Optional[int] = None   # constrained node; None -> no disp node tracked
+    disp_node_id: Optional[int] = None   # LEGACY single constrained node; folded into disp_constraints
     sigma_allow: Optional[float] = None  # max von-Mises [MPa]; required
-    d_allow: Optional[float] = None      # max |displacement| at disp_node_id [mm]; required
+    d_allow: Optional[float] = None      # LEGACY single-node limit; folded into disp_constraints
+    # Per-node displacement constraints (each {node_id, d_allow}). Stored as
+    # DispConstraint but coerced from plain dicts too so YAML round-trips and the
+    # GUI editor both work. A design is feasible for this case only when every
+    # entry holds. Empty -> no displacement tracked.
+    disp_constraints: list = field(default_factory=list)
+
+    def __post_init__(self):
+        fields = {f.name for f in dataclasses.fields(DispConstraint)}
+        self.disp_constraints = [
+            c if isinstance(c, DispConstraint)
+            else DispConstraint(**{k: v for k, v in dict(c).items() if k in fields})
+            for c in (self.disp_constraints or [])]
+        # Migrate the legacy scalar node/limit into a one-entry list when no
+        # explicit disp_constraints were given and there IS a node to track. A
+        # legacy d_allow with no node is a degenerate "limit but nothing to
+        # measure" and is dropped. Clear the legacy fields so disp_constraints is
+        # the single source of truth from here on.
+        if not self.disp_constraints and self.disp_node_id is not None:
+            self.disp_constraints = [DispConstraint(node_id=self.disp_node_id,
+                                                    d_allow=self.d_allow)]
+        self.disp_node_id = None
+        self.d_allow = None
 
 
 @dataclass
@@ -557,9 +606,8 @@ class ResolvedCase:
     name: str
     stem: str
     weight: float
-    disp_node_id: Optional[int]
+    disp_constraints: list          # list[DispConstraint]; empty -> no disp tracked
     sigma_allow: Optional[float]    # None only for an unvalidated config (validation requires it)
-    d_allow: Optional[float]        # None only for an unvalidated config (validation requires it)
     starter: Path
     engine: Path
 
@@ -712,9 +760,8 @@ class Config:
                 name=lc.name or stem,
                 stem=stem,
                 weight=float(lc.weight),
-                disp_node_id=lc.disp_node_id,
+                disp_constraints=list(lc.disp_constraints),
                 sigma_allow=lc.sigma_allow,
-                d_allow=lc.d_allow,
                 starter=case_dir / f"{stem}_0000.rad",
                 engine=case_dir / f"{stem}_0001.rad"))
         return out
@@ -807,6 +854,12 @@ def unknown_keys(data: dict) -> list[str]:
                                for k in row if k not in known)
 
     _list_of("load_cases", data.get("load_cases"), LoadCase)
+    lc_rows = data.get("load_cases")
+    if isinstance(lc_rows, list):
+        for i, row in enumerate(lc_rows):
+            if isinstance(row, dict):
+                _list_of(f"load_cases[{i}].disp_constraints",
+                         row.get("disp_constraints"), DispConstraint)
     anim = data.get("animate")
     if isinstance(anim, dict):
         _list_of("animate.custom_views", anim.get("custom_views"), CustomView)
