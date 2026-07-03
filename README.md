@@ -58,7 +58,7 @@ oropt/
   tobs.py     binary-ILP alternative: per-iteration element flips chosen by an integer linear program (scipy HiGHS)
   hca.py      hybrid-cellular-automata alternative (LS-TaSC-style): per-element virtual density driven by a setpoint controller
   simp.py     EXPERIMENTAL SIMP/OC prototype — offline maths only, not wired into the loop (see docs/simp_spike.md)
-  manufacturing.py additive-manufacturing constraints on the alive mask: min member size (open), symmetry, overhang
+  manufacturing.py manufacturing constraints on the alive mask: min/max member size, symmetry, casting (draw), extrusion, overhang
   smoothing.py / d3plot.py  post-run: smoothed-surface (STL/VTP) export; OpenRadioss anim -> LS-Dyna d3plot
   report.py   post-run: auto summary report (report.html/report.md) — charts + interactive/static final-design view from status/history
   animate.py  post-run: topology_evolution.gif from the per-iteration smoothed surfaces (fixed camera, isolated render)
@@ -144,7 +144,7 @@ in progress.
   `history_weight`, `sensitivity` (`energy`|`vonmises`|`blend`).
 * `optimizer` (default `beso`) — selects the discrete topology optimiser. All
   four share the `/ANIM/ELEM/ENER` energy sensitivity, the element-deletion deck
-  path, and the multi-load / AM-constraint / connectivity machinery; only the
+  path, and the multi-load / manufacturing-constraint / connectivity machinery; only the
   per-iteration update differs:
   * `beso` — the default bi-directional evolutionary scheme (`beso:` knobs).
   * `levelset` — a **nodal level-set** (smoother boundaries than BESO's
@@ -195,13 +195,35 @@ in progress.
   bleeds into the neighbouring void elements), so the material the back-off
   recovers lands near the overstressed region instead of wherever the energy
   ranking happens to point.
-* **Additive-manufacturing constraints** (`manufacturing:`, all OFF by default) —
-  applied to the alive mask each iteration after the optimiser update, for parts
-  printed by powder-bed fusion (e.g. AlSi10Mg). `min_member_layers` (morphological
-  open removing thin features; 0 = off), `symmetry_planes` (list of
-  `{axis: x|y|z, offset: <coord>}`, mirrored *either-alive ⇒ both-alive*), and
-  overhang self-support via `build_direction` (`[x,y,z]`, `null` = off) +
-  `max_overhang_angle` (cone half-angle in degrees from the build direction).
+* **Manufacturing constraints** (`manufacturing:`, all OFF by default) — applied
+  to the alive mask each iteration after the optimiser update, for parts that are
+  powder-bed-fusion printed (e.g. AlSi10Mg), cast or extruded. Not purely
+  additive (casting/extrusion can add *or* remove material), so they run in a
+  fixed order:
+  1. `min_member_layers` — **minimum member size**: a morphological open removing
+     thin features (0 = off).
+  2. `max_member_layers` — **maximum member size** (OptiStruct MAXDIM): carve
+     bulky lumps so every element lies within N adjacency hops of a void (least
+     strain-energy material first), punching distributed voids while leaving walls
+     of the allowed thickness (0 = off; protected elements are never carved).
+  3. `symmetry_planes` — list of `{axis: x|y|z, offset: <coord>}`, mirrored
+     *either-alive ⇒ both-alive*.
+  4. `draw_direction` (`[x,y,z]`, `null` = off) + `draw_two_sided` — **casting /
+     draw**: along the draw axis each column must be undercut-free so a die slides
+     out. Single-sided keeps a solid bottom prefix; two-sided keeps one contiguous
+     run around a parting surface.
+  5. `extrusion_axis` (`[x,y,z]`, `null` = off) — **extrusion**: constant
+     cross-section along the axis; elements are binned into prisms by their
+     footprint and each prism is made uniform by a *majority vote* (solid iff ≥
+     half alive) — chosen over either-alive so a full-length prism isn't
+     resurrected from one stray element, with volume control reconciling.
+  6. `build_direction` (`[x,y,z]`, `null` = off) + `max_overhang_angle` (cone
+     half-angle in degrees) — **overhang self-support**, applied last so support
+     is judged on the near-final mask.
+
+  Protected (BC/load/keep-out) elements always survive, so a constraint may leave
+  a residual feature around them; islands a constraint creates are re-dropped by
+  the loop's `keep_connected`.
 * **Load cases** (`load_cases:`, at least one required) — the single source of
   truth for each deck's `stem`, its constrained `disp_node_id`, and its
   feasibility limits `sigma_allow` / `d_allow`. A single-load run is just **one**
@@ -493,7 +515,7 @@ zoom/rotate viewer inlined into `report.html` (and also written as the standalon
   connectivity), **TOBS** (ILP feasibility / move-limit / volume targeting /
   protected) and **HCA** (setpoint bisection / move-limited density decay /
   candidate growth / protected) updates and optimiser selection, the **multi-load** weighted-sum and
-  worst-case feasibility aggregation, the **additive-manufacturing** constraints,
+  worst-case feasibility aggregation, the **manufacturing** constraints,
   the **Docker** command construction, **d3plot**/**surface-smoothing** post-processing,
   the offline **SIMP** OC/bisection/projection prototype, status/checkpoint
   round-trips, VTK extraction, per-iteration snapshot/archive file-writing, and the

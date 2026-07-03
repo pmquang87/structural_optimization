@@ -533,16 +533,31 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         help="Also copy the restart file, preserving the full solver state for "
              "every iteration. Applies only when 'Archive each iteration' is on.")
 
-    st.subheader("Manufacturing (AM) constraints")
-    st.caption("Printability constraints applied to the design each iteration "
-               "(after the optimiser update). All default OFF — leave them off "
-               "for an unconstrained run.")
+    st.subheader("Manufacturing constraints")
+    st.caption("Printability / castability constraints applied to the design each "
+               "iteration (after the optimiser update), in the fixed order below. "
+               "All default OFF — leave them off for an unconstrained run.")
     mfg = cfg.manufacturing
-    mfg.min_member_layers = int(st.number_input(
+    _axis_vec = {"x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}
+    _opts = ["off", "x", "y", "z"]
+
+    def _axis_name(vec, fallback="z"):
+        if vec is None:
+            return "off"
+        t = [round(float(v), 6) for v in vec]
+        return next((a for a, v in _axis_vec.items() if v == t), fallback)
+
+    mem = st.columns(2)
+    mfg.min_member_layers = int(mem[0].number_input(
         "Minimum member size (erode/dilate hops)", value=int(mfg.min_member_layers),
         min_value=0, step=1,
         help="Morphological open removing thin features / single-element slivers. "
              "0 = off; 1–2 is typical."))
+    mfg.max_member_layers = int(mem[1].number_input(
+        "Maximum member size (hops to a void)", value=int(mfg.max_member_layers),
+        min_value=0, step=1,
+        help="OptiStruct MAXDIM: carve bulky lumps so every element lies within N "
+             "hops of a void (least-useful material first). 0 = off."))
 
     st.markdown("**Symmetry planes** — force the design symmetric across a plane "
                 "(either side alive ⇒ both alive).")
@@ -559,18 +574,37 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
             planes.append({"axis": ax, "offset": float(off)})
     mfg.symmetry_planes = planes
 
+    st.markdown("**Casting / draw direction** — remove undercuts so a die can "
+                "slide out along the draw axis.")
+    cast = st.columns(2)
+    _sel_draw = cast[0].selectbox(
+        "Draw direction", _opts, index=_opts.index(_axis_name(mfg.draw_direction)),
+        key="draw_dir",
+        help="Axis the die is pulled along. Single-sided keeps a solid bottom "
+             "prefix (no material above a void); 'off' disables casting.")
+    mfg.draw_direction = None if _sel_draw == "off" else _axis_vec[_sel_draw]
+    mfg.draw_two_sided = cast[1].checkbox(
+        "Two-sided (parting surface)", value=mfg.draw_two_sided, key="draw_two",
+        disabled=_sel_draw == "off",
+        help="Keep one contiguous run around a parting surface instead of a "
+             "single-sided bottom prefix.")
+
+    st.markdown("**Extrusion** — constant cross-section along an axis (each prism "
+                "made uniform by a majority vote).")
+    _sel_ext = st.selectbox(
+        "Extrusion axis", _opts, index=_opts.index(_axis_name(mfg.extrusion_axis)),
+        key="ext_axis",
+        help="Elements are binned into prisms by their footprint; a prism is solid "
+             "iff ≥ half of it is alive. 'off' disables extrusion.")
+    mfg.extrusion_axis = None if _sel_ext == "off" else _axis_vec[_sel_ext]
+
     st.markdown("**Overhang / self-support** — forbid material unsupported below "
-                "the critical angle along the build direction.")
+                "the critical angle along the build direction (applied last).")
     ov = st.columns(2)
-    _axis_vec = {"x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}
-    _cur = "off"
-    if mfg.build_direction is not None:
-        _t = [round(float(v), 6) for v in mfg.build_direction]
-        _cur = next((a for a, v in _axis_vec.items() if v == _t), "z")
-    _opts = ["off", "x", "y", "z"]
-    _sel = ov[0].selectbox("Build direction", _opts, index=_opts.index(_cur),
-                           help="Up/growth axis of the print. 'off' disables the "
-                                "overhang constraint.")
+    _sel = ov[0].selectbox(
+        "Build direction", _opts, index=_opts.index(_axis_name(mfg.build_direction)),
+        key="build_dir",
+        help="Up/growth axis of the print. 'off' disables the overhang constraint.")
     mfg.build_direction = None if _sel == "off" else _axis_vec[_sel]
     mfg.max_overhang_angle = float(ov[1].number_input(
         "Max overhang angle [deg]", value=float(mfg.max_overhang_angle),
