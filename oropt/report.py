@@ -178,8 +178,10 @@ def _summarise(cfg: Config, status: Optional[st.Status],
     primary = cases[0] if cases else None
     sig_fallback = (primary.sigma_allow if primary and primary.sigma_allow is not None
                     else float("nan"))
-    d_fallback = (primary.d_allow if primary and primary.d_allow is not None
-                  else float("nan"))
+    # The primary case's tightest displacement limit (worst-case), or NaN if none.
+    d_limits = ([dc.d_allow for dc in primary.disp_constraints
+                 if dc.d_allow is not None] if primary else [])
+    d_fallback = min(d_limits) if d_limits else float("nan")
 
     return Summary(
         optimizer=cfg.optimizer_name(),

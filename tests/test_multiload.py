@@ -14,7 +14,7 @@ import pytest
 
 from oropt import loop as loop_mod
 from oropt.beso import combine_sensitivity
-from oropt.config import Config, LoadCase
+from oropt.config import Config, DispConstraint, LoadCase
 from oropt.results import Results
 from oropt.runner import RunResult
 
@@ -46,22 +46,24 @@ def _cfg(case_dir: Path, out_dir: Path, stem: str, load_cases, max_iter=1) -> Co
     specs = list(load_cases) or [LoadCase(name="default", stem=stem)]
     for lc in specs:
         lc.stem = lc.stem or stem
-        if lc.disp_node_id is None:
-            lc.disp_node_id = 60000001
+        if not lc.disp_constraints:
+            lc.disp_constraints = [DispConstraint(node_id=60000001, d_allow=1.0)]
         if lc.sigma_allow is None:
             lc.sigma_allow = 250.0
-        if lc.d_allow is None:
-            lc.d_allow = 1.0
     cfg.load_cases = specs
     cfg.work_dir = str(out_dir)
     return cfg
 
 
-def _results(sigma: float, disp: float, energy) -> Results:
+def _results(sigma: float, disp: float, energy, disps=None) -> Results:
+    """A synthetic per-case Results. *disp* is also the displacement at the
+    default constrained node (60000001) unless a full *disps* map is given."""
     energy = np.asarray(energy, dtype=float)
+    if disps is None:
+        disps = {60000001: disp}
     return Results(element_ids=ELEM_IDS.copy(), energy=energy,
                    vonmises=np.full(ELEM_IDS.size, sigma, dtype=float),
-                   sigma_max=sigma, disp=disp, disp_node_id=60000001)
+                   sigma_max=sigma, disp=disp, disp_node_id=60000001, disps=disps)
 
 
 def _stub_solver(monkeypatch, results_by_stem, calls, fail_stems=()):
@@ -72,7 +74,7 @@ def _stub_solver(monkeypatch, results_by_stem, calls, fail_stems=()):
         return RunResult(True, "ok", "NORMAL TERMINATION")
 
     def fake_extract(cfg, run_dir, keep_vtk=False, stem=None, disp_node_id=None,
-                     exclude_element_ids=None):
+                     disp_node_ids=None, exclude_element_ids=None):
         return results_by_stem[stem]
 
     monkeypatch.setattr(loop_mod, "run_solver", fake_run_solver)
@@ -175,14 +177,26 @@ def test_infeasible_if_any_case_violates(case_env, monkeypatch):
 
 
 def test_worst_violation_worst_ratio_across_cases_and_quantities():
-    cases = [LoadCase(name="a", stem="a", sigma_allow=200.0, d_allow=None),
-             LoadCase(name="b", stem="b", sigma_allow=None, d_allow=0.5)]
+    cases = [LoadCase(name="a", stem="a", sigma_allow=200.0),    # no disp constraint
+             LoadCase(name="b", stem="b", sigma_allow=None,
+                      disp_constraints=[DispConstraint(node_id=60000001,
+                                                       d_allow=0.5)])]
     results = [_results(300.0, 9.9, energy=[1.0, 0.0]),   # 300/200 = 1.5; disp unconstrained
                _results(999.0, 0.25, energy=[0.0, 1.0])]  # sigma unconstrained; 0.25/0.5 = 0.5
     assert loop_mod.worst_violation(cases, results) == pytest.approx(1.5)
     # no limits anywhere -> nothing to violate -> trivially feasible 0.0
     free = [LoadCase(name="a", stem="a")]
     assert loop_mod.worst_violation(free, [results[0]]) == 0.0
+
+
+def test_worst_violation_spans_every_disp_node_in_a_case():
+    """A single case with several displacement constraints contributes ALL of
+    them to the worst-violation ratio, not just one node."""
+    case = LoadCase(name="a", stem="a", disp_constraints=[
+        DispConstraint(node_id=111, d_allow=1.0),     # 0.5/1.0 = 0.5
+        DispConstraint(node_id=222, d_allow=2.0)])    # 3.0/2.0 = 1.5 (worst)
+    res = _results(100.0, 0.0, energy=[1.0, 0.0], disps={111: 0.5, 222: 3.0})
+    assert loop_mod.worst_violation([case], [res]) == pytest.approx(1.5)
 
 
 def test_loop_passes_worst_violation_ratio_to_next_target_vf(case_env, monkeypatch):
@@ -316,6 +330,51 @@ def test_infeasible_if_displacement_case_violates(case_env, monkeypatch):
     assert status.disp == 5.0
 
 
+def test_multi_node_feasible_only_when_every_disp_constraint_holds(
+        case_env, monkeypatch):
+    """A single case constraining two nodes is feasible only when BOTH are within
+    their own limit; violating either makes the design infeasible."""
+    case_dir, out = case_env(("lc_a",))
+    dcs = [DispConstraint(node_id=111, d_allow=1.0),
+           DispConstraint(node_id=222, d_allow=2.0)]
+
+    # both within -> feasible
+    cfg = _cfg(case_dir, out, "lc_a",
+               [LoadCase(name="a", stem="lc_a", disp_constraints=list(dcs))])
+    _stub_solver(monkeypatch, {"lc_a": _results(
+        100.0, 0.0, energy=[1.0, 0.0], disps={111: 0.5, 222: 1.0})}, calls=[])
+    assert loop_mod.run_optimization(cfg, log=lambda *_: None).feasible is True
+
+    # the SECOND node violates its limit -> infeasible (first still within)
+    cfg2 = _cfg(case_dir, out, "lc_a",
+                [LoadCase(name="a", stem="lc_a", disp_constraints=list(dcs))])
+    _stub_solver(monkeypatch, {"lc_a": _results(
+        100.0, 0.0, energy=[1.0, 0.0], disps={111: 0.5, 222: 3.0})}, calls=[])
+    status = loop_mod.run_optimization(cfg2, log=lambda *_: None)
+    assert status.feasible is False
+    # headline disp is the worst-ratio node: 3.0/2.0 = 1.5 beats 0.5/1.0 = 0.5
+    assert status.disp == 3.0 and status.d_allow == 2.0
+
+
+def test_per_case_carries_per_node_disp_breakdown(case_env, monkeypatch):
+    """status.cases[i]['disp_constraints'] holds one row per constrained node so
+    the Monitor can show every node checked against its own limit."""
+    case_dir, out = case_env(("lc_a",))
+    cfg = _cfg(case_dir, out, "lc_a", [LoadCase(
+        name="a", stem="lc_a",
+        disp_constraints=[DispConstraint(node_id=111, d_allow=1.0),
+                          DispConstraint(node_id=222, d_allow=2.0)])])
+    _stub_solver(monkeypatch, {"lc_a": _results(
+        100.0, 0.0, energy=[1.0, 0.0], disps={111: 0.5, 222: 3.0})}, calls=[])
+    status = loop_mod.run_optimization(cfg, log=lambda *_: None)
+
+    rows = {r["node_id"]: r for r in status.cases[0]["disp_constraints"]}
+    assert set(rows) == {111, 222}
+    assert rows[111]["disp"] == 0.5 and rows[111]["d_allow"] == 1.0
+    assert rows[111]["feasible"] is True
+    assert rows[222]["disp"] == 3.0 and rows[222]["feasible"] is False
+
+
 def test_per_case_limit_override_relaxes_gate(case_env, monkeypatch):
     case_dir, out = case_env(("lc_a", "lc_b"))
     cfg = _cfg(case_dir, out, "lc_a", [
@@ -358,13 +417,15 @@ def test_status_reports_per_case_limits_not_global(case_env, monkeypatch):
 
 
 def test_blank_limits_leave_case_unconstrained(case_env, monkeypatch):
-    """A load case with blank (None) sigma_allow/d_allow is unconstrained on those
-    quantities -> always feasible, however high the stress/displacement, and the
-    published limits are NaN / None ('no limit')."""
+    """A load case with blank (None) sigma_allow and a displacement constraint
+    whose d_allow is blank is unconstrained on those quantities -> always feasible,
+    however high the stress/displacement, and the published limits are NaN / None
+    ('no limit')."""
     case_dir, out = case_env(("lc_a",))
     cfg = _cfg(case_dir, out, "lc_a", [])
     cfg.load_cases[0].sigma_allow = None
-    cfg.load_cases[0].d_allow = None
+    cfg.load_cases[0].disp_constraints = [DispConstraint(node_id=60000001,
+                                                         d_allow=None)]
     _stub_solver(monkeypatch,
                  {"lc_a": _results(9999.0, 9999.0, energy=[1.0, 0.0])}, calls=[])
     status = loop_mod.run_optimization(cfg, log=lambda *_: None)
@@ -374,6 +435,7 @@ def test_blank_limits_leave_case_unconstrained(case_env, monkeypatch):
     assert status.d_allow != status.d_allow
     assert status.cases[0]["sigma_allow"] is None        # per-case breakdown: no limit
     assert status.cases[0]["d_allow"] is None
+    assert status.cases[0]["disp_constraints"][0]["d_allow"] is None
 
 
 def test_solve_failure_in_one_case_fails_iteration(case_env, monkeypatch):
@@ -546,8 +608,9 @@ def test_single_load_case_resolves_to_its_own_values():
     assert len(cases) == 1
     c = cases[0]
     assert c.name == "pull" and c.stem == "demo" and c.weight == 2.0
-    assert c.disp_node_id == 42
-    assert c.sigma_allow == 200.0 and c.d_allow == 3.0
+    # the legacy scalar node/limit were folded into a one-entry disp_constraints
+    assert c.disp_constraints == [DispConstraint(node_id=42, d_allow=3.0)]
+    assert c.sigma_allow == 200.0
     assert c.starter.name == "demo_0000.rad" and c.engine.name == "demo_0001.rad"
 
 
@@ -557,12 +620,27 @@ def test_load_case_has_no_model_or_constraints_fallback():
     cfg = Config()
     cfg.load_cases = [LoadCase(name="x", stem="", sigma_allow=None, d_allow=None)]
     c = cfg.load_case_list()[0]
-    assert c.stem == "" and c.sigma_allow is None and c.d_allow is None
+    assert c.stem == "" and c.sigma_allow is None and c.disp_constraints == []
+
+
+def test_legacy_scalar_disp_migrates_into_one_disp_constraint():
+    # A LoadCase carrying the legacy scalar disp_node_id/d_allow folds them into a
+    # one-entry disp_constraints list and clears the legacy fields.
+    lc = LoadCase(name="pull", stem="demo", disp_node_id=42, d_allow=3.0)
+    assert lc.disp_constraints == [DispConstraint(node_id=42, d_allow=3.0)]
+    assert lc.disp_node_id is None and lc.d_allow is None
+    # a legacy d_allow with no node is degenerate -> no constraint synthesised
+    assert LoadCase(name="x", stem="d", d_allow=3.0).disp_constraints == []
+    # an explicit disp_constraints list wins; the legacy scalars are ignored/cleared
+    lc2 = LoadCase(name="y", stem="d", disp_node_id=9, d_allow=9.0,
+                   disp_constraints=[DispConstraint(node_id=1, d_allow=1.0)])
+    assert lc2.disp_constraints == [DispConstraint(node_id=1, d_allow=1.0)]
 
 
 def test_legacy_config_migrates_into_one_load_case():
     # Back-compat: an old single-case YAML (model.stem + constraints, no
-    # load_cases) is folded into one explicit load case on read.
+    # load_cases) is folded into one explicit load case, its disp_node_id/d_allow
+    # becoming a one-entry disp_constraints list.
     cfg = Config.from_dict({
         "model": {"stem": "base", "disp_node_id": 7},
         "constraints": {"sigma_allow": 250.0, "d_allow": 1.0},
@@ -570,15 +648,17 @@ def test_legacy_config_migrates_into_one_load_case():
     cases = cfg.load_case_list()
     assert len(cases) == 1
     c = cases[0]
-    assert c.stem == "base" and c.disp_node_id == 7
-    assert c.sigma_allow == 250.0 and c.d_allow == 1.0
+    assert c.stem == "base"
+    assert c.disp_constraints == [DispConstraint(node_id=7, d_allow=1.0)]
+    assert c.sigma_allow == 250.0
 
 
 def test_load_cases_yaml_roundtrip(tmp_path):
     cfg = Config()
     cfg.load_cases = [
-        LoadCase(name="pull_x", stem="lc_x", weight=1.0, disp_node_id=111,
-                 sigma_allow=300.0, d_allow=2.0),
+        LoadCase(name="pull_x", stem="lc_x", weight=1.0, sigma_allow=300.0,
+                 disp_constraints=[DispConstraint(node_id=111, d_allow=2.0),
+                                   DispConstraint(node_id=222, d_allow=1.5)]),
         LoadCase(name="pull_y", stem="lc_y", weight=0.5),
     ]
     p = tmp_path / "cfg.yaml"
@@ -587,6 +667,10 @@ def test_load_cases_yaml_roundtrip(tmp_path):
     assert len(back.load_cases) == 2
     assert back.load_cases[0] == cfg.load_cases[0]      # dataclass field equality
     assert back.load_cases[1] == cfg.load_cases[1]
+    # the multi-node disp constraints survive the round-trip
+    assert back.load_cases[0].disp_constraints == [
+        DispConstraint(node_id=111, d_allow=2.0),
+        DispConstraint(node_id=222, d_allow=1.5)]
     # resolves the same way after a roundtrip
     assert [c.stem for c in back.load_case_list()] == ["lc_x", "lc_y"]
 

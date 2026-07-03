@@ -8,32 +8,52 @@ from pathlib import Path
 import pytest
 
 import oropt
-from oropt.config import Config, LoadCase
-from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
+from oropt.config import Config, DispConstraint, LoadCase
+from oropt.gui.cases import (CASE_COLUMNS, format_disp_constraints,
+                             load_cases_from_records, parse_disp_constraints,
                              records_from_load_cases)
 
 
 # ---- pure record <-> LoadCase conversion -----------------------------------
 def test_roundtrip_records_load_cases():
     cases = [
-        LoadCase(name="pull_z", stem="lc_z", weight=1.0, disp_node_id=111,
-                 sigma_allow=300.0, d_allow=2.0),
+        LoadCase(name="pull_z", stem="lc_z", weight=1.0, sigma_allow=300.0,
+                 disp_constraints=[DispConstraint(node_id=111, d_allow=2.0),
+                                   DispConstraint(node_id=222, d_allow=1.5)]),
         LoadCase(name="pull_x", stem="lc_x", weight=0.5),
     ]
     recs = records_from_load_cases(cases)
     assert [r["name"] for r in recs] == ["pull_z", "pull_x"]
     assert set(recs[0]) == set(CASE_COLUMNS)
+    # the per-node constraints round-trip through the semicolon-separated column
+    assert recs[0]["disp_constraints"] == "111:2; 222:1.5"
     assert load_cases_from_records(recs) == cases     # dataclass field equality
+
+
+def test_disp_constraints_column_bare_node_is_unconstrained():
+    # a bare node (no :limit) tracks the node but leaves it unconstrained
+    assert parse_disp_constraints("111") == [DispConstraint(node_id=111,
+                                                            d_allow=None)]
+    assert format_disp_constraints([DispConstraint(node_id=111)]) == "111"
+
+
+def test_disp_constraints_column_tolerant_of_separators_and_bad_tokens():
+    # ';', ',' and newlines all separate; unparseable tokens are skipped
+    parsed = parse_disp_constraints("111:1.0, 222:2\n333 ; oops:5 ; :7")
+    assert parsed == [DispConstraint(node_id=111, d_allow=1.0),
+                      DispConstraint(node_id=222, d_allow=2.0),
+                      DispConstraint(node_id=333, d_allow=None)]
+    assert parse_disp_constraints("") == []
+    assert parse_disp_constraints(None) == []
 
 
 def test_blank_optional_cells_become_none():
     # NaN (how pandas blanks a numeric cell) and "" both mean "inherit default"
     recs = [{"name": "x", "stem": "lc_x", "weight": 2.0,
-             "disp_node_id": float("nan"), "sigma_allow": "", "d_allow": None}]
+             "disp_constraints": "", "sigma_allow": float("nan")}]
     [lc] = load_cases_from_records(recs)
-    assert lc.disp_node_id is None
+    assert lc.disp_constraints == []
     assert lc.sigma_allow is None
-    assert lc.d_allow is None
     assert lc.weight == 2.0
 
 
@@ -61,12 +81,12 @@ def test_blank_name_defaults_but_stem_kept():
 
 def test_numeric_strings_are_coerced():
     recs = [{"name": "x", "stem": "lc_x", "weight": "2",
-             "disp_node_id": "10021367", "sigma_allow": "480", "d_allow": "1.5"}]
+             "disp_constraints": "10021367:1.5; 10021400:2", "sigma_allow": "480"}]
     [lc] = load_cases_from_records(recs)
     assert lc.weight == 2.0
-    assert lc.disp_node_id == 10021367
     assert lc.sigma_allow == 480.0
-    assert lc.d_allow == 1.5
+    assert lc.disp_constraints == [DispConstraint(node_id=10021367, d_allow=1.5),
+                                   DispConstraint(node_id=10021400, d_allow=2.0)]
 
 
 def test_editor_output_resolves_through_config(tmp_path):
@@ -75,15 +95,17 @@ def test_editor_output_resolves_through_config(tmp_path):
     cfg = Config()
     cfg.load_cases = load_cases_from_records([
         {"name": "z", "stem": "lc_z", "weight": 1.0,
-         "disp_node_id": 7, "sigma_allow": 250.0, "d_allow": 1.0},
+         "disp_constraints": "7:1.0", "sigma_allow": 250.0},
         {"name": "push", "stem": "lc_push", "weight": 0.5,
-         "disp_node_id": 9, "sigma_allow": 300.0, "d_allow": 2.0},
+         "disp_constraints": "9:2.0; 10:3.0", "sigma_allow": 300.0},
     ])
     resolved = cfg.load_case_list()
     assert [c.stem for c in resolved] == ["lc_z", "lc_push"]
-    assert resolved[0].disp_node_id == 7
-    assert resolved[0].sigma_allow == 250.0 and resolved[0].d_allow == 1.0
-    assert resolved[1].sigma_allow == 300.0 and resolved[1].d_allow == 2.0
+    assert resolved[0].disp_constraints == [DispConstraint(node_id=7, d_allow=1.0)]
+    assert resolved[0].sigma_allow == 250.0
+    assert resolved[1].disp_constraints == [DispConstraint(node_id=9, d_allow=2.0),
+                                            DispConstraint(node_id=10, d_allow=3.0)]
+    assert resolved[1].sigma_allow == 300.0
     # survives a YAML roundtrip (Save config -> reload)
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)

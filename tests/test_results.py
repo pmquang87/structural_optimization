@@ -40,3 +40,22 @@ def test_erosion_excluded(tmp_path):
     r = parse_vtk(vtk, design_part_id=60000000, disp_node_id=5)
     assert r.element_ids.tolist() == [60000001]
     assert r.sigma_max == 100.0
+
+
+def test_parse_multiple_disp_nodes(tmp_path):
+    vtk = tmp_path / "c.vtk"
+    _make_vtk(vtk)
+    r = parse_vtk(vtk, design_part_id=60000000, disp_node_ids=[5, 2, 999])
+    assert np.isclose(r.disps[5], 0.5)       # NODE_ID 5 -> |d| = 0.5
+    assert r.disps[2] == 0.0                  # NODE_ID 2 -> no displacement
+    assert np.isnan(r.disps[999])             # node absent from the animation
+    # the scalar convenience fields track the FIRST requested node
+    assert r.disp_node_id == 5 and np.isclose(r.disp, 0.5)
+
+
+def test_parse_no_disp_nodes_leaves_disps_empty(tmp_path):
+    vtk = tmp_path / "d.vtk"
+    _make_vtk(vtk)
+    r = parse_vtk(vtk, design_part_id=60000000)   # no node requested
+    assert r.disps == {} and r.disp_node_id is None
+    assert np.isnan(r.disp)

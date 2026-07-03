@@ -92,12 +92,16 @@ def test_unknown_keys_flags_typos_and_misplaced_knobs():
         "bogus_top": 1,                       # unknown top-level key
         "beso": {"evolution_rate": 0.02, "evolution_ratte": 0.05},  # typo
         "model": {"stem": "demo"},            # all-known section -> nothing
-        "load_cases": [{"name": "a", "stem": "lc_a", "whoops": 1}],
+        "load_cases": [{"name": "a", "stem": "lc_a", "whoops": 1,
+                        "disp_constraints": [{"node_id": 5, "d_allow": 1.0,
+                                              "nodes": 2}]}],   # typo in list row
         "animate": {"custom_views": [{"name": "v", "nope": 2}]},
     }
     keys = set(unknown_keys(data))
     assert keys == {"bogus_top", "beso.evolution_ratte",
-                    "load_cases[0].whoops", "animate.custom_views[0].nope"}
+                    "load_cases[0].whoops",
+                    "load_cases[0].disp_constraints[0].nodes",
+                    "animate.custom_views[0].nope"}
 
 
 def test_unknown_keys_empty_for_serialised_config():

@@ -173,9 +173,11 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             and not any(c.sigma_allow is not None for c in cases):
         warn("addback_stress_bias is set but no load case sets a sigma_allow "
              "limit -- the stress-responsive add-back bias will never engage")
+    any_disp_limit = any(dc.d_allow is not None
+                         for c in cases for dc in c.disp_constraints)
     if (opt.backoff_gain > 0 or opt.damping_threshold < 1) \
-            and not any(c.sigma_allow is not None or c.d_allow is not None
-                        for c in cases):
+            and not (any(c.sigma_allow is not None for c in cases)
+                     or any_disp_limit):
         warn("the feasibility back-off controller (backoff_gain / "
              "damping_threshold) is configured but no load case sets a "
              "sigma_allow or d_allow limit -- it will never engage")
@@ -188,12 +190,17 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     if weights and not any(w > 0 for w in weights):
         err("all load-case weights are zero -- the sensitivity has no objective")
     # sigma_allow / d_allow are optional: a blank limit (None) leaves that quantity
-    # unconstrained. Only a set, non-positive limit is an error.
+    # unconstrained. Only a set, non-positive limit is an error. Each displacement
+    # constraint must name a node; a d_allow (when given) must be > 0.
     for c in cases:
         if c.sigma_allow is not None and c.sigma_allow <= 0:
             err(f"load case {c.name!r}: sigma_allow must be > 0: got {c.sigma_allow}")
-        if c.d_allow is not None and c.d_allow <= 0:
-            err(f"load case {c.name!r}: d_allow must be > 0: got {c.d_allow}")
+        for j, dc in enumerate(c.disp_constraints):
+            where = f"load case {c.name!r}: displacement constraint #{j + 1}"
+            if dc.node_id is None:
+                err(f"{where}: node id is required")
+            if dc.d_allow is not None and dc.d_allow <= 0:
+                err(f"{where}: d_allow must be > 0: got {dc.d_allow}")
 
     # --- growth boxes (add-material regions) ---
     boxes = m.growth_boxes or []
