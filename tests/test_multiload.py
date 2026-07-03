@@ -220,6 +220,87 @@ def test_loop_passes_worst_violation_ratio_to_next_target_vf(case_env, monkeypat
     assert captured["violation"] == pytest.approx(0.8)   # 400/500, the worst ratio
 
 
+# ---- stress-responsive add-back bias ----------------------------------------
+def test_stress_ratio_field_worst_over_stress_limited_cases():
+    cases = [LoadCase(name="a", stem="a", sigma_allow=200.0),
+             LoadCase(name="b", stem="b", sigma_allow=None, d_allow=0.5)]
+    ra = Results(element_ids=ELEM_IDS.copy(), energy=np.zeros(2),
+                 vonmises=np.array([100.0, 300.0]), sigma_max=300.0,
+                 disp=0.1, disp_node_id=None)
+    rb = Results(element_ids=ELEM_IDS.copy(), energy=np.zeros(2),
+                 vonmises=np.array([999.0, 999.0]), sigma_max=999.0,
+                 disp=0.1, disp_node_id=None)
+    field = loop_mod.stress_ratio_field(cases, [ra, rb], ELEM_IDS)
+    assert np.allclose(field, [0.5, 1.5])    # case b: no stress limit -> ignored
+    # no stress limit anywhere -> None (the bias has nothing to react to)
+    assert loop_mod.stress_ratio_field([cases[1]], [rb], ELEM_IDS) is None
+
+
+def _spy_sens_flow(monkeypatch, captured):
+    """Wrap the optimiser so the test sees the filtered sensitivity the loop
+    computed and the (possibly biased) one it passed to ``update``."""
+    real_build = loop_mod.build_optimizer
+
+    def spy_build(*args, **kwargs):
+        opt = real_build(*args, **kwargs)
+        real_filter, real_update = opt.filter_history, opt.update
+
+        def spy_filter(raw, prev):
+            out = real_filter(raw, prev)
+            captured.setdefault("sens", out)    # first call = the update field
+            return out
+
+        def spy_update(alive, sens, target_vf):
+            captured["update_sens"] = np.asarray(sens).copy()
+            captured["update_is_sens"] = sens is captured["sens"]
+            return real_update(alive, sens, target_vf)
+
+        opt.filter_history, opt.update = spy_filter, spy_update
+        return opt
+
+    monkeypatch.setattr(loop_mod, "build_optimizer", spy_build)
+
+
+def test_addback_bias_scales_update_sensitivity_when_stress_infeasible(
+        case_env, monkeypatch):
+    case_dir, out = case_env(("lc_a",))
+    cfg = _cfg(case_dir, out, "lc_a", [LoadCase(name="a", stem="lc_a")])
+    cfg.beso.addback_stress_bias = 2.0       # filter_radius 0 -> identity filter
+    _stub_solver(monkeypatch, {
+        "lc_a": _results(500.0, 0.1, energy=[1.0, 2.0]),   # 500 > 250 limit
+    }, calls=[])
+    captured = {}
+    _spy_sens_flow(monkeypatch, captured)
+    loop_mod.run_optimization(cfg, log=lambda *_: None)
+    # vonmises 500 everywhere / sigma_allow 250 -> ratio 2 -> factor 1 + 2*2 = 5
+    assert np.allclose(captured["update_sens"], np.asarray(captured["sens"]) * 5.0)
+
+
+def test_addback_bias_off_or_feasible_passes_sensitivity_unchanged(
+        case_env, monkeypatch):
+    # default bias 0 + stress-infeasible: the very same sensitivity object
+    case_dir, out = case_env(("lc_a",))
+    cfg = _cfg(case_dir, out, "lc_a", [LoadCase(name="a", stem="lc_a")])
+    _stub_solver(monkeypatch, {
+        "lc_a": _results(500.0, 0.1, energy=[1.0, 2.0]),
+    }, calls=[])
+    captured = {}
+    _spy_sens_flow(monkeypatch, captured)
+    loop_mod.run_optimization(cfg, log=lambda *_: None)
+    assert captured["update_is_sens"] is True
+
+    # bias set but the stress limit satisfied (disp violated): no bias either
+    cfg2 = _cfg(case_dir, out, "lc_a", [LoadCase(name="a", stem="lc_a")])
+    cfg2.beso.addback_stress_bias = 2.0
+    _stub_solver(monkeypatch, {
+        "lc_a": _results(100.0, 5.0, energy=[1.0, 2.0]),   # disp 5.0 > 1.0 limit
+    }, calls=[])
+    captured2 = {}
+    _spy_sens_flow(monkeypatch, captured2)
+    loop_mod.run_optimization(cfg2, log=lambda *_: None)
+    assert captured2["update_is_sens"] is True
+
+
 def test_infeasible_if_displacement_case_violates(case_env, monkeypatch):
     case_dir, out = case_env(("lc_a", "lc_b"))
     cfg = _cfg(case_dir, out, "lc_a", [

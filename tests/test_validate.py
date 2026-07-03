@@ -195,6 +195,25 @@ def test_backoff_controller_without_limits_is_warning(tmp_path):
     assert any("never engage" in w for w in _warnings(cfg))
 
 
+def test_negative_addback_stress_bias_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.addback_stress_bias = -0.5
+    assert any("addback_stress_bias must be >= 0" in e for e in _errors(cfg))
+
+
+def test_addback_stress_bias_without_stress_limit_is_warning(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.load_cases = [LoadCase(name="demo", stem="demo", d_allow=1.0)]  # no sigma
+    cfg.beso.addback_stress_bias = 2.0
+    assert _errors(cfg) == []
+    assert any("addback_stress_bias" in w and "never engage" in w
+               for w in _warnings(cfg))
+    # with a stress limit somewhere it is clean
+    cfg.load_cases = [LoadCase(name="demo", stem="demo", sigma_allow=250.0,
+                               d_allow=1.0)]
+    assert _warnings(cfg) == []
+
+
 def test_numeric_sanity_follows_selected_optimizer(tmp_path):
     # the active (tobs) block is validated...
     cfg = _good_cfg(tmp_path)

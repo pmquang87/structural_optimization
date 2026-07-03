@@ -160,6 +160,7 @@ class Beso:
     backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
     backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
+    addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
 
 
 @dataclass
@@ -198,6 +199,7 @@ class LevelSet:
     backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
     backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
+    addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
     # --- level-set specific ---
     dt: float = 1.0                  # pseudo-time step for the phi evolution
     smoothing_passes: int = 3        # Laplacian/Jacobi smoothing passes per iteration (regularisation)
@@ -249,6 +251,7 @@ class TobsOpts:
     backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
     backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
+    addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
     # --- TOBS specific ---
     flip_limit: float = 0.05         # beta: max fraction of elements flipped per ILP step (Sum|dx| <= beta*N)
     constraint_relaxation: float = 0.01  # epsilon: relaxation band (x V0) on the linearised volume constraint
@@ -295,6 +298,7 @@ class HcaOpts:
     backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
     backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
+    addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
     # --- HCA specific ---
     kp: float = 1.0                  # proportional gain of the density controller
     move_limit: float = 1.0          # cap on |dx_e| per iteration (1.0 = uncapped). Keep min(kp, move_limit) > 0.5 or no element can be removed in a single step

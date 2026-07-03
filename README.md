@@ -189,6 +189,12 @@ in progress.
   `damping_threshold < 1` (0.9–0.95 typical) removal slows by
   `(1−v)/(1−threshold)` once `v` exceeds the threshold, so the design glides
   into the limit instead of overshooting and oscillating feasible/infeasible.
+  `addback_stress_bias > 0` additionally makes the *add-back stress-responsive*:
+  whenever a stress limit is violated, the sensitivity driving that update is
+  scaled by `(1 + bias·σ_vm/σ_allow)` (spatially filtered so the overstress
+  bleeds into the neighbouring void elements), so the material the back-off
+  recovers lands near the overstressed region instead of wherever the energy
+  ranking happens to point.
 * **Additive-manufacturing constraints** (`manufacturing:`, all OFF by default) —
   applied to the alive mask each iteration after the optimiser update, for parts
   printed by powder-bed fusion (e.g. AlSi10Mg). `min_member_layers` (morphological

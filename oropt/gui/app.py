@@ -444,7 +444,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "cases (σ_max/σ_allow and d/d_allow; v ≤ 1 = feasible). Defaults "
                 "= the classic binary gate (fixed ±ER step from feasible/"
                 "infeasible alone), which is known to ping-pong across the limit.")
-    b = st.columns(3)
+    b = st.columns(4)
     aopt.backoff_gain = b[0].number_input(
         "Back-off gain", value=float(aopt.backoff_gain), min_value=0.0,
         step=0.5, format="%.2f", key=f"bogain_{opt_name}",
@@ -466,6 +466,13 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
              "(1−v)/(1−threshold) so the design glides into the limit instead "
              "of overshooting and oscillating. 1.0 = off (full rate until "
              "infeasible); 0.9–0.95 is typical.")
+    aopt.addback_stress_bias = b[3].number_input(
+        "Add-back stress bias", value=float(aopt.addback_stress_bias),
+        min_value=0.0, step=0.5, format="%.2f", key=f"abbias_{opt_name}",
+        help="When a stress limit is violated, scale the sensitivity driving "
+             "the update by (1 + bias·σ_vm/σ_allow), spatially filtered, so "
+             "the material added back lands near the overstressed region "
+             "instead of wherever the energy ranking points. 0 = off.")
 
     # ---- optimiser-specific knobs -----------------------------------------
     if opt_name == "tobs":

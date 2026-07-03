@@ -166,6 +166,13 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     if not (0 < opt.damping_threshold <= 1):
         err(f"damping_threshold must be in (0, 1] (1.0 = off): "
             f"got {opt.damping_threshold}")
+    if opt.addback_stress_bias < 0:
+        err(f"addback_stress_bias must be >= 0 (0 = off): "
+            f"got {opt.addback_stress_bias}")
+    if opt.addback_stress_bias > 0 \
+            and not any(c.sigma_allow is not None for c in cases):
+        warn("addback_stress_bias is set but no load case sets a sigma_allow "
+             "limit -- the stress-responsive add-back bias will never engage")
     if (opt.backoff_gain > 0 or opt.damping_threshold < 1) \
             and not any(c.sigma_allow is not None or c.d_allow is not None
                         for c in cases):
