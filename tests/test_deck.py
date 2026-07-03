@@ -58,3 +58,50 @@ def test_prepare_engine_anim_dt(mini_engine_path, tmp_path):
     i = lines.index("/ANIM/DT")
     assert lines[i + 1].split() == ["0.", "1.0"]   # frequency rewritten
     assert "/IMPL/NONLIN/1" in lines                # implicit controls untouched
+
+
+# ---- /BOX/RECTA parsing (growth-box deck references) ------------------------
+# Two /BOX/RECTA cards: 7000001 has a leading skew line + reversed corners (so the
+# parser must skip the skew line and normalise min<=max); 7000002 carries a
+# trailing /unit_ID on the header and no skew line.
+_BOX_DECK = """\
+/NODE
+  60000001   0.0   0.0   0.0
+  60000002   1.0   0.0   0.0
+  60000003   0.0   1.0   0.0
+  60000004   0.0   0.0   1.0
+/TETRA4/60000000
+  60000001  60000001  60000002  60000003  60000004
+/BOX/RECTA/7000001
+growth_rib
+                    0
+        40.0    5.0   25.0
+        10.0   -5.0    0.0
+/BOX/RECTA/7000002/13
+gusset
+        -20.0   -5.0    0.0
+          0.0    5.0   12.0
+/END
+"""
+
+
+def _box_deck(tmp_path):
+    p = tmp_path / "boxes_0000.rad"
+    p.write_text(_BOX_DECK, encoding="utf-8")
+    return Deck.load(p, design_part_id=60000000, design_node_min=60000000)
+
+
+def test_box_recta_normalises_corners_and_skips_skew(tmp_path):
+    d = _box_deck(tmp_path)
+    # reversed corners + a skew line before them -> normalised (min, max) per axis
+    assert d.box_recta(7000001) == (10.0, 40.0, -5.0, 5.0, 0.0, 25.0)
+
+
+def test_box_recta_header_with_unit_id(tmp_path):
+    d = _box_deck(tmp_path)
+    assert d.box_recta(7000002) == (-20.0, 0.0, -5.0, 5.0, 0.0, 12.0)
+
+
+def test_box_recta_absent_returns_none(tmp_path):
+    d = _box_deck(tmp_path)
+    assert d.box_recta(9999999) is None

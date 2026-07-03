@@ -164,6 +164,44 @@ class Deck:
             j += 1
         return np.asarray(ids, dtype=np.int64)
 
+    def box_recta(self, box_id: int) -> Optional[tuple]:
+        """Two opposite corners of a ``/BOX/RECTA/<box_id>`` card in the deck as
+        ``(x_min, x_max, y_min, y_max, z_min, z_max)`` (normalised so min <= max),
+        or ``None`` when no such box card is present.
+
+        Lets a growth box authored in the pre-processor travel with the model and
+        be referenced by id from the config (:attr:`~oropt.config.GrowthBox.deck_box_id`)
+        instead of literal coordinates. The header may carry a trailing ``/unit_ID``
+        (``/BOX/RECTA/<id>`` or ``/BOX/RECTA/<id>/<unit>``). The two corner points
+        are read as the first two lines in the block whose tokens are all numeric
+        and number three or more (``Xp Yp Zp``) — so the title and any leading
+        ``skew_ID`` / ``diam`` line are skipped regardless of layout."""
+        prefix = f"/BOX/RECTA/{box_id}"
+        n = len(self.lines)
+        try:
+            i = next(k for k in range(n)
+                     if self.lines[k].strip() == prefix
+                     or self.lines[k].strip().startswith(prefix + "/"))
+        except StopIteration:
+            return None
+        pts: list[tuple[float, float, float]] = []
+        j = i + 1
+        while j < n and not _is_section(self.lines[j]) and len(pts) < 2:
+            if not _is_comment(self.lines[j]):
+                toks = self.lines[j].split()
+                try:
+                    vals = [float(t) for t in toks]
+                except ValueError:
+                    vals = []
+                if len(vals) >= 3:                   # a coordinate line (not title/skew)
+                    pts.append((vals[0], vals[1], vals[2]))
+            j += 1
+        if len(pts) < 2:
+            return None
+        (ax, ay, az), (bx, by, bz) = pts[0], pts[1]
+        return (min(ax, bx), max(ax, bx), min(ay, by), max(ay, by),
+                min(az, bz), max(az, bz))
+
     # ---- rewrite -----------------------------------------------------------
     def write(self, out_path: str | Path, alive_mask: np.ndarray,
               no_pin: Optional[set] = None,

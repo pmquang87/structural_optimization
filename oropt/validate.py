@@ -27,6 +27,46 @@ ERROR = "error"
 WARNING = "warning"
 
 VALID_OPTIMIZERS = ("beso", "levelset", "tobs", "hca")
+VALID_GROWTH_SHAPES = ("box", "cylinder", "sphere")
+
+
+def _is_vec3(v) -> bool:
+    """True for a 3-number ``[x, y, z]`` list/tuple (a local-frame vector)."""
+    return isinstance(v, (list, tuple)) and len(v) == 3 and all(
+        isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
+
+
+def _parallel(a, b) -> bool:
+    """True when 3-vectors *a* and *b* are (near-)parallel — their cross product
+    is negligible, so they cannot span the box's local xy plane."""
+    cx = a[1] * b[2] - a[2] * b[1]
+    cy = a[2] * b[0] - a[0] * b[2]
+    cz = a[0] * b[1] - a[1] * b[0]
+    scale = max(abs(x) for x in a) * max(abs(x) for x in b)
+    return max(abs(cx), abs(cy), abs(cz)) <= 1e-9 * max(scale, 1.0)
+
+
+def _check_local_frame(b, label, err, warn) -> None:
+    """Validate a growth box's optional oriented local frame (origin + x_axis +
+    xy_axis). No-op when no frame field is set (a plain world-aligned box)."""
+    if b.origin is None and b.x_axis is None and b.xy_axis is None:
+        return
+    for fld, val in (("origin", b.origin), ("x_axis", b.x_axis),
+                     ("xy_axis", b.xy_axis)):
+        if val is not None and not _is_vec3(val):
+            err(f"growth box {label!r}: local-frame {fld} must be 3 numbers "
+                f"[x, y, z]: got {val!r}")
+    if b.x_axis is None or b.xy_axis is None:
+        warn(f"growth box {label!r}: an oriented local frame needs both x_axis "
+             "and xy_axis -- only one was given, so the frame is ignored and the "
+             "box stays world-axis-aligned")
+    elif _is_vec3(b.x_axis) and _is_vec3(b.xy_axis):
+        if all(x == 0 for x in b.x_axis) or all(x == 0 for x in b.xy_axis):
+            err(f"growth box {label!r}: local-frame x_axis and xy_axis must be "
+                "non-zero vectors")
+        elif _parallel(b.x_axis, b.xy_axis):
+            err(f"growth box {label!r}: local-frame x_axis and xy_axis are "
+                "parallel -- they cannot define the box's xy plane")
 
 
 @dataclass(frozen=True)
@@ -202,18 +242,41 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             if dc.d_allow is not None and dc.d_allow <= 0:
                 err(f"{where}: d_allow must be > 0: got {dc.d_allow}")
 
-    # --- growth boxes (add-material regions) ---
+    # --- growth regions (add-material boxes / spheres / cylinders) ---
     boxes = m.growth_boxes or []
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
-        for axis in ("x", "y", "z"):
-            lo = getattr(b, f"{axis}_min")
-            hi = getattr(b, f"{axis}_max")
-            if lo > hi:
-                err(f"growth box {label!r}: {axis}_min ({lo}) > {axis}_max ({hi})")
-            elif lo == hi:
-                warn(f"growth box {label!r}: {axis}_min == {axis}_max ({lo}) -- "
-                     "the box is degenerate and will select no elements")
+        kind = b.shape_kind()
+        if kind not in VALID_GROWTH_SHAPES:
+            err(f"growth box {label!r}: unknown shape {b.shape!r} "
+                f"(expected {', '.join(VALID_GROWTH_SHAPES)})")
+            continue
+        if kind == "box":
+            # A deck_box_id box takes its corners from a /BOX/RECTA card at run
+            # start, so its config coordinates aren't meaningful to check here.
+            if b.deck_box_id is None:
+                for axis in ("x", "y", "z"):
+                    lo = getattr(b, f"{axis}_min")
+                    hi = getattr(b, f"{axis}_max")
+                    if lo > hi:
+                        err(f"growth box {label!r}: {axis}_min ({lo}) > "
+                            f"{axis}_max ({hi})")
+                    elif lo == hi:
+                        warn(f"growth box {label!r}: {axis}_min == {axis}_max "
+                             f"({lo}) -- the region is degenerate and will select "
+                             "no elements")
+            _check_local_frame(b, label, err, warn)
+        elif kind == "sphere":
+            if b.radius <= 0:
+                err(f"growth box {label!r}: sphere radius must be > 0: "
+                    f"got {b.radius}")
+        elif kind == "cylinder":
+            if b.radius <= 0:
+                err(f"growth box {label!r}: cylinder radius must be > 0: "
+                    f"got {b.radius}")
+            if (b.x1, b.y1, b.z1) == (b.x2, b.y2, b.z2):
+                err(f"growth box {label!r}: cylinder axis end-points are "
+                    "identical (zero-length axis)")
     if boxes and cfg.optimizer_name() == "beso" \
             and cfg.beso.max_add_ratio < cfg.beso.evolution_rate:
         warn(f"growth boxes with beso.max_add_ratio={cfg.beso.max_add_ratio} < "

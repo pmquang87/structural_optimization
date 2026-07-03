@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import json
 import math
 from dataclasses import dataclass
 from html import escape
@@ -38,11 +39,13 @@ from . import status as st
 from ._render import run_render
 from .animate import ANIM_GIF
 from .config import Config
+from .mesh import overlay_primitives
 
 REPORT_HTML = "report.html"
 REPORT_MD = "report.md"
 TOPOLOGY_PNG = "report_topology.png"
 TOPOLOGY_SCENE_HTML = "report_topology.html"   # standalone interactive VTK.js scene
+OVERLAY_SPEC_JSON = "report_boxes.json"        # growth-region outlines for the render
 
 # The evolution GIF and the interactive scene are embedded inline so report.html
 # stays a single emailable file — but only while each is small enough; above the
@@ -51,32 +54,67 @@ TOPOLOGY_SCENE_HTML = "report_topology.html"   # standalone interactive VTK.js s
 MAX_INLINE_GIF_BYTES = 8 * 1024 * 1024
 MAX_INLINE_SCENE_BYTES = 12 * 1024 * 1024
 
+# Optional growth-region overlay for the isolated render subprocesses. When a
+# boxes spec (JSON of oropt.mesh.overlay_primitives) is passed as the 3rd argv,
+# _overlay adds a red wireframe outline of each region to the plotter — so the
+# report shows where material was allowed to grow, like the Monitor's 3D view. No
+# 3rd argv (a normal run) -> _overlay is a no-op and the render is byte-identical.
+_OVERLAY_SNIPPET = (
+    "def _overlay(p, argv):\n"
+    "    if len(argv) < 4:\n"
+    "        return\n"
+    "    import os, json\n"
+    "    import numpy as np\n"
+    "    if not argv[3] or not os.path.exists(argv[3]):\n"
+    "        return\n"
+    "    for pr in json.loads(open(argv[3], encoding='utf-8').read()):\n"
+    "        k = pr['kind']\n"
+    "        if k == 'box':\n"
+    "            pts = np.asarray(pr['corners'], dtype=float)\n"
+    "            lines = np.hstack([[2, i, j] for i, j in pr['edges']]).astype(int)\n"
+    "            m = pv.PolyData(pts, lines=lines)\n"
+    "        elif k == 'sphere':\n"
+    "            m = pv.Sphere(radius=pr['radius'], center=pr['center'])\n"
+    "        else:\n"
+    "            a = np.asarray(pr['p1'], dtype=float)\n"
+    "            b = np.asarray(pr['p2'], dtype=float)\n"
+    "            m = pv.Cylinder(center=(a + b) / 2.0, direction=b - a,\n"
+    "                            radius=pr['radius'],\n"
+    "                            height=float(np.linalg.norm(b - a)))\n"
+    "        p.add_mesh(m, color='red', style='wireframe', line_width=2,\n"
+    "                   opacity=0.7)\n"
+)
 # Run by an isolated subprocess (same interpreter, which already has pyvista) so a
 # hard VTK/OpenGL crash on a headless box can never bring the run down — it shows
-# up here only as a non-zero exit code. argv -> [vtu_in, png_out].
+# up here only as a non-zero exit code. argv -> [vtu_in, png_out, boxes_json?].
 _RENDER_RUNNER = (
-    "import sys, pyvista as pv; "
-    "pv.OFF_SCREEN = True; "
-    "g = pv.read(sys.argv[1]); "
-    "s = 'sensitivity' if 'sensitivity' in g.cell_data else None; "
-    "p = pv.Plotter(window_size=[900, 600], off_screen=True); "
-    "p.add_mesh(g, scalars=s, cmap='viridis', show_edges=False); "
-    "p.view_isometric(); p.background_color = 'white'; "
-    "p.screenshot(sys.argv[2]); p.close()"
+    "import sys, pyvista as pv\n"
+    "pv.OFF_SCREEN = True\n"
+    + _OVERLAY_SNIPPET +
+    "g = pv.read(sys.argv[1])\n"
+    "s = 'sensitivity' if 'sensitivity' in g.cell_data else None\n"
+    "p = pv.Plotter(window_size=[900, 600], off_screen=True)\n"
+    "p.add_mesh(g, scalars=s, cmap='viridis', show_edges=False)\n"
+    "_overlay(p, sys.argv)\n"
+    "p.view_isometric(); p.background_color = 'white'\n"
+    "p.screenshot(sys.argv[2]); p.close()\n"
 )
 # Same scene as the PNG render, but exported as an *interactive* standalone VTK.js
 # page (zoom/rotate) via pyvista's export_html instead of a screenshot. Also run in
 # the isolated subprocess so a GL/driver crash stays contained. argv -> [vtu_in,
-# html_out]. Needs the optional trame export backend (see _scene_backend_available).
+# html_out, boxes_json?]. Needs the optional trame export backend (see
+# _scene_backend_available).
 _SCENE_RUNNER = (
-    "import sys, pyvista as pv; "
-    "pv.OFF_SCREEN = True; "
-    "g = pv.read(sys.argv[1]); "
-    "s = 'sensitivity' if 'sensitivity' in g.cell_data else None; "
-    "p = pv.Plotter(window_size=[900, 600], off_screen=True); "
-    "p.add_mesh(g, scalars=s, cmap='viridis', show_edges=False); "
-    "p.view_isometric(); p.background_color = 'white'; "
-    "p.export_html(sys.argv[2]); p.close()"
+    "import sys, pyvista as pv\n"
+    "pv.OFF_SCREEN = True\n"
+    + _OVERLAY_SNIPPET +
+    "g = pv.read(sys.argv[1])\n"
+    "s = 'sensitivity' if 'sensitivity' in g.cell_data else None\n"
+    "p = pv.Plotter(window_size=[900, 600], off_screen=True)\n"
+    "p.add_mesh(g, scalars=s, cmap='viridis', show_edges=False)\n"
+    "_overlay(p, sys.argv)\n"
+    "p.view_isometric(); p.background_color = 'white'\n"
+    "p.export_html(sys.argv[2]); p.close()\n"
 )
 _CHART_FILES = {
     "vf": "report_volume_fraction.png",
@@ -308,16 +346,39 @@ def _charts(history: list[dict], s: Summary, work: Path,
 # --------------------------------------------------------------------------- #
 # final-topology render (off-screen pyvista, best-effort)
 # --------------------------------------------------------------------------- #
+def _write_overlay_spec(work: Path, cfg: Config,
+                        log: Callable[[str], None]) -> Optional[Path]:
+    """Write the growth-region outline spec (``report_boxes.json``) for the render.
+
+    Serialises :func:`oropt.mesh.overlay_primitives` of the config's growth regions
+    so the isolated render subprocess can overlay them. Returns the path, or
+    ``None`` when there are no drawable regions (so a normal run passes no overlay
+    and its render stays byte-identical). Best-effort: never raises."""
+    try:
+        boxes = getattr(getattr(cfg, "model", None), "growth_boxes", None) or []
+        prims = overlay_primitives(boxes)
+        if not prims:
+            return None
+        dest = Path(work) / OVERLAY_SPEC_JSON
+        dest.write_text(json.dumps(prims), encoding="utf-8")
+        return dest
+    except Exception as exc:  # noqa: BLE001
+        log(f"[oropt] report: could not write growth-region overlay: {exc}")
+        return None
+
+
 def _render_topology(work: Path, timeout_s: float,
-                     log: Callable[[str], None]) -> Optional[Path]:
+                     log: Callable[[str], None],
+                     boxes_spec: Optional[Path] = None) -> Optional[Path]:
     """Off-screen render of the final design to ``report_topology.png``.
 
     Renders ``topology_latest.vtu`` exactly like the GUI's off-screen pyvista
     view, but in an *isolated subprocess* so a hard VTK/OpenGL crash on a headless
     machine (no GL context) can never abort the run — it just shows up as a
-    non-zero exit code and we fall back to linking the topology files. Returns the
-    PNG path, or ``None`` (reason logged) when there is nothing to render or the
-    render subprocess fails/times out/crashes.
+    non-zero exit code and we fall back to linking the topology files. When
+    *boxes_spec* is given, each growth region is overlaid as a red wireframe
+    outline. Returns the PNG path, or ``None`` (reason logged) when there is
+    nothing to render or the render subprocess fails/times out/crashes.
     """
     src = Path(work) / st.TOPOLOGY
     if not src.is_file():
@@ -325,7 +386,8 @@ def _render_topology(work: Path, timeout_s: float,
         return None
     dest = Path(work) / TOPOLOGY_PNG
     dest.unlink(missing_ok=True)        # don't mistake a stale PNG for a fresh one
-    result = run_render(_RENDER_RUNNER, [src, dest], timeout_s)
+    args = [src, dest] if boxes_spec is None else [src, dest, boxes_spec]
+    result = run_render(_RENDER_RUNNER, args, timeout_s)
     if result.ok and dest.is_file():
         return dest
     if result.timed_out:
@@ -356,16 +418,18 @@ def _scene_backend_available() -> bool:
 
 
 def _export_topology_scene(work: Path, timeout_s: float,
-                           log: Callable[[str], None]) -> Optional[Path]:
+                           log: Callable[[str], None],
+                           boxes_spec: Optional[Path] = None) -> Optional[Path]:
     """Export an interactive (zoom/rotate) VTK.js scene to ``report_topology.html``.
 
     Renders the same ``topology_latest.vtu`` scene as :func:`_render_topology`, but
     via pyvista's ``export_html`` into a standalone, offline interactive viewer —
     so the report's final design can be orbited/zoomed like the GUI's Monitor tab.
-    Runs in the *isolated subprocess* (crash containment). Returns the scene path,
-    or ``None`` (reason logged) when the optional trame backend is missing, there
-    is nothing to render, or the export fails/times out/crashes — the caller then
-    falls back to the static PNG. Never raises.
+    Runs in the *isolated subprocess* (crash containment). When *boxes_spec* is
+    given, each growth region is overlaid as a red wireframe outline. Returns the
+    scene path, or ``None`` (reason logged) when the optional trame backend is
+    missing, there is nothing to render, or the export fails/times out/crashes —
+    the caller then falls back to the static PNG. Never raises.
     """
     if not _scene_backend_available():
         log("[oropt] report: interactive 3D viewer needs the optional 'report3d' "
@@ -378,7 +442,8 @@ def _export_topology_scene(work: Path, timeout_s: float,
         return None
     dest = Path(work) / TOPOLOGY_SCENE_HTML
     dest.unlink(missing_ok=True)        # don't mistake a stale scene for a fresh one
-    result = run_render(_SCENE_RUNNER, [src, dest], timeout_s)
+    args = [src, dest] if boxes_spec is None else [src, dest, boxes_spec]
+    result = run_render(_SCENE_RUNNER, args, timeout_s)
     if result.ok and dest.is_file():
         return dest
     if result.timed_out:
@@ -677,15 +742,19 @@ def write_report(cfg: Config, work: Path,
                         if opts is not None else 120.0)
         charts = (_charts(history, s, work, log)
                   if (opts is None or getattr(opts, "charts", True)) else {})
+        # Growth-region outlines to overlay on the render (None for a normal run,
+        # so its render stays byte-identical). Shared by the interactive scene and
+        # the static PNG.
+        boxes_spec = _write_overlay_spec(work, cfg, log)
         # Final design: try the interactive viewer first; only spend a second
         # subprocess on the static PNG when it isn't available, so a report always
         # carries *some* final-design visual (the PNG also keeps report.html
         # self-contained when the scene is too big to inline).
-        scene = (_export_topology_scene(work, timeout, log)
+        scene = (_export_topology_scene(work, timeout, log, boxes_spec)
                  if (opts is None or getattr(opts, "interactive_topology", True))
                  else None)
         want_png = (opts is None or getattr(opts, "render_topology", True))
-        topo = (_render_topology(work, timeout, log)
+        topo = (_render_topology(work, timeout, log, boxes_spec)
                 if (scene is None and want_png) else None)
 
         written: list[Path] = []

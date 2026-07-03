@@ -21,8 +21,8 @@ from oropt.config import (Beso as BesoCfg, Config, GrowthBox,
 from oropt.deck import Deck
 from oropt.gui.boxes import growth_boxes_from_records, records_from_growth_boxes
 from oropt.levelset import LevelSet
-from oropt.loop import growth_candidate_mask
-from oropt.mesh import Mesh
+from oropt.loop import growth_candidate_mask, resolve_growth_boxes
+from oropt.mesh import Mesh, local_frame_basis, overlay_primitives
 from oropt.tobs import Tobs
 from oropt.validate import check_config
 
@@ -268,3 +268,241 @@ def test_gui_blank_and_partial_rows_dropped():
          "y_max": 1.0, "z_min": 0.0, "z_max": 1.0},            # missing a bound
     ]
     assert growth_boxes_from_records(rows) == []
+
+
+# =====================================================================
+# Phase 1.5: shapes, oriented boxes, 3D overlay, deck /BOX/RECTA input
+# =====================================================================
+
+# ---- config: shape + local frame + deck reference ---------------------------
+def test_growth_box_shape_and_frame_yaml_roundtrip(tmp_path):
+    cfg = Config.from_dict({"model": {"growth_boxes": [
+        {"name": "orb", "shape": "box", "x_min": 0.0, "x_max": 1.0, "y_min": 0.0,
+         "y_max": 1.0, "z_min": 0.0, "z_max": 1.0, "origin": [1.0, 2.0, 3.0],
+         "x_axis": [1.0, 1.0, 0.0], "xy_axis": [-1.0, 1.0, 0.0]},
+        {"name": "ball", "shape": "sphere", "cx": 1.0, "cy": 2.0, "cz": 3.0,
+         "radius": 0.5},
+        {"name": "rod", "shape": "cylinder", "x1": 0.0, "y1": 0.0, "z1": 0.0,
+         "x2": 2.0, "y2": 0.0, "z2": 0.0, "radius": 0.3}]}})
+    b0 = cfg.model.growth_boxes[0]
+    assert b0.shape_kind() == "box" and b0.has_local_frame()
+    assert b0.x_axis == [1.0, 1.0, 0.0]
+    assert cfg.model.growth_boxes[2].shape_kind() == "cylinder"
+    p = tmp_path / "c.yaml"
+    cfg.to_yaml(p)
+    assert Config.from_yaml(p).model.growth_boxes == cfg.model.growth_boxes
+
+
+def test_unknown_keys_flags_new_growth_fields():
+    data = {"model": {"growth_boxes": [
+        {"name": "b", "shape": "sphere", "radiuss": 1.0}]}}
+    bad = unknown_keys(data)
+    assert "model.growth_boxes[0].radiuss" in bad
+    assert "model.growth_boxes[0].shape" not in bad          # a known field
+    assert "model.growth_boxes[0].radius" not in bad
+
+
+# ---- sphere / cylinder centroid membership ----------------------------------
+def _mesh_at(points):
+    pts = np.asarray(points, dtype=float)
+    return Mesh(centroids=pts, volumes=np.ones(len(pts)),
+                conn_rows=np.array([[0, 1, 2, 3]] * len(pts)),
+                n_nodes=4, design_node_min=0)
+
+
+def test_in_boxes_mask_sphere_inclusive_surface():
+    m = _mesh_at([[0, 0, 0], [1, 0, 0], [3, 0, 0]])
+    s = GrowthBox(shape="sphere", cx=0.0, cy=0.0, cz=0.0, radius=1.0)
+    # centroid exactly on the surface (dist == radius) is inside (inclusive)
+    assert m.in_boxes_mask([s]).tolist() == [True, True, False]
+
+
+def test_in_boxes_mask_cylinder_finite_caps_and_radius():
+    m = _mesh_at([[1, 0, 0],       # on axis, mid-length -> inside
+                  [1, 0.9, 0],     # radial 0.9 < 1 -> inside
+                  [1, 1.5, 0],     # radial 1.5 > 1 -> outside
+                  [3, 0, 0],       # beyond the far cap (t > 1) -> outside
+                  [-0.5, 0, 0],    # before the near cap (t < 0) -> outside
+                  [0, 0, 0]])      # on the near cap, on axis -> inside
+    c = GrowthBox(shape="cylinder", x1=0.0, y1=0.0, z1=0.0,
+                  x2=2.0, y2=0.0, z2=0.0, radius=1.0)
+    assert m.in_boxes_mask([c]).tolist() == [True, True, False, False, False, True]
+
+
+def test_in_boxes_mask_shape_union():
+    m = _mesh_at([[0, 0, 0], [5, 0, 0], [9, 9, 9]])
+    s = GrowthBox(shape="sphere", cx=0.0, cy=0.0, cz=0.0, radius=1.0)
+    b = GrowthBox(shape="box", x_min=4.5, x_max=5.5, y_min=-0.5, y_max=0.5,
+                  z_min=-0.5, z_max=0.5)
+    assert m.in_boxes_mask([s, b]).tolist() == [True, True, False]
+
+
+# ---- oriented (local-frame) boxes -------------------------------------------
+def test_local_frame_basis_orthonormal_gram_schmidt():
+    b = GrowthBox(shape="box", x_axis=[2.0, 0.0, 0.0], xy_axis=[1.0, 1.0, 0.0])
+    origin, R = local_frame_basis(b)
+    assert np.allclose(origin, [0, 0, 0])
+    # rows orthonormal; the non-orthogonal xy_axis is Gram-Schmidt-projected
+    assert np.allclose(R @ R.T, np.eye(3))
+    assert np.allclose(R[0], [1, 0, 0])          # e1 = normalised x_axis
+    assert np.allclose(R[1], [0, 1, 0])          # e2 after removing the e1 part
+
+
+def test_local_frame_basis_none_when_absent_or_degenerate():
+    assert local_frame_basis(GrowthBox(shape="box")) is None       # no frame
+    # parallel axes cannot define a plane -> degenerate -> None (world-aligned)
+    assert local_frame_basis(GrowthBox(
+        shape="box", x_axis=[1.0, 0.0, 0.0], xy_axis=[2.0, 0.0, 0.0])) is None
+
+
+def test_in_boxes_mask_oriented_box_rotated_45deg():
+    # a thin box whose local +x runs along world (1,1,0): a point 1 unit along that
+    # diagonal is inside, the same distance along world +x falls outside the width
+    b = GrowthBox(shape="box", x_min=0.0, x_max=2.0, y_min=-0.5, y_max=0.5,
+                  z_min=-0.5, z_max=0.5, origin=[0.0, 0.0, 0.0],
+                  x_axis=[1.0, 1.0, 0.0], xy_axis=[-1.0, 1.0, 0.0])
+    m = _mesh_at([[0.7071, 0.7071, 0.0], [1.0, 0.0, 0.0]])
+    assert m.in_boxes_mask([b]).tolist() == [True, False]
+
+
+# ---- 3D-overlay primitives ---------------------------------------------------
+def test_overlay_primitives_all_shapes():
+    boxes = [
+        GrowthBox(name="b", shape="box", x_min=0.0, x_max=1.0, y_min=0.0,
+                  y_max=1.0, z_min=0.0, z_max=1.0),
+        GrowthBox(name="s", shape="sphere", cx=1.0, cy=2.0, cz=3.0, radius=0.5),
+        GrowthBox(name="c", shape="cylinder", x1=0.0, y1=0.0, z1=0.0, x2=1.0,
+                  y2=0.0, z2=0.0, radius=0.3)]
+    prims = overlay_primitives(boxes)
+    assert [p["kind"] for p in prims] == ["box", "sphere", "cylinder"]
+    assert len(prims[0]["corners"]) == 8 and len(prims[0]["edges"]) == 12
+    assert prims[1]["center"] == [1.0, 2.0, 3.0] and prims[1]["radius"] == 0.5
+    assert prims[2]["p1"] == [0.0, 0.0, 0.0] and prims[2]["p2"] == [1.0, 0.0, 0.0]
+
+
+def test_overlay_primitives_skips_degenerate_and_deck_ref():
+    boxes = [
+        GrowthBox(shape="sphere", radius=0.0),                    # zero radius
+        GrowthBox(shape="cylinder", x1=0.0, y1=0.0, z1=0.0,       # zero-length axis
+                  x2=0.0, y2=0.0, z2=0.0, radius=1.0),
+        GrowthBox(shape="box"),                                   # zero-size box
+        GrowthBox(shape="box", deck_box_id=7)]                    # corners unresolved
+    assert overlay_primitives(boxes) == []
+
+
+def test_overlay_primitives_oriented_box_corners_in_world():
+    b = GrowthBox(shape="box", x_min=0.0, x_max=1.0, y_min=0.0, y_max=1.0,
+                  z_min=0.0, z_max=1.0, origin=[10.0, 0.0, 0.0],
+                  x_axis=[0.0, 1.0, 0.0], xy_axis=[-1.0, 0.0, 0.0])
+    corners = np.asarray(overlay_primitives([b])[0]["corners"])
+    # the local (x_min,y_min,z_min) corner maps back to the frame origin
+    assert np.any(np.all(np.isclose(corners, [10.0, 0.0, 0.0]), axis=1))
+    assert corners.shape == (8, 3)
+
+
+# ---- deck /BOX/RECTA reference resolution -----------------------------------
+_DECK_WITH_BOX = GROWTH_DECK.replace("/END", (
+    "/BOX/RECTA/7001\n"
+    "e2_box\n"
+    "        0.6    0.6    0.6\n"          # reversed corners on purpose
+    "        0.4    0.4    0.4\n"
+    "/END"))
+
+
+def _load_with_box(tmp_path):
+    p = tmp_path / "gb_0000.rad"
+    p.write_text(_DECK_WITH_BOX, encoding="utf-8")
+    deck = Deck.load(p, design_part_id=60000000, design_node_min=60000000)
+    return deck, Mesh.from_deck(deck)
+
+
+def test_resolve_growth_boxes_fills_coords_from_deck(tmp_path):
+    deck, _ = _load_with_box(tmp_path)
+    [resolved] = resolve_growth_boxes(deck, [GrowthBox(name="ref", deck_box_id=7001)])
+    assert resolved.deck_box_id is None and resolved.shape_kind() == "box"
+    assert (resolved.x_min, resolved.x_max) == (0.4, 0.6)         # normalised
+    assert (resolved.z_min, resolved.z_max) == (0.4, 0.6)
+
+
+def test_resolve_growth_boxes_passthrough(tmp_path):
+    deck, _ = _load(tmp_path)
+    assert resolve_growth_boxes(deck, [BOX_E2]) == [BOX_E2]       # no deck_box_id
+
+
+def test_resolve_growth_boxes_missing_card_raises(tmp_path):
+    deck, _ = _load(tmp_path)
+    with pytest.raises(ValueError, match="/BOX/RECTA/424242"):
+        resolve_growth_boxes(deck, [GrowthBox(name="x", deck_box_id=424242)])
+
+
+def test_candidate_mask_via_deck_box_id(tmp_path):
+    deck, mesh = _load_with_box(tmp_path)
+    mask = growth_candidate_mask(
+        deck, mesh, Model(growth_boxes=[GrowthBox(deck_box_id=7001)]), log=_silent)
+    assert mask.tolist() == [False, True, False, False]          # selects e2
+
+
+def test_candidate_mask_sphere_shape(tmp_path):
+    deck, mesh = _load(tmp_path)
+    sph = GrowthBox(name="sph", shape="sphere", cx=0.5, cy=0.5, cz=0.5, radius=0.1)
+    mask = growth_candidate_mask(deck, mesh, Model(growth_boxes=[sph]), log=_silent)
+    assert mask.tolist() == [False, True, False, False]
+
+
+# ---- per-shape / frame validation -------------------------------------------
+def test_validate_sphere_and_cylinder_radius():
+    bad_s = _cfg([GrowthBox(name="s", shape="sphere", radius=0.0)])
+    assert any(p.startswith("error") and "sphere radius" in p
+               for p in _growth_problems(bad_s))
+    bad_c = _cfg([GrowthBox(name="c", shape="cylinder", x1=0.0, y1=0.0, z1=0.0,
+                            x2=0.0, y2=0.0, z2=0.0, radius=1.0)])
+    assert any("zero-length axis" in p for p in _growth_problems(bad_c))
+
+
+def test_validate_unknown_shape_errors():
+    bad = _cfg([GrowthBox(name="x", shape="pyramid")])
+    assert any(p.startswith("error") and "unknown shape" in p
+               for p in _growth_problems(bad))
+
+
+def test_validate_local_frame_partial_warns_and_parallel_errors():
+    partial = GrowthBox(name="p", shape="box", x_min=0.0, x_max=1.0, y_min=0.0,
+                        y_max=1.0, z_min=0.0, z_max=1.0, x_axis=[1.0, 0.0, 0.0])
+    assert any(p.startswith("warning") and "local frame" in p
+               for p in _growth_problems(_cfg([partial])))
+    par = GrowthBox(name="q", shape="box", x_min=0.0, x_max=1.0, y_min=0.0,
+                    y_max=1.0, z_min=0.0, z_max=1.0, x_axis=[1.0, 0.0, 0.0],
+                    xy_axis=[2.0, 0.0, 0.0])
+    assert any(p.startswith("error") and "parallel" in p
+               for p in _growth_problems(_cfg([par])))
+
+
+def test_validate_valid_oriented_box_silent():
+    ok = GrowthBox(name="ok", shape="box", x_min=0.0, x_max=1.0, y_min=0.0,
+                   y_max=1.0, z_min=0.0, z_max=1.0, origin=[0.0, 0.0, 0.0],
+                   x_axis=[1.0, 1.0, 0.0], xy_axis=[-1.0, 1.0, 0.0])
+    # tobs avoids beso's unrelated max_add_ratio warning
+    assert _growth_problems(_cfg([ok], optimizer="tobs")) == []
+
+
+# ---- GUI row helpers across shapes ------------------------------------------
+def test_gui_records_roundtrip_all_shapes():
+    boxes = [
+        GrowthBox(name="b", shape="box", x_min=0.0, x_max=1.0, y_min=2.0,
+                  y_max=3.0, z_min=4.0, z_max=5.0),
+        GrowthBox(name="s", shape="sphere", cx=1.0, cy=2.0, cz=3.0, radius=0.5),
+        GrowthBox(name="c", shape="cylinder", x1=0.0, y1=0.0, z1=0.0, x2=1.0,
+                  y2=1.0, z2=1.0, radius=0.4)]
+    assert growth_boxes_from_records(records_from_growth_boxes(boxes)) == boxes
+
+
+def test_gui_partial_and_unknown_shape_rows_dropped():
+    rows = [
+        {"name": "s", "shape": "sphere", "cx": 0.0, "cy": 0.0, "cz": None,
+         "radius": 1.0},                                          # missing cz
+        {"name": "u", "shape": "blob", "cx": 0.0, "cy": 0.0, "cz": 0.0,
+         "radius": 1.0},                                          # unknown shape
+        {"name": "c", "shape": "cylinder", "x1": 0.0, "y1": 0.0, "z1": 0.0,
+         "x2": 1.0, "y2": 0.0, "z2": 0.0, "radius": 0.5}]         # complete
+    out = growth_boxes_from_records(rows)
+    assert [b.shape_kind() for b in out] == ["cylinder"]

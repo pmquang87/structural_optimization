@@ -74,27 +74,78 @@ class DockerOpts:
 
 @dataclass
 class GrowthBox:
-    """A user-defined axis-aligned box (two opposite corners, like LS-DYNA's
-    ``*DEFINE_BOX`` / Radioss ``/BOX/RECTA``) marking part of the design mesh as
-    **candidate growth material**: design elements whose centroid lies inside any
-    growth box start the run *void* (removed from the deck) and may be **added**
-    by the optimiser's bi-directional update wherever the load path wants them —
-    letting the design grow material where the original part had none.
+    """A user-defined region (like LS-DYNA's ``*DEFINE_BOX`` / Radioss
+    ``/BOX/RECTA`` family) marking part of the design mesh as **candidate growth
+    material**: design elements whose centroid lies inside any growth region start
+    the run *void* (removed from the deck) and may be **added** by the optimiser's
+    bi-directional update wherever the load path wants them — letting the design
+    grow material where the original part had none.
 
-    The box volume must be **pre-meshed** into the design part (same
+    The region volume must be **pre-meshed** into the design part (same
     ``/TETRA4/<design_part_id>`` block, node-conformal interface with the original
-    part, node ids >= ``design_node_min``); a box over unmeshed space selects no
-    elements and is an error at run start. Multiple boxes act as a union. Bounds
-    are inclusive; a box overlapping the original part volume voids those
+    part, node ids >= ``design_node_min``); a region over unmeshed space selects no
+    elements and is an error at run start. Multiple regions act as a union. Bounds
+    are inclusive; a region overlapping the original part volume voids those
     elements at start too (deliberate carve-and-regrow).
+
+    ``shape`` selects the primitive (mirroring the Radioss ``/BOX`` family):
+
+    * ``"box"`` (default) — axis-aligned rectangular box, two opposite corners in
+      the ``x_min``/``x_max``/… fields (``/BOX/RECTA``). Optionally *oriented*: give
+      a local frame (:attr:`origin` + :attr:`x_axis` + :attr:`xy_axis`, Gram-Schmidt
+      orthonormalised) and the bounds are then measured in that skew system
+      (LS-DYNA ``*DEFINE_BOX_LOCAL`` -> ``/BOX/RECTA`` + ``/SKEW/FIX``).
+    * ``"sphere"`` — centre (:attr:`cx`/:attr:`cy`/:attr:`cz`) + :attr:`radius`
+      (``/BOX/SPHER``).
+    * ``"cylinder"`` — two axis end-points (:attr:`x1`/… and :attr:`x2`/…) +
+      :attr:`radius`, a *finite* cylinder capped at both ends (``/BOX/CYLIN``).
+
+    Instead of literal coordinates a box may reference a ``/BOX/RECTA`` card in the
+    starter deck by id (:attr:`deck_box_id`); its two corners are read from the deck
+    at run start (see :meth:`oropt.deck.Deck.box_recta`). The unused fields for a
+    given shape stay at their harmless defaults, so a config only carries the
+    coordinates its shape needs and existing box-only YAMLs parse unchanged.
     """
     name: str = ""
+    shape: str = "box"                # "box" | "cylinder" | "sphere"
+    # --- box: two opposite corners (also the bounds of an oriented/local box) ---
     x_min: float = 0.0
     x_max: float = 0.0
     y_min: float = 0.0
     y_max: float = 0.0
     z_min: float = 0.0
     z_max: float = 0.0
+    # --- sphere: centre + radius ---
+    cx: float = 0.0
+    cy: float = 0.0
+    cz: float = 0.0
+    radius: float = 0.0               # sphere & cylinder radius
+    # --- cylinder: two axis end-points (radius shared with the sphere) ---
+    x1: float = 0.0
+    y1: float = 0.0
+    z1: float = 0.0
+    x2: float = 0.0
+    y2: float = 0.0
+    z2: float = 0.0
+    # --- optional local frame for shape="box" (LS-DYNA *DEFINE_BOX_LOCAL) ---
+    # origin + a +x-axis direction + a vector in the +xy plane; Gram-Schmidt
+    # orthonormalised into a skew system the box bounds are measured in. Leave the
+    # axes None (the default) for a world-axis-aligned box. origin None -> world
+    # origin.
+    origin: Optional[list] = None     # [ox, oy, oz]
+    x_axis: Optional[list] = None     # [ax, ay, az] local +x direction
+    xy_axis: Optional[list] = None    # [bx, by, bz] a vector in the local +xy plane
+    # --- optional: read the box corners from a /BOX/RECTA card in the deck ---
+    deck_box_id: Optional[int] = None  # resolved to x_min..z_max at run start
+
+    def shape_kind(self) -> str:
+        """Normalised shape selector: ``"box"``, ``"sphere"`` or ``"cylinder"``."""
+        return (self.shape or "box").strip().lower()
+
+    def has_local_frame(self) -> bool:
+        """True when an oriented local frame is defined (both axes given), so the
+        box bounds are measured in a skew system rather than world axes."""
+        return self.x_axis is not None and self.xy_axis is not None
 
 
 @dataclass

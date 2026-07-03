@@ -36,6 +36,7 @@ from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
 from oropt.gui.runstate import find_active_run
+from oropt.mesh import overlay_primitives
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
                              records_from_custom_views)
 from oropt.validate import ERROR, check_config, has_errors
@@ -386,17 +387,22 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     cfg.model.stress_exclude_node_ids = [
         int(x) for x in sn.replace(" ", "").split(",") if x]
 
-    st.subheader("Growth boxes — add material")
+    st.subheader("Growth regions — add material")
     st.caption(
-        "Axis-aligned boxes (two opposite corners, like LS-DYNA `*DEFINE_BOX` / "
-        "Radioss `/BOX/RECTA`) marking **candidate growth material**: design "
-        "elements whose centroid lies inside a box start the run **void**, and "
-        "the optimiser may *add* them where the load path wants — so the design "
-        "can grow material where the original part had none. The box volume must "
-        "be **pre-meshed** into the design part (same `/TETRA4` block, "
-        "node-conformal interface, node ids ≥ design_node_min); a box over "
-        "unmeshed space is an error at run start. Multiple boxes act as a union; "
-        "volume fractions are then relative to the enlarged (part + boxes) space.")
+        "Regions (like the LS-DYNA `*DEFINE_BOX` / Radioss `/BOX/RECTA` family) "
+        "marking **candidate growth material**: design elements whose centroid "
+        "lies inside a region start the run **void**, and the optimiser may *add* "
+        "them where the load path wants — so the design can grow material where "
+        "the original part had none. Pick a **shape** per row and fill only that "
+        "shape's coordinates: `box` uses the six `*_min`/`*_max` bounds, `sphere` "
+        "uses `cx,cy,cz` + `radius`, `cylinder` uses the two axis end-points "
+        "`x1,y1,z1`–`x2,y2,z2` + `radius`. The region volume must be **pre-meshed** "
+        "into the design part (same `/TETRA4` block, node-conformal interface, "
+        "node ids ≥ design_node_min); a region over unmeshed space is an error at "
+        "run start. Multiple regions act as a union; volume fractions are then "
+        "relative to the enlarged (part + regions) space. (Oriented/local-frame "
+        "boxes and `/BOX/RECTA` deck references are set in the YAML.)")
+    _num_cols = [c for c in BOX_COLUMNS if c not in ("name", "shape")]
     gb_df = pd.DataFrame(records_from_growth_boxes(cfg.model.growth_boxes),
                          columns=BOX_COLUMNS)
     gb_edited = st.data_editor(
@@ -404,18 +410,24 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         key="growth_boxes_editor", column_config={
             "name": st.column_config.TextColumn(
                 "Name", help="Label for run-log / validation messages."),
+            "shape": st.column_config.SelectboxColumn(
+                "Shape", options=["box", "sphere", "cylinder"], default="box",
+                help="box = two corners; sphere = centre+radius; "
+                     "cylinder = two axis end-points + radius."),
             **{k: st.column_config.NumberColumn(
                 k, format="%.3f",
-                help="Box bound in model units (e.g. mm). All six are required.")
-               for k in BOX_COLUMNS[1:]},
+                help="Coordinate in model units (e.g. mm); fill the columns "
+                     "the row's shape needs.")
+               for k in _num_cols},
         })
     cfg.model.growth_boxes = growth_boxes_from_records(
         gb_edited.to_dict("records"))
     if cfg.model.growth_boxes:
-        st.info(f"{len(cfg.model.growth_boxes)} growth box(es): their elements "
+        st.info(f"{len(cfg.model.growth_boxes)} growth region(s): their elements "
                 "start void and may be grown into. With BESO, keep "
                 "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
-                "throttled (validation warns otherwise).")
+                "throttled (validation warns otherwise). The Monitor's 3D view "
+                "outlines each region so you can place coordinates visually.")
 
     _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS",
                   "hca": "HCA"}
@@ -671,6 +683,37 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         st.success(f"Saved to {cfg_path}")
 
 
+def _add_growth_overlay(pl, pv, boxes) -> int:
+    """Add a red wireframe outline of each growth region to plotter *pl*.
+
+    Draws the same :func:`~oropt.mesh.overlay_primitives` outlines the report
+    render uses — a box (12 edges), sphere or finite cylinder — so a user can
+    place region coordinates against the live topology instead of blind. Returns
+    the number of regions drawn (0 when none have drawable geometry, e.g. a
+    deck-referenced box whose corners aren't resolved without the deck)."""
+    import numpy as np
+    drawn = 0
+    for pr in overlay_primitives(boxes):
+        kind = pr["kind"]
+        if kind == "box":
+            pts = np.asarray(pr["corners"], dtype=float)
+            lines = np.hstack([[2, i, j] for i, j in pr["edges"]]).astype(int)
+            mesh = pv.PolyData(pts, lines=lines)
+        elif kind == "sphere":
+            mesh = pv.Sphere(radius=pr["radius"], center=pr["center"])
+        else:                                        # cylinder
+            p1 = np.asarray(pr["p1"], dtype=float)
+            p2 = np.asarray(pr["p2"], dtype=float)
+            axis = p2 - p1
+            mesh = pv.Cylinder(center=(p1 + p2) / 2.0, direction=axis,
+                               radius=pr["radius"],
+                               height=float(np.linalg.norm(axis)))
+        pl.add_mesh(mesh, color="red", style="wireframe", line_width=2,
+                    opacity=0.7)
+        drawn += 1
+    return drawn
+
+
 # ---- Monitor tab -----------------------------------------------------------
 def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
     @st.fragment(run_every=refresh_s)
@@ -777,12 +820,19 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
             scal = "sensitivity" if "sensitivity" in grid.cell_data else None
             pl = pv.Plotter(window_size=[700, 450], off_screen=True)
             pl.add_mesh(grid, scalars=scal, cmap="viridis", show_edges=False)
+            # Overlay each growth region as a red wireframe outline so regions can
+            # be placed against the live topology (best-effort; only regions with
+            # resolved geometry are drawn).
+            n_overlay = _add_growth_overlay(pl, pv, cfg.model.growth_boxes)
             pl.view_isometric(); pl.background_color = "white"
             # backend="panel" renders in-process. The default "trame" backend
             # exports the scene from a multiprocessing.Process whose spawned child
             # dies in DuplicateHandle under `streamlit run` on Windows (and would
             # then hang the parent on queue.get()).
             stpyvista(pl, backend="panel", key="topo")
+            if n_overlay:
+                st.caption(f"🟥 {n_overlay} growth region(s) outlined in red — "
+                           "material may grow into these.")
         except Exception as exc:  # noqa: BLE001
             st.caption(f"(3D view unavailable: {exc})")
 

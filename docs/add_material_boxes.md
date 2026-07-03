@@ -270,9 +270,31 @@ Every optimiser's `V0 = mesh.volumes.sum()` becomes the **envelope** volume, so:
   resume-shape guard). Everything is testable without OpenRadioss, matching the
   existing 124-test hermetic suite. Rough size: a few hundred lines including
   tests — comparable to the stress-exclusion feature.
-* **Phase 1.5 (nice-to-have):** box wireframes in Monitor/report renders;
-  "preview boxes" element counts in the GUI; `/BOX/RECTA` deck parsing; cylinder/
-  sphere shapes; local-skew (oriented) boxes.
+* **Phase 1.5 (nice-to-have) — implemented** except the GUI "preview boxes"
+  element-count button:
+  * **Shapes** — `GrowthBox.shape` is `box` (default) / `cylinder` / `sphere`
+    (mirroring `/BOX/RECTA` / `/BOX/CYLIN` / `/BOX/SPHER`). Sphere = centre +
+    radius; cylinder = two axis end-points + radius (finite, capped). The six
+    box bounds are unchanged, so existing box YAMLs parse byte-identically. The
+    centroid-in-primitive tests are one-liners in `mesh.primitive_member`; per-shape
+    required fields are validated in `validate.py`; the GUI table gained a `shape`
+    column with nullable per-shape coordinate columns (`gui/boxes.py` row helpers
+    stay Streamlit-free + unit-tested).
+  * **Oriented (local-system) boxes** — an optional local frame
+    (`origin` + `x_axis` + `xy_axis`, Gram-Schmidt-orthonormalised in
+    `mesh.local_frame_basis`) mirrors `*DEFINE_BOX_LOCAL` -> `/BOX/RECTA` +
+    `/SKEW/FIX`: centroids are transformed into the frame before the bounds test.
+  * **3D overlay** — `mesh.overlay_primitives` emits wireframe-outline descriptors
+    (box edges / sphere / cylinder) drawn over the topology as red wireframe actors
+    in the GUI Monitor's 3D view *and* the report's render (the report render still
+    runs in the isolated off-screen subprocess, so the overlay never risks the
+    headless-CI segfault). So coordinates can be placed visually instead of blind.
+  * **`/BOX/RECTA` deck input** — `Deck.box_recta` parses a `/BOX/RECTA/<id>` card
+    (a `group_nodes`-style helper); a `GrowthBox.deck_box_id` references it and is
+    resolved to concrete corners at run start (`loop.resolve_growth_boxes`), as an
+    alternative to literal coordinates.
+  * *Still open:* a GUI "preview boxes" button that reports each region's element
+    count before a run (needs the deck loaded in the GUI process).
 * **Phase 2 (only if pre-meshing is a proven pain):** auto-generated box mesh +
   `/INTER/TYPE2` tie + adjacency augmentation. Re-evaluate then; today the
   cost/risk is not justified.
