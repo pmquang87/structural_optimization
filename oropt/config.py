@@ -446,32 +446,71 @@ class AnimateOpts:
 
 @dataclass
 class ManufacturingOpts:
-    """Additive-manufacturing (AM) printability constraints applied to the alive
-    mask each iteration, *after* the optimiser's own update (so they work for
-    BESO and the level-set alike). The target part is powder-bed-fusion printed
-    (e.g. AlSi10Mg), so these keep the evolving topology manufacturable.
+    """Manufacturing constraints applied to the alive mask each iteration,
+    *after* the optimiser's own update (so they work for BESO, the level-set,
+    TOBS and HCA alike). The target part is powder-bed-fusion printed
+    (e.g. AlSi10Mg) but may also be cast / extruded, so these keep the evolving
+    topology manufacturable. They are not purely additive — casting and extrusion
+    can add *or* remove material — so the order of application matters.
 
     All fields default to OFF, so existing runs are byte-identical. Applied in
     order by :func:`oropt.manufacturing.apply_manufacturing`:
 
-    1. **Minimum member size** — a morphological *open* (erode then dilate over
-       shared-node element adjacency) deletes thin features / single-element
-       slivers thinner than the structuring element. ``min_member_layers`` is the
-       number of erode/dilate hops (0 = off; 1-2 is typical).
-    2. **Symmetry planes** — force the design symmetric across each plane. Rule:
+    1. **Minimum member size** (TOSCA/OptiStruct MINGAP-style) — a morphological
+       *open* (erode then dilate over shared-node element adjacency) deletes thin
+       features / single-element slivers thinner than the structuring element.
+       ``min_member_layers`` is the number of erode/dilate hops (0 = off; 1-2 is
+       typical). Anti-extensive: only ever removes material.
+    2. **Maximum member size** (OptiStruct MAXDIM) — forbid bulky solid lumps:
+       every alive element must lie within ``max_member_layers`` adjacency hops
+       of a void. Elements deeper than that are carved (least-useful first when a
+       sensitivity field is supplied, else geometrically), punching distributed
+       voids into thick regions while leaving walls of the allowed thickness.
+       0 = off. Protected elements are never carved.
+    3. **Symmetry planes** — force the design symmetric across each plane. Rule:
        *either alive ⇒ both alive* (an element is kept if it or its mirror is
        alive), so symmetry is enforced without over-removing and volume control
        catches up over iterations. Each entry is a mapping
        ``{"axis": "x"|"y"|"z", "offset": <plane coordinate>}``.
-    3. **Overhang / self-support** — along ``build_direction`` forbid any alive
+    4. **Casting / draw direction** (OptiStruct DTPL, TOSCA demold, LS-TaSC
+       casting) — along ``draw_direction`` every column of elements must be free
+       of undercuts so a die can slide out. *Single-sided* (``draw_two_sided =
+       False``): walking up the column, once material ends it may not restart
+       (the solid must be a bottom prefix); solids above the first void are
+       removed. *Two-sided* (``draw_two_sided = True``): the solid must be one
+       contiguous run around a parting surface, so all but the largest run in a
+       column is removed. ``draw_direction = None`` turns it off.
+    5. **Extrusion** (OptiStruct extrusion constraint) — constant cross-section
+       along ``extrusion_axis``: elements are binned into prisms by their
+       projected 2-D footprint and each prism is made uniform by a *majority
+       vote* (a prism is solid iff at least half of its elements are alive; ties
+       kept alive). Majority — rather than symmetry's either-alive ⇒ alive — is
+       used because a full-length prism resurrected from a single stray element
+       would spike volume and fight the optimiser; the vote tracks the design's
+       own intent, and volume control still reconciles over iterations.
+       ``extrusion_axis = None`` turns it off.
+    6. **Overhang / self-support** — along ``build_direction`` forbid any alive
        element that has no solid support within a downward cone of half-angle
        ``max_overhang_angle`` degrees (measured from the build direction); the
-       lowest layer rests on the build plate. ``build_direction = None`` or
+       lowest layer rests on the build plate. Applied *last* so support is judged
+       on the near-final mask. ``build_direction = None`` or
        ``max_overhang_angle <= 0`` turns it off.
+
+    Protected elements (BC/load/keep-out) always survive — they are OR'd back in
+    at the end — so an enabled constraint may leave a residual feature around a
+    protected region (the user's keep-out choice). When several directional
+    constraints are combined they can conflict (e.g. a draw direction that fights
+    a symmetry plane); the later one wins that iteration and volume control
+    reconciles across iterations. Disconnected islands a constraint may create
+    are re-dropped by the caller (:mod:`oropt.loop` via ``mesh.keep_connected``).
     """
     min_member_layers: int = 0
+    max_member_layers: int = 0               # MAXDIM hops-to-void limit; 0 -> off
     # list of {"axis": "x"|"y"|"z", "offset": float}
     symmetry_planes: list = field(default_factory=list)
+    draw_direction: Optional[list] = None    # [x, y, z] casting draw dir; None -> off
+    draw_two_sided: bool = False             # False = single-sided prefix; True = one run around a parting surface
+    extrusion_axis: Optional[list] = None    # [x, y, z] constant cross-section axis; None -> off
     build_direction: Optional[list] = None   # [x, y, z]; None -> overhang off
     max_overhang_angle: float = 0.0          # cone half-angle [deg] from build dir; 0 -> off
 

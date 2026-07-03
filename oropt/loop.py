@@ -560,11 +560,14 @@ def run_optimization(cfg: Config, resume: bool = False,
                 ratio = opt.filter_history(ratio, None)
                 update_sens = sens * (1.0 + oc.addback_stress_bias * ratio)
             alive = opt.update(alive, update_sens, target_vf)
-            # Additive-manufacturing printability constraints (min member size,
-            # symmetry, overhang) on the fresh alive mask; re-drop islands a
-            # constraint may have created. No-op unless configured.
+            # Manufacturing constraints (min/max member size, symmetry, casting,
+            # extrusion, overhang) on the fresh alive mask; re-drop islands a
+            # constraint may have created. No-op unless configured. The unbiased
+            # sensitivity guides the max-member carve toward the least-useful
+            # material.
             if manufacturing_active(cfg.manufacturing):
-                alive = apply_manufacturing(alive, mesh, cfg.manufacturing, protected)
+                alive = apply_manufacturing(alive, mesh, cfg.manufacturing,
+                                            protected, sensitivity=sens)
                 alive = mesh.keep_connected(alive, anchor)
             st.save_checkpoint(work, it + 1, alive, sens_prev)
         else:
