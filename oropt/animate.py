@@ -143,7 +143,7 @@ union = [b[:, 0].min(), b[:, 1].max(),
 _boxes = spec.get("boxes", [])
 
 def _box_bounds(pr):
-    if pr["kind"] == "box":
+    if pr["kind"] in ("box", "polyhedron"):
         pb = np.asarray(pr["corners"], dtype=float)
         return pb.min(0), pb.max(0)
     if pr["kind"] == "sphere":
@@ -162,7 +162,7 @@ for pr in _boxes:
 def _add_boxes(p):
     for pr in _boxes:
         k = pr["kind"]
-        if k == "box":
+        if k in ("box", "polyhedron"):
             pts = np.asarray(pr["corners"], dtype=float)
             lines = np.hstack([[2, i, j] for i, j in pr["edges"]]).astype(int)
             m = pv.PolyData(pts, lines=lines)

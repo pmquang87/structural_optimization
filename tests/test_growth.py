@@ -19,8 +19,9 @@ from oropt.config import (Beso as BesoCfg, Config, GrowthBox,
                           LevelSet as LevelSetCfg, LoadCase, Model,
                           TobsOpts as TobsCfg, unknown_keys)
 from oropt.deck import Deck
-from oropt.gui.boxes import (apply_frame_records, growth_boxes_from_records,
-                            records_from_frames, records_from_growth_boxes)
+from oropt.gui.boxes import (apply_frame_records, apply_point_records,
+                            growth_boxes_from_records, records_from_frames,
+                            records_from_growth_boxes, records_from_points)
 from oropt.levelset import LevelSet
 from oropt.loop import (growth_candidate_mask, preview_growth_boxes,
                         resolve_growth_boxes)
@@ -617,6 +618,256 @@ def test_app_growth_preview_button(tmp_path):
     assert not at.exception
     btns = [b for b in at.button if b.key == "growth_preview"]
     assert btns, "preview button should render when regions are configured"
+    before = len(at.dataframe)
+    btns[0].click().run()
+    assert not at.exception
+    assert len(at.dataframe) > before           # the per-region count table rendered
+
+
+# =====================================================================
+# Polyhedron regions: arbitrary explicit node sets (convex-hull membership)
+# =====================================================================
+
+# The unit tetrahedron as an explicit 4-node point set.
+_TET_POINTS = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+               [0.0, 0.0, 1.0]]
+# A warped 8-node brick (a hexahedron no box/oriented-box can express): the top
+# face is shrunk and shifted, so every "wall" is skew.
+_BRICK_POINTS = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0],
+                 [0.0, 2.0, 0.0], [0.4, 0.5, 1.5], [1.8, 0.3, 1.6],
+                 [1.7, 1.6, 1.4], [0.3, 1.8, 1.5]]
+# Tetra region enclosing GROWTH_DECK e2's centroid (.5,.5,.5) and nothing else.
+POLY_E2 = GrowthBox(name="p2", shape="polyhedron",
+                    points=[[0.3, 0.3, 0.3], [1.0, 0.4, 0.4],
+                            [0.4, 1.0, 0.4], [0.4, 0.4, 1.0]])
+
+
+# ---- config schema -----------------------------------------------------------
+def test_growth_polyhedron_yaml_roundtrip(tmp_path):
+    cfg = Config.from_dict({"model": {"growth_boxes": [
+        {"name": "wedge", "shape": "polyhedron", "points": _TET_POINTS}]}})
+    b = cfg.model.growth_boxes[0]
+    assert b.shape_kind() == "polyhedron"
+    assert b.points == _TET_POINTS
+    p = tmp_path / "c.yaml"
+    cfg.to_yaml(p)
+    assert Config.from_yaml(p).model.growth_boxes == cfg.model.growth_boxes
+
+
+def test_unknown_keys_points_known_and_typo_flagged():
+    data = {"model": {"growth_boxes": [
+        {"name": "w", "shape": "polyhedron", "pointz": _TET_POINTS}]}}
+    bad = unknown_keys(data)
+    assert "model.growth_boxes[0].pointz" in bad
+    assert "model.growth_boxes[0].points" not in bad
+    assert "model.growth_boxes[0].shape" not in bad
+
+
+# ---- convex-hull centroid membership ------------------------------------------
+def test_in_boxes_mask_polyhedron_tet_inside_vertex_outside():
+    m = _mesh_at([[0.2, 0.2, 0.2],    # inside
+                  [0.0, 0.0, 0.0],    # on a vertex -> inside (inclusive)
+                  [1.0, 1.0, 1.0],    # outside the hull
+                  [-0.1, 0.2, 0.2]])  # just outside a face
+    poly = GrowthBox(shape="polyhedron", points=_TET_POINTS)
+    assert m.in_boxes_mask([poly]).tolist() == [True, True, False, False]
+
+
+def test_in_boxes_mask_polyhedron_warped_brick():
+    m = _mesh_at([[1.0, 1.0, 0.7],    # deep inside the warped brick
+                  [1.0, 1.0, 1.7],    # above the shrunk top face -> outside
+                  [2.1, 2.1, 0.1]])   # outside the base footprint
+    poly = GrowthBox(shape="polyhedron", points=_BRICK_POINTS)
+    assert m.in_boxes_mask([poly]).tolist() == [True, False, False]
+
+
+def test_in_boxes_mask_polyhedron_nonconvex_set_is_its_hull():
+    """Documented semantics: a non-convex point set (an L-prism's corners) is
+    treated as its convex hull -- the notch is inside the region."""
+    l_shape = [[x, y, z] for z in (0.0, 1.0)
+               for x, y in [(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)]]
+    m = _mesh_at([[1.3, 1.3, 0.5],    # in the notch (outside the L, inside hull)
+                  [0.5, 0.5, 0.5],    # inside the L proper
+                  [2.5, 2.5, 0.5]])   # outside even the hull
+    poly = GrowthBox(shape="polyhedron", points=l_shape)
+    assert m.in_boxes_mask([poly]).tolist() == [True, True, False]
+
+
+def test_in_boxes_mask_polyhedron_degenerate_or_missing_selects_nothing():
+    m = _mesh_at([[0.2, 0.2, 0.0]])
+    coplanar = GrowthBox(shape="polyhedron", points=[
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]])
+    too_few = GrowthBox(shape="polyhedron", points=_TET_POINTS[:3])
+    absent = GrowthBox(shape="polyhedron")
+    for poly in (coplanar, too_few, absent):
+        assert not m.in_boxes_mask([poly]).any()
+
+
+# ---- run-start guards ----------------------------------------------------------
+def test_candidate_mask_polyhedron_shape(tmp_path):
+    deck, mesh = _load(tmp_path)
+    mask = growth_candidate_mask(deck, mesh, Model(growth_boxes=[POLY_E2]),
+                                 log=_silent)
+    assert mask.tolist() == [False, True, False, False]
+
+
+def test_preview_growth_boxes_polyhedron(tmp_path):
+    deck, mesh = _load(tmp_path)
+    pv = preview_growth_boxes(deck, mesh, Model(growth_boxes=[POLY_E2]))
+    assert [(r.name, r.shape, r.count, r.note) for r in pv.rows] == [
+        ("p2", "polyhedron", 1, "")]
+    assert pv.guard == "" and pv.total_candidates == 1
+
+
+# ---- validation -----------------------------------------------------------------
+def test_validate_polyhedron_requires_points():
+    probs = _growth_problems(_cfg([GrowthBox(name="w", shape="polyhedron")]))
+    assert any(p.startswith("error") and "'w'" in p and "points" in p
+               for p in probs)
+
+
+def test_validate_polyhedron_too_few_points():
+    bad = GrowthBox(name="w", shape="polyhedron", points=_TET_POINTS[:3])
+    assert any(p.startswith("error") and "at least 4" in p
+               for p in _growth_problems(_cfg([bad])))
+
+
+def test_validate_polyhedron_malformed_and_nonfinite_point():
+    two_d = GrowthBox(name="w", shape="polyhedron",
+                      points=[[0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+                              [0.0, 0.0, 1.0]])
+    probs = _growth_problems(_cfg([two_d]))
+    assert any(p.startswith("error") and "point #1" in p for p in probs)
+    nan = GrowthBox(name="w", shape="polyhedron",
+                    points=[[0.0, 0.0, float("nan")], [1.0, 0.0, 0.0],
+                            [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    assert any(p.startswith("error") and "finite" in p
+               for p in _growth_problems(_cfg([nan])))
+
+
+def test_validate_polyhedron_degenerate_hull():
+    flat = GrowthBox(name="w", shape="polyhedron", points=[
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]])
+    assert any(p.startswith("error") and "'w'" in p and "no volume" in p
+               for p in _growth_problems(_cfg([flat])))
+    dup = GrowthBox(name="w", shape="polyhedron",
+                    points=[[1.0, 1.0, 1.0]] * 4)
+    assert any(p.startswith("error") and "no volume" in p
+               for p in _growth_problems(_cfg([dup])))
+
+
+def test_validate_valid_polyhedron_silent():
+    ok = GrowthBox(name="ok", shape="polyhedron", points=_BRICK_POINTS)
+    # tobs avoids beso's unrelated max_add_ratio warning
+    assert _growth_problems(_cfg([ok], optimizer="tobs")) == []
+
+
+def test_validate_points_on_non_polyhedron_shape_warns():
+    b = GrowthBox(name="b", shape="sphere", cx=0.0, cy=0.0, cz=0.0, radius=1.0,
+                  points=_TET_POINTS)
+    assert any(p.startswith("warning") and "'polyhedron'" in p
+               for p in _growth_problems(_cfg([b])))
+
+
+# ---- 3D-overlay wireframe --------------------------------------------------------
+def test_overlay_primitives_polyhedron_hull_edges():
+    poly = GrowthBox(name="w", shape="polyhedron", points=_TET_POINTS)
+    [pr] = overlay_primitives([poly])
+    assert pr["kind"] == "polyhedron" and pr["name"] == "w"
+    assert pr["corners"] == _TET_POINTS
+    assert len(pr["edges"]) == 6                    # a tetrahedron has 6 edges
+    assert all(0 <= i < 4 and 0 <= j < 4 and i != j for i, j in pr["edges"])
+
+
+def test_overlay_primitives_polyhedron_interior_point_unreferenced():
+    # an interior point contributes no hull edge -- only the hull is drawn
+    poly = GrowthBox(name="w", shape="polyhedron",
+                     points=_TET_POINTS + [[0.1, 0.1, 0.1]])
+    [pr] = overlay_primitives([poly])
+    assert len(pr["corners"]) == 5
+    assert all(4 not in e for e in pr["edges"])
+
+
+def test_overlay_primitives_polyhedron_degenerate_skipped():
+    flat = GrowthBox(shape="polyhedron", points=[
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]])
+    assert overlay_primitives([flat, GrowthBox(shape="polyhedron")]) == []
+
+
+# ---- GUI row helpers ---------------------------------------------------------------
+def test_gui_polyhedron_main_row_roundtrip():
+    """The main table carries only name+shape for a polyhedron (its node list
+    lives in the points table); the row survives the record round-trip."""
+    poly = GrowthBox(name="w", shape="polyhedron", points=_TET_POINTS)
+    [rec] = records_from_growth_boxes([poly])
+    assert rec["shape"] == "polyhedron"
+    assert all(rec[k] is None for k in rec if k not in ("name", "shape"))
+    [back] = growth_boxes_from_records([rec])
+    assert back.shape_kind() == "polyhedron" and back.name == "w"
+    assert back.points is None                     # re-attached by the points table
+    assert apply_point_records([back], records_from_points([poly])) == [poly]
+
+
+def test_gui_point_records_roundtrip_and_non_polyhedron_untouched():
+    boxes = [GrowthBox(name="w", shape="polyhedron", points=_TET_POINTS),
+             GrowthBox(name="ball", shape="sphere", cx=0.0, cy=0.0, cz=0.0,
+                       radius=1.0)]
+    recs = records_from_points(boxes)
+    assert [r["name"] for r in recs] == ["w"] * 4       # sphere contributes none
+    assert apply_point_records(boxes, recs) == boxes
+
+
+def test_gui_point_records_incomplete_rows_dropped_never_defaulted():
+    rows = [{"name": "w", "x": 0.0, "y": 0.0, "z": 0.0},
+            {"name": "w", "x": 1.0, "y": None, "z": 0.0},     # missing y -> dropped
+            {"name": "w", "x": 2.0, "y": 2.0, "z": 2.0},
+            {"name": None, "x": None, "y": None, "z": None}]  # editor's blank row
+    [b] = apply_point_records(
+        [GrowthBox(name="w", shape="polyhedron")], rows)
+    assert b.points == [[0.0, 0.0, 0.0], [2.0, 2.0, 2.0]]
+
+
+def test_gui_point_records_unmatched_kept_and_all_blank_clears():
+    poly = GrowthBox(name="w", shape="polyhedron", points=_TET_POINTS)
+    # no row names this region -> its points are untouched
+    assert apply_point_records([poly], [
+        {"name": "other", "x": 0.0, "y": 0.0, "z": 0.0}]) == [poly]
+    # rows for the region, none complete -> points cleared
+    [cleared] = apply_point_records([poly], [
+        {"name": "w", "x": None, "y": None, "z": None}])
+    assert cleared.points is None
+
+
+def test_gui_points_seed_blank_row_for_new_polyhedron():
+    fresh = GrowthBox(name="new", shape="polyhedron")
+    [row] = records_from_points([fresh])
+    assert row["name"] == "new" and row["x"] is None
+    assert apply_point_records([fresh], [row]) == [fresh]
+
+
+def test_app_polyhedron_preview_counts(tmp_path):
+    """End-to-end GUI wiring: a polyhedron region survives the main table +
+    points-table round-trip and the preview button counts its elements."""
+    import oropt
+    from pathlib import Path
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+
+    (tmp_path / "gp_0000.rad").write_text(GROWTH_DECK, encoding="utf-8")
+    cfg = Config()
+    cfg.model.case_dir = str(tmp_path)
+    cfg.work_dir = str(tmp_path / "work")
+    cfg.load_cases = [LoadCase(name="a", stem="gp", sigma_allow=1.0)]
+    cfg.model.growth_boxes = [POLY_E2]
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg.to_yaml(cfg_path)
+
+    app_file = Path(oropt.__file__).resolve().parent / "gui" / "app.py"
+    at = AppTest.from_file(str(app_file), default_timeout=60)
+    at.run()
+    at.sidebar.text_input[0].set_value(str(cfg_path)).run()
+    assert not at.exception
+    btns = [b for b in at.button if b.key == "growth_preview"]
+    assert btns, "preview button should render for a polyhedron region"
     before = len(at.dataframe)
     btns[0].click().run()
     assert not at.exception

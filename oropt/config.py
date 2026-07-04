@@ -102,6 +102,12 @@ class GrowthBox:
       (``/BOX/SPHER``).
     * ``"cylinder"`` — two axis end-points (:attr:`x1`/… and :attr:`x2`/…) +
       :attr:`radius`, a *finite* cylinder capped at both ends (``/BOX/CYLIN``).
+    * ``"polyhedron"`` — an arbitrary user-defined node set: :attr:`points` is a
+      list of ``[x, y, z]`` rows (>= 4, every node giving all three coordinates
+      explicitly — no defaults, no inference). Membership is centroid inside the
+      **convex hull** of the points, so an arbitrary warped 8-node brick is the
+      convex case; a non-convex point set is treated as its hull. Coplanar or
+      duplicate points make the hull zero-volume — a validation error.
 
     Instead of literal coordinates a box may reference a ``/BOX/RECTA`` card in the
     starter deck by id (:attr:`deck_box_id`); its two corners are read from the deck
@@ -110,7 +116,7 @@ class GrowthBox:
     coordinates its shape needs and existing box-only YAMLs parse unchanged.
     """
     name: str = ""
-    shape: str = "box"                # "box" | "cylinder" | "sphere"
+    shape: str = "box"                # "box" | "cylinder" | "sphere" | "polyhedron"
     # --- box: two opposite corners (also the bounds of an oriented/local box) ---
     x_min: float = 0.0
     x_max: float = 0.0
@@ -130,6 +136,8 @@ class GrowthBox:
     x2: float = 0.0
     y2: float = 0.0
     z2: float = 0.0
+    # --- polyhedron: arbitrary node set, [[x, y, z], ...] (>= 4 rows) ---
+    points: Optional[list] = None
     # --- optional local frame for shape="box" (LS-DYNA *DEFINE_BOX_LOCAL) ---
     # origin + a +x-axis direction + a vector in the +xy plane; Gram-Schmidt
     # orthonormalised into a skew system the box bounds are measured in. Leave the
@@ -142,7 +150,8 @@ class GrowthBox:
     deck_box_id: Optional[int] = None  # resolved to x_min..z_max at run start
 
     def shape_kind(self) -> str:
-        """Normalised shape selector: ``"box"``, ``"sphere"`` or ``"cylinder"``."""
+        """Normalised shape selector: ``"box"``, ``"sphere"``, ``"cylinder"`` or
+        ``"polyhedron"``."""
         return (self.shape or "box").strip().lower()
 
     def has_local_frame(self) -> bool:

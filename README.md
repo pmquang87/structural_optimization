@@ -311,8 +311,13 @@ in progress.
   step (validation warns otherwise).
 
   Each region carries a **`shape`** — `box` (default; two opposite corners),
-  `sphere` (centre + `radius`) or `cylinder` (two axis end-points + `radius`,
-  finite/capped) — mirroring `/BOX/RECTA` · `/BOX/SPHER` · `/BOX/CYLIN`. A `box`
+  `sphere` (centre + `radius`), `cylinder` (two axis end-points + `radius`,
+  finite/capped) — mirroring `/BOX/RECTA` · `/BOX/SPHER` · `/BOX/CYLIN` — or
+  **`polyhedron`**: an arbitrary user-defined node set (`points:
+  [[x, y, z], ...]`, ≥ 4 nodes, every coordinate explicit — no defaults, no
+  inference); the region is the points' **convex hull** (an arbitrary warped
+  8-node brick is the convex case; a non-convex point set is treated as its
+  hull, and coplanar/duplicate points are a validation error). A `box`
   may be **oriented** by a local frame (`origin` + a local `x_axis` + an
   `xy_axis` vector, Gram-Schmidt-orthonormalised, like `*DEFINE_BOX_LOCAL` →
   `/BOX/RECTA` + `/SKEW/FIX`), so its bounds are measured in a skew system.
@@ -322,8 +327,9 @@ in progress.
   concrete geometry at run start.
 
   Editable as a table on the GUI's *Optimiser / Output* tab (shape selector,
-  per-shape coordinate columns, a Deck /BOX id column, and an *Oriented box
-  frames* editor); a **🔍 Preview region element counts** button loads the deck
+  per-shape coordinate columns, a Deck /BOX id column, an *Oriented box
+  frames* editor, and a *Polyhedron points* editor — one x/y/z row per node,
+  matched to its region by Name); a **🔍 Preview region element counts** button loads the deck
   and reports, per region, how many elements it would void plus the run-start
   guard verdict — before committing to a run. Every region is drawn as a
   **red wireframe outline** over the 3D topology in the *Monitor*, the
@@ -360,6 +366,12 @@ in progress.
       # sphere (centre + radius) and finite cylinder (two axis end-points + radius)
       - {name: boss,     shape: sphere,   cx: 0.0, cy: 0.0, cz: 30.0, radius: 8.0}
       - {name: pin,      shape: cylinder, x1: -20.0, y1: 0.0, z1: 0.0, x2: 20.0, y2: 0.0, z2: 0.0, radius: 4.0}
+      # polyhedron: arbitrary explicit node set (>= 4, all coordinates given) -> convex hull
+      # of the points; here a warped 8-node brick
+      - name: wedge
+        shape: polyhedron
+        points: [[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [30.0, 10.0, 0.0], [0.0, 10.0, 0.0],
+                 [5.0, 2.0, 12.0], [25.0, 2.0, 12.0], [25.0, 8.0, 12.0], [5.0, 8.0, 12.0]]
       # oriented box: bounds measured in the local frame (origin + x-axis + xy-plane vector)
       - {name: skew_rib, shape: box, x_min: 0.0, x_max: 30.0, y_min: -4.0, y_max: 4.0, z_min: -4.0, z_max: 4.0,
          origin: [10.0, 0.0, 0.0], x_axis: [1.0, 1.0, 0.0], xy_axis: [-1.0, 1.0, 0.0]}

@@ -293,6 +293,18 @@ Every optimiser's `V0 = mesh.volumes.sum()` becomes the **envelope** volume, so:
     required fields are validated in `validate.py`; the GUI table gained a `shape`
     column with nullable per-shape coordinate columns (`gui/boxes.py` row helpers
     stay Streamlit-free + unit-tested).
+  * **Polyhedron regions** (added after phase 2) — `shape: polyhedron` defines a
+    region by an **arbitrary explicit node set** (`points: [[x, y, z], ...]`,
+    ≥ 4 nodes, every coordinate given — no defaults, no inference); membership is
+    centroid inside the **convex hull** of the points
+    (`scipy.spatial.Delaunay(points).find_simplex(centroids) >= 0`), so an
+    arbitrary warped 8-node brick is the convex case and a non-convex point set
+    is treated as its hull. Coplanar/duplicate points (zero-volume hull) are a
+    validation error. The overlay draws the hull's edges
+    (`scipy.spatial.ConvexHull`); `growthmesh.region_bounds` uses `points.min/max`
+    so the phase-2 generator works unchanged. In the GUI the node list gets its
+    own name-keyed table (one x/y/z row per node, dynamic rows — the oriented-frame
+    pattern), since N points don't fit the fixed-column region table.
   * **Oriented (local-system) boxes** — an optional local frame
     (`origin` + `x_axis` + `xy_axis`, Gram-Schmidt-orthonormalised in
     `mesh.local_frame_basis`) mirrors `*DEFINE_BOX_LOCAL` -> `/BOX/RECTA` +
