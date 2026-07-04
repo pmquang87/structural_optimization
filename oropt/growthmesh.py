@@ -155,7 +155,8 @@ def build_plc(surf_points: np.ndarray, surf_tris: np.ndarray,
 
 def region_bounds(boxes) -> tuple[np.ndarray, np.ndarray]:
     """Loose AABB ``(lo, hi)`` over resolved growth regions (all shapes;
-    oriented boxes via their world-space corners)."""
+    oriented boxes via their world-space corners, polyhedra via their explicit
+    node set)."""
     los, his = [], []
     for b in boxes:
         kind = b.shape_kind()
@@ -166,6 +167,9 @@ def region_bounds(boxes) -> tuple[np.ndarray, np.ndarray]:
             p = np.array([[b.x1, b.y1, b.z1], [b.x2, b.y2, b.z2]], dtype=float)
             los.append(p.min(axis=0) - b.radius)
             his.append(p.max(axis=0) + b.radius)
+        elif kind == "polyhedron":
+            p = np.asarray(b.points, dtype=float)
+            los.append(p.min(axis=0)); his.append(p.max(axis=0))
         else:
             c = box_corners(b)
             los.append(c.min(axis=0)); his.append(c.max(axis=0))

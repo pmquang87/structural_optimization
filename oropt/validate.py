@@ -14,6 +14,7 @@ shared verbatim with :func:`oropt.runner.run_solver` (see
 """
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ ERROR = "error"
 WARNING = "warning"
 
 VALID_OPTIMIZERS = ("beso", "levelset", "tobs", "hca")
-VALID_GROWTH_SHAPES = ("box", "cylinder", "sphere")
+VALID_GROWTH_SHAPES = ("box", "cylinder", "sphere", "polyhedron")
 
 
 def _is_vec3(v) -> bool:
@@ -44,6 +45,34 @@ def _parallel(a, b) -> bool:
     cz = a[0] * b[1] - a[1] * b[0]
     scale = max(abs(x) for x in a) * max(abs(x) for x in b)
     return max(abs(cx), abs(cy), abs(cz)) <= 1e-9 * max(scale, 1.0)
+
+
+def _check_polyhedron_points(b, label, err) -> None:
+    """Validate a polyhedron region's explicit node set: a list of >= 4 points,
+    every point all three coordinates as finite numbers (no defaults, no
+    inference), spanning a non-degenerate (positive-volume) convex hull."""
+    pts = b.points
+    if not isinstance(pts, (list, tuple)) or len(pts) == 0:
+        err(f"growth box {label!r}: shape 'polyhedron' needs a points list "
+            "[[x, y, z], ...] giving every node's coordinates explicitly")
+        return
+    for i, p in enumerate(pts):
+        if not _is_vec3(p) or not all(math.isfinite(float(v)) for v in p):
+            err(f"growth box {label!r}: polyhedron point #{i + 1} must be 3 "
+                f"finite numbers [x, y, z]: got {p!r}")
+            return
+    if len(pts) < 4:
+        err(f"growth box {label!r}: a polyhedron needs at least 4 points to "
+            f"enclose a volume: got {len(pts)}")
+        return
+    # scipy locally: only paid when a polyhedron region is actually configured
+    from scipy.spatial import ConvexHull, QhullError
+    try:
+        ConvexHull(pts)
+    except QhullError:
+        err(f"growth box {label!r}: the polyhedron points are degenerate "
+            "(coplanar or duplicated) -- their convex hull encloses no volume, "
+            "so the region would select no elements")
 
 
 def _check_local_frame(b, label, err, warn) -> None:
@@ -277,6 +306,11 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             if (b.x1, b.y1, b.z1) == (b.x2, b.y2, b.z2):
                 err(f"growth box {label!r}: cylinder axis end-points are "
                     "identical (zero-length axis)")
+        elif kind == "polyhedron":
+            _check_polyhedron_points(b, label, err)
+        if kind != "polyhedron" and b.points:
+            warn(f"growth box {label!r}: 'points' is only used by shape "
+                 f"'polyhedron' -- ignored for shape {kind!r}")
     if boxes and cfg.optimizer_name() == "beso" \
             and cfg.beso.max_add_ratio < cfg.beso.evolution_rate:
         warn(f"growth boxes with beso.max_add_ratio={cfg.beso.max_add_ratio} < "

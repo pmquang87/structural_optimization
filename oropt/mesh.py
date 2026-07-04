@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
-from scipy.spatial import cKDTree
+from scipy.spatial import ConvexHull, Delaunay, QhullError, cKDTree
 
 from .deck import Deck
 
@@ -91,17 +91,48 @@ def _cylinder_member(c: np.ndarray, box) -> np.ndarray:
     return (t >= 0.0) & (t <= 1.0) & (radial2 <= float(box.radius) ** 2)
 
 
+def _polyhedron_points(box) -> np.ndarray | None:
+    """The polyhedron's node set as a float ``(P, 3)`` array, or ``None`` when
+    absent/malformed (fewer than 4 rows, or a row that is not 3 numbers)."""
+    raw = getattr(box, "points", None)
+    if not raw:
+        return None
+    try:
+        pts = np.asarray(raw, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if pts.ndim != 2 or pts.shape[0] < 4 or pts.shape[1] != 3:
+        return None
+    return pts
+
+
+def _polyhedron_member(c: np.ndarray, box) -> np.ndarray:
+    pts = _polyhedron_points(box)
+    if pts is None:
+        return np.zeros(c.shape[0], dtype=bool)
+    try:
+        hull = Delaunay(pts)
+    except QhullError:                  # coplanar/duplicate -> zero-volume hull
+        return np.zeros(c.shape[0], dtype=bool)
+    return hull.find_simplex(c) >= 0
+
+
 def primitive_member(centroids: np.ndarray, box) -> np.ndarray:
     """Boolean mask of *centroids* inside a single growth region *box*.
 
     Dispatches on ``box.shape_kind()``: a rectangular box (axis-aligned, or in the
-    box's local frame when one is set), a sphere (centre + radius) or a finite
-    cylinder (two axis end-points + radius). Bounds are inclusive."""
+    box's local frame when one is set), a sphere (centre + radius), a finite
+    cylinder (two axis end-points + radius) or a polyhedron (the convex hull of an
+    arbitrary explicit node set — a non-convex point set is treated as its hull).
+    Bounds are inclusive; a degenerate region (zero-length cylinder axis,
+    zero-volume hull) selects nothing."""
     kind = box.shape_kind()
     if kind == "sphere":
         return _sphere_member(centroids, box)
     if kind == "cylinder":
         return _cylinder_member(centroids, box)
+    if kind == "polyhedron":
+        return _polyhedron_member(centroids, box)
     return _box_member(centroids, box)
 
 
@@ -122,18 +153,35 @@ def box_corners(box) -> np.ndarray:
     return local
 
 
+def polyhedron_hull_edges(points: np.ndarray) -> list[list[int]] | None:
+    """Unique convex-hull edges of *points* as ``[i, j]`` index pairs (into
+    *points*), or ``None`` for a degenerate (zero-volume) hull. Interior points
+    appear in no edge — the wireframe is the hull's facet boundary."""
+    try:
+        hull = ConvexHull(points)
+    except QhullError:
+        return None
+    edges = {tuple(sorted((s[k], s[(k + 1) % 3])))
+             for s in hull.simplices for k in range(3)}
+    return [list(e) for e in sorted(edges)]
+
+
 def overlay_primitives(boxes) -> list[dict]:
     """JSON-serialisable wireframe-outline descriptors for the growth regions.
 
     One dict per region, consumed identically by the GUI Monitor's in-process
     pyvista overlay and the report's isolated render subprocess:
 
-    * box      -> ``{"kind": "box", "name", "corners": [[x,y,z]*8], "edges": [[i,j]*12]}``
-    * sphere   -> ``{"kind": "sphere", "name", "center": [x,y,z], "radius": r}``
-    * cylinder -> ``{"kind": "cylinder", "name", "p1", "p2", "radius": r}``
+    * box        -> ``{"kind": "box", "name", "corners": [[x,y,z]*8], "edges": [[i,j]*12]}``
+    * sphere     -> ``{"kind": "sphere", "name", "center": [x,y,z], "radius": r}``
+    * cylinder   -> ``{"kind": "cylinder", "name", "p1", "p2", "radius": r}``
+    * polyhedron -> ``{"kind": "polyhedron", "name", "corners": [[x,y,z]*P], "edges": [[i,j]*E]}``
+      (the same corners+edges structure as a box, with the edges of the points'
+      convex hull, so every consumer draws it with the box code path)
 
     Regions with no drawable geometry are skipped: a zero-radius sphere/cylinder,
-    a zero-length cylinder axis, a zero-size box, and a box still referencing a
+    a zero-length cylinder axis, a zero-size box, a polyhedron with a missing/
+    degenerate (zero-volume-hull) point set, and a box still referencing a
     ``deck_box_id`` (its corners are only known once the deck is loaded)."""
     out: list[dict] = []
     for b in boxes or []:
@@ -148,6 +196,12 @@ def overlay_primitives(boxes) -> list[dict]:
             if float(b.radius) > 0.0 and p1 != p2:
                 out.append({"kind": "cylinder", "name": b.name,
                             "p1": p1, "p2": p2, "radius": float(b.radius)})
+        elif kind == "polyhedron":
+            pts = _polyhedron_points(b)
+            edges = polyhedron_hull_edges(pts) if pts is not None else None
+            if edges is not None:
+                out.append({"kind": "polyhedron", "name": b.name,
+                            "corners": pts.tolist(), "edges": edges})
         else:                                            # box
             if getattr(b, "deck_box_id", None) is not None:
                 continue                                 # corners not yet resolved
@@ -212,8 +266,8 @@ class Mesh:
         candidate set. Union over the regions (inclusive bounds); an empty/None
         list returns all-False. Each region is a
         :class:`~oropt.config.GrowthBox`; its ``shape`` ("box" / "sphere" /
-        "cylinder", plus an optional local frame for a box) selects the
-        centroid-in-primitive test (see :func:`primitive_member`).
+        "cylinder" / "polyhedron", plus an optional local frame for a box)
+        selects the centroid-in-primitive test (see :func:`primitive_member`).
         """
         mask = np.zeros(self.n_elements, dtype=bool)
         for b in boxes or []:

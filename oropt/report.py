@@ -69,7 +69,7 @@ _OVERLAY_SNIPPET = (
     "        return\n"
     "    for pr in json.loads(open(argv[3], encoding='utf-8').read()):\n"
     "        k = pr['kind']\n"
-    "        if k == 'box':\n"
+    "        if k in ('box', 'polyhedron'):\n"
     "            pts = np.asarray(pr['corners'], dtype=float)\n"
     "            lines = np.hstack([[2, i, j] for i, j in pr['edges']]).astype(int)\n"
     "            m = pv.PolyData(pts, lines=lines)\n"

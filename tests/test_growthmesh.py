@@ -143,6 +143,13 @@ def test_region_bounds_all_shapes():
     assert np.allclose(hi, [3.25, 1.5, 1.5])
 
 
+def test_region_bounds_polyhedron_points_min_max():
+    lo, hi = region_bounds([GrowthBox(shape="polyhedron", points=[
+        [-0.5, 0.0, 0.25], [1.0, -2.0, 0.0], [0.0, 3.0, 0.5], [0.5, 0.5, 4.0]])])
+    assert np.allclose(lo, [-0.5, -2.0, 0.0])
+    assert np.allclose(hi, [1.0, 3.0, 4.0])
+
+
 # ---- classification geometry ---------------------------------------------------
 def test_points_in_tets_inside_boundary_outside():
     tet = np.array([[[0., 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]])
@@ -281,6 +288,25 @@ def test_prepare_pipeline_hermetic(tmp_path, mini_engine_path):
     # node-ordering convention: new elements share the part's positive sign
     xyz = ext.node_xyz[Mesh.from_deck(ext).conn_rows]
     assert (signed_volumes(xyz[new_rows]) > 0).all()
+
+
+def test_prepare_pipeline_hermetic_polyhedron_region(tmp_path, mini_engine_path):
+    """The PREPARE step works unchanged with a polyhedron region: the WING box
+    volume expressed as an explicit 8-node point set selects the same fabricated
+    candidates (region_bounds feeds the PLC AABB, primitive_member classifies)."""
+    _write_mini(tmp_path)
+    poly_wing = GrowthBox(name="pwing", shape="polyhedron", points=[
+        [x, y, z] for x in (-1.0, -0.001) for y in (-0.5, 1.5)
+        for z in (-0.5, 1.5)])
+    cfg = _mini_cfg(tmp_path, [poly_wing])
+    rep = prepare_growth_mesh(cfg, backend=_fake_backend, log=_silent)
+    assert rep.n_new_elems == 2 and rep.n_new_nodes == 2
+    assert rep.per_region == [("pwing", 2)]
+    ext = Deck.load(tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad",
+                    60000000, 60000000)
+    mask = growth_candidate_mask(ext, Mesh.from_deck(ext), cfg.model,
+                                 log=_silent)
+    assert int(mask.sum()) == rep.total_candidates == 2
 
 
 def test_prepare_dry_run_writes_nothing(tmp_path):

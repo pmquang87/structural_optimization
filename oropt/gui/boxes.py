@@ -19,6 +19,13 @@ The **oriented-box frame** (origin / local +x axis / in-plane vector) is edited 
 a separate, narrower table keyed by region name (:func:`records_from_frames` /
 :func:`apply_frame_records`) because a 3-vector doesn't fit a single numeric
 column; a frame only applies to a ``box`` shape.
+
+A **polyhedron**'s node list doesn't fit the fixed-column main table either
+(N points of 3 coordinates each), so it is edited in its own name-keyed table —
+one ``x``/``y``/``z`` row per node, dynamic rows (:func:`records_from_points` /
+:func:`apply_point_records`). Its main-table row carries only ``name`` +
+``shape``; every coordinate must be given explicitly in the points table (a row
+missing any coordinate is dropped — no defaults, no inference).
 """
 from __future__ import annotations
 
@@ -27,11 +34,14 @@ import dataclasses
 from oropt.config import GrowthBox
 
 # Coordinate fields required to fully specify each shape (all must be present for
-# the row to become a region). ``name``/``shape``/``deck_box_id`` are handled apart.
+# the row to become a region). ``name``/``shape``/``deck_box_id`` are handled
+# apart. A polyhedron needs no main-table coordinates: its node list lives in the
+# separate points table.
 _REQUIRED: dict[str, list[str]] = {
     "box": ["x_min", "x_max", "y_min", "y_max", "z_min", "z_max"],
     "sphere": ["cx", "cy", "cz", "radius"],
     "cylinder": ["x1", "y1", "z1", "x2", "y2", "z2", "radius"],
+    "polyhedron": [],
 }
 
 # Every numeric column the main table shows (union across shapes), in display order.
@@ -45,6 +55,9 @@ BOX_COLUMNS: list[str] = ["name", "shape", "deck_box_id", *_NUMERIC]
 # Columns of the oriented-frame data-editor: name + origin + local +x + in-plane.
 FRAME_COLUMNS: list[str] = ["name", "ox", "oy", "oz",
                             "ax", "ay", "az", "bx", "by", "bz"]
+
+# Columns of the polyhedron-points data-editor: region name + one node per row.
+POINT_COLUMNS: list[str] = ["name", "x", "y", "z"]
 
 
 def _is_blank(v) -> bool:
@@ -160,5 +173,51 @@ def apply_frame_records(boxes, records) -> list[GrowthBox]:
             origin, x_axis, xy_axis = frames[name]
             b = dataclasses.replace(b, origin=origin, x_axis=x_axis,
                                     xy_axis=xy_axis)
+        out.append(b)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# polyhedron-points table (name -> one x/y/z row per node)
+# --------------------------------------------------------------------------- #
+def records_from_points(boxes) -> list[dict]:
+    """Points-editor rows: one per node of each polyhedron-shaped region,
+    carrying the region's name and that node's ``x``/``y``/``z``. A polyhedron
+    with no points yet gets a single blank row so its name shows up in the
+    table ready to fill in. Other shapes contribute no rows."""
+    out: list[dict] = []
+    for b in boxes:
+        if b.shape_kind() != "polyhedron":
+            continue
+        for p in (b.points or []):
+            out.append({"name": b.name, "x": p[0], "y": p[1], "z": p[2]})
+        if not b.points:
+            out.append({"name": b.name, "x": None, "y": None, "z": None})
+    return out
+
+
+def apply_point_records(boxes, records) -> list[GrowthBox]:
+    """Return *boxes* with each polyhedron-shaped region's points set from the
+    rows matching its name (in row order): one node per row, all of ``x``/``y``/
+    ``z`` required — a row missing any coordinate is dropped, never defaulted. A
+    region whose name appears in no row is returned unchanged; a region whose
+    rows are all incomplete gets ``points=None`` (deleting a region's node rows
+    clears its points). Non-polyhedron regions, and the editor's fully-blank
+    trailing row, are ignored."""
+    pts: dict[str, list] = {}
+    for row in records:
+        blank_name = _is_blank(row.get("name"))
+        v = _vec3(row, ("x", "y", "z"))
+        if blank_name and v is None:
+            continue                    # the dynamic editor's trailing blank row
+        name = "" if blank_name else str(row.get("name")).strip()
+        pts.setdefault(name, [])
+        if v is not None:
+            pts[name].append(v)
+    out: list[GrowthBox] = []
+    for b in boxes:
+        name = b.name or ""
+        if b.shape_kind() == "polyhedron" and name in pts:
+            b = dataclasses.replace(b, points=pts[name] or None)
         out.append(b)
     return out

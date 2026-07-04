@@ -31,9 +31,10 @@ from oropt.animate import (VIEWS as _BUILTIN_VIEWS, frame_count,
 from oropt.config import AnimateOpts, Config, LoadCase
 from oropt.deck import Deck
 from oropt.gui import queue_store as qs
-from oropt.gui.boxes import (BOX_COLUMNS, FRAME_COLUMNS, apply_frame_records,
+from oropt.gui.boxes import (BOX_COLUMNS, FRAME_COLUMNS, POINT_COLUMNS,
+                             apply_frame_records, apply_point_records,
                              growth_boxes_from_records, records_from_frames,
-                             records_from_growth_boxes)
+                             records_from_growth_boxes, records_from_points)
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
@@ -401,7 +402,9 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "the original part had none. Pick a **shape** per row and fill only that "
         "shape's coordinates: `box` uses the six `*_min`/`*_max` bounds, `sphere` "
         "uses `cx,cy,cz` + `radius`, `cylinder` uses the two axis end-points "
-        "`x1,y1,z1`–`x2,y2,z2` + `radius`. The region volume must contain "
+        "`x1,y1,z1`–`x2,y2,z2` + `radius`, `polyhedron` takes an arbitrary node "
+        "list (all coordinates explicit) in the *Polyhedron points* table below — "
+        "its region is the points' convex hull. The region volume must contain "
         "candidate elements: **pre-mesh** it into the design part (same "
         "`/TETRA4` block, node-conformal interface, node ids ≥ design_node_min) "
         "— or **generate** it with the ⚙️ *Generate growth mesh* button below; "
@@ -410,11 +413,13 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "relative to the enlarged (part + regions) space. A row may reference a "
         "`/BOX/{RECTA,SPHER,CYLIN}` card in the deck by **Deck /BOX id** instead of "
         "coordinates; oriented (local-frame) boxes are set below.")
-    # Capture the oriented-frame rows BEFORE the main table below overwrites
-    # cfg.model.growth_boxes (which carries the loaded frames): the frame editor is
-    # seeded from here and its result is re-applied by name, so frames survive the
-    # main table's shape/coordinate round-trip instead of being silently dropped.
+    # Capture the oriented-frame and polyhedron-point rows BEFORE the main table
+    # below overwrites cfg.model.growth_boxes (which carries the loaded frames/
+    # points): those editors are seeded from here and their results re-applied by
+    # name, so frames and points survive the main table's shape/coordinate
+    # round-trip instead of being silently dropped.
     frame_records = records_from_frames(cfg.model.growth_boxes)
+    point_records = records_from_points(cfg.model.growth_boxes)
     _num_cols = [c for c in BOX_COLUMNS if c not in ("name", "shape", "deck_box_id")]
     gb_df = pd.DataFrame(records_from_growth_boxes(cfg.model.growth_boxes),
                          columns=BOX_COLUMNS)
@@ -425,9 +430,11 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "Name", help="Label for run-log / validation messages, and how a "
                              "frame below is matched to a box."),
             "shape": st.column_config.SelectboxColumn(
-                "Shape", options=["box", "sphere", "cylinder"], default="box",
+                "Shape", options=["box", "sphere", "cylinder", "polyhedron"],
+                default="box",
                 help="box = two corners; sphere = centre+radius; "
-                     "cylinder = two axis end-points + radius."),
+                     "cylinder = two axis end-points + radius; polyhedron = "
+                     "convex hull of the node list in the points table below."),
             "deck_box_id": st.column_config.NumberColumn(
                 "Deck /BOX id", format="%d", step=1,
                 help="Reference a /BOX/{RECTA,SPHER,CYLIN} card in the deck by id "
@@ -464,6 +471,33 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 })
             cfg.model.growth_boxes = apply_frame_records(
                 cfg.model.growth_boxes, fr_edited.to_dict("records"))
+        # Polyhedron node lists: N points of 3 coordinates don't fit the fixed
+        # columns above, so each polyhedron region's nodes are edited here — one
+        # x/y/z row per node, matched to its region by Name (the frames pattern).
+        if point_records or any(b.shape_kind() == "polyhedron"
+                                for b in cfg.model.growth_boxes):
+            with st.expander("Polyhedron points (one row per node)",
+                             expanded=True):
+                st.caption(
+                    "Define a **polyhedron** region by its nodes: one row per "
+                    "node, **all three coordinates explicit** (a row missing "
+                    "any coordinate is dropped — nothing is defaulted or "
+                    "inferred). Match rows to a region by **Region** (its "
+                    "Name); give at least 4 non-coplanar points. The region is "
+                    "the points' **convex hull** (an arbitrary warped 8-node "
+                    "brick is the convex case; a non-convex point set is "
+                    "treated as its hull).")
+                pt_df = pd.DataFrame(point_records, columns=POINT_COLUMNS)
+                pt_edited = st.data_editor(
+                    pt_df, num_rows="dynamic", width="stretch",
+                    key="growth_points_editor", column_config={
+                        "name": st.column_config.TextColumn(
+                            "Region", help="Must match a polyhedron row's Name."),
+                        **{k: st.column_config.NumberColumn(k, format="%.3f")
+                           for k in POINT_COLUMNS[1:]},
+                    })
+                cfg.model.growth_boxes = apply_point_records(
+                    cfg.model.growth_boxes, pt_edited.to_dict("records"))
         st.info(f"{len(cfg.model.growth_boxes)} growth region(s): their elements "
                 "start void and may be grown into. With BESO, keep "
                 "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
@@ -876,15 +910,16 @@ def _add_growth_overlay(pl, pv, boxes) -> int:
     """Add a red wireframe outline of each growth region to plotter *pl*.
 
     Draws the same :func:`~oropt.mesh.overlay_primitives` outlines the report
-    render uses — a box (12 edges), sphere or finite cylinder — so a user can
-    place region coordinates against the live topology instead of blind. Returns
-    the number of regions drawn (0 when none have drawable geometry, e.g. a
-    deck-referenced box whose corners aren't resolved without the deck)."""
+    render uses — a box (12 edges), sphere, finite cylinder or polyhedron
+    (convex-hull edges) — so a user can place region coordinates against the
+    live topology instead of blind. Returns the number of regions drawn (0 when
+    none have drawable geometry, e.g. a deck-referenced box whose corners
+    aren't resolved without the deck)."""
     import numpy as np
     drawn = 0
     for pr in overlay_primitives(boxes):
         kind = pr["kind"]
-        if kind == "box":
+        if kind in ("box", "polyhedron"):
             pts = np.asarray(pr["corners"], dtype=float)
             lines = np.hstack([[2, i, j] for i, j in pr["edges"]]).astype(int)
             mesh = pv.PolyData(pts, lines=lines)
