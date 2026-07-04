@@ -10,6 +10,7 @@ passes either way.
 """
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -309,6 +310,39 @@ def test_prepare_pipeline_hermetic_polyhedron_region(tmp_path, mini_engine_path)
     assert int(mask.sum()) == rep.total_candidates == 2
 
 
+def test_prepare_overlapping_region_carve_off(tmp_path, mini_engine_path):
+    """A region overlapping the part is fine either way; with carve off the
+    overlapped original element stays alive on the extended deck -- only the
+    generated expansion elements are candidates. The report carries the
+    original/expansion id boundary carve-off regions need at run time."""
+    _write_mini(tmp_path)
+    # covers the fake backend's two new tets AND e1's centroid (.25,.25,.25)
+    overlap = GrowthBox(name="olap", x_min=-1.0, x_max=0.4, y_min=-0.5,
+                        y_max=1.5, z_min=-0.5, z_max=1.5)
+    carving = prepare_growth_mesh(_mini_cfg(tmp_path, [overlap]),
+                                  backend=_fake_backend, log=_silent)
+    assert carving.n_new_elems == 2
+    assert carving.total_candidates == 3         # 2 new + carved original e1
+    assert carving.original_elem_max == 60000002
+
+    no_carve = dataclasses.replace(overlap, carve=False)
+    rep = prepare_growth_mesh(_mini_cfg(tmp_path, [no_carve]),
+                              backend=_fake_backend, log=_silent)
+    assert rep.n_new_elems == 2
+    assert rep.total_candidates == 2             # e1 stays alive
+    assert rep.original_elem_max == 60000002
+
+    # the run agrees once the config carries the recorded boundary
+    ext = Deck.load(tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad",
+                    60000000, 60000000)
+    cfg = _mini_cfg(tmp_path, [no_carve])
+    cfg.model.growth_original_elem_max = rep.original_elem_max
+    mask = growth_candidate_mask(ext, Mesh.from_deck(ext), cfg.model,
+                                 log=_silent)
+    assert int(mask.sum()) == 2
+    assert not mask[ext.elem_ids.tolist().index(60000001)]   # original kept
+
+
 def test_prepare_dry_run_writes_nothing(tmp_path):
     _write_mini(tmp_path)
     cfg = _mini_cfg(tmp_path, [WING, CARVE])
@@ -403,6 +437,20 @@ def test_point_config_at_touches_only_case_dir(tmp_path):
     assert back.model.case_dir == str(tmp_path / GROWTH_MESH_DIRNAME)
     assert back.optimizer == "tobs"                  # everything else intact
     assert back.load_cases[0].sigma_allow == 7.0
+    assert back.model.growth_original_elem_max is None   # not given -> untouched
+
+
+def test_point_config_at_records_original_elem_max(tmp_path):
+    cfg = Config()
+    cfg.model.case_dir = str(tmp_path)
+    cfg.load_cases = [LoadCase(name="c", stem="mini", sigma_allow=7.0)]
+    p = tmp_path / "cfg.yaml"
+    cfg.to_yaml(p)
+    point_config_at(p, tmp_path / GROWTH_MESH_DIRNAME,
+                    original_elem_max=60000002)
+    back = Config.from_yaml(p)
+    assert back.model.case_dir == str(tmp_path / GROWTH_MESH_DIRNAME)
+    assert back.model.growth_original_elem_max == 60000002
 
 
 def test_cli_error_exit_without_regions(tmp_path, capsys):

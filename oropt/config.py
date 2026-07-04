@@ -88,8 +88,19 @@ class GrowthBox:
     (:mod:`oropt.growthmesh` — TetGen-filled, node-conformal, written as
     extended starter decks). A region over unmeshed space selects no
     elements and is an error at run start. Multiple regions act as a union. Bounds
-    are inclusive; a region overlapping the original part volume voids those
-    elements at start too (deliberate carve-and-regrow).
+    are inclusive.
+
+    A region **may overlap the original part**; :attr:`carve` picks what that
+    means. ``carve: true`` (default) voids the overlapped original elements at
+    start too — deliberate carve-and-regrow. ``carve: false`` keeps the original
+    part intact: only *expansion* elements in the region start void, where
+    "original" means element ids <= :attr:`Model.growth_original_elem_max` (the
+    growth-mesh PREPARE step allocates its new elements above the original ids
+    and records that boundary when pointing the config at the extended decks;
+    a hand-pre-meshed deck needs the expansion elements renumbered above it).
+    So an overlapping region can be drawn generously — hugging or cutting into
+    the part to guarantee the expansion mesh attaches with no gap — without a
+    bite being carved out of the part at iteration 0.
 
     ``shape`` selects the primitive (mirroring the Radioss ``/BOX`` family):
 
@@ -148,6 +159,10 @@ class GrowthBox:
     xy_axis: Optional[list] = None    # [bx, by, bz] a vector in the local +xy plane
     # --- optional: read the box corners from a /BOX/RECTA card in the deck ---
     deck_box_id: Optional[int] = None  # resolved to x_min..z_max at run start
+    # --- overlap policy: carve the original part (default) or leave it alive ---
+    # False -> only expansion elements (ids > Model.growth_original_elem_max)
+    # start void; the overlapped original part stays intact.
+    carve: bool = True
 
     def shape_kind(self) -> str:
         """Normalised shape selector: ``"box"``, ``"sphere"``, ``"cylinder"`` or
@@ -192,6 +207,15 @@ class Model:
     # :class:`GrowthBox`. Stored as GrowthBox, but coerced from plain dicts too
     # so YAML round-trips and the GUI editor (dict rows) both work.
     growth_boxes: list = field(default_factory=list)
+    # Highest element id of the ORIGINAL part — the id boundary between original
+    # and expansion (growth) elements, used by growth regions with carve=False to
+    # leave the overlapped original part alive (see :class:`GrowthBox`). The
+    # growth-mesh PREPARE step allocates its new elements above the original ids
+    # and records this automatically when pointing the config at the extended
+    # decks; for a hand-pre-meshed deck, renumber the expansion elements above
+    # the part's ids and set it here. None (default) = no boundary known; a
+    # carve=False region then errors at run start.
+    growth_original_elem_max: Optional[int] = None
 
     def __post_init__(self):
         fields = {f.name for f in dataclasses.fields(GrowthBox)}

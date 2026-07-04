@@ -310,6 +310,21 @@ in progress.
   `evolution_rate` so growth isn't throttled below the feasibility back-off
   step (validation warns otherwise).
 
+  A region **may overlap the original part** — the per-region **`carve`** flag
+  picks what that means. `carve: true` (default) voids the overlapped original
+  elements at start too: deliberate **carve-and-regrow**. `carve: false` keeps
+  the original part **intact** — only *expansion* elements in the region start
+  void — so a region can be drawn generously, hugging or cutting into the
+  part, to guarantee the new material attaches with no gap, without a bite
+  being carved out of the part at iteration 0. "Original" is decided by
+  element id: ids ≤ **`model.growth_original_elem_max`** are the part, ids
+  above are expansion material. The growth-mesh PREPARE step allocates its new
+  elements above the original ids and **records that boundary automatically**
+  when pointing the config at the extended decks (GUI button / CLI hint); for
+  a hand-pre-meshed deck, renumber the expansion elements above the part's ids
+  and set the key yourself (a carve-off region without the boundary is a
+  validation/run-start error).
+
   Each region carries a **`shape`** — `box` (default; two opposite corners),
   `sphere` (centre + `radius`), `cylinder` (two axis end-points + `radius`,
   finite/capped) — mirroring `/BOX/RECTA` · `/BOX/SPHER` · `/BOX/CYLIN` — or
@@ -377,6 +392,12 @@ in progress.
          origin: [10.0, 0.0, 0.0], x_axis: [1.0, 1.0, 0.0], xy_axis: [-1.0, 1.0, 0.0]}
       # reference a /BOX/RECTA card in the deck by id instead of coordinates
       - {name: from_deck, deck_box_id: 7000001}
+      # overlaps the part but leaves it intact: only expansion elements start void
+      - {name: sleeve, shape: box, x_min: -30.0, x_max: 30.0, y_min: -10.0, y_max: 10.0, z_min: 0.0, z_max: 20.0,
+         carve: false}
+    # original/expansion element-id boundary for carve-off regions (the growth-mesh
+    # step records it automatically when pointing the config at the extended decks)
+    growth_original_elem_max: 60123456
   ```
 * `beso.protect_bc_nodes` (default `true`) — whether elements touching the BC
   node-group (`model.bc_group_id`) are frozen. Set it `false` to **allow the
