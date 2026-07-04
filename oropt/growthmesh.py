@@ -338,6 +338,10 @@ class GrowthMeshReport:
     elem_id_range: tuple        # (first, last) new element ids
     total_candidates: int       # extended-deck candidate elements (guard-checked)
     written: bool               # False on --dry-run
+    # Highest ORIGINAL design element id -- the original/expansion id boundary
+    # carve-off regions need (model.growth_original_elem_max); recorded into the
+    # config by point_config_at alongside case_dir.
+    original_elem_max: int = 0
 
 
 def _load_case_decks(cfg: Config) -> tuple[list, list[Deck]]:
@@ -474,9 +478,13 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
                     m.design_node_min)
     if ext_deck.n_design_elements != primary.n_design_elements + len(kept):
         raise ValueError("internal error: extended deck element count mismatch")
+    # The re-check runs with the just-computed original/expansion id boundary
+    # filled in, so a carve-off region is judged exactly as the eventual run
+    # will judge it (once point_config_at records the boundary in the config).
+    m_run = dataclasses.replace(m, growth_original_elem_max=elem_max)
     try:
         total = int(growth_candidate_mask(
-            ext_deck, Mesh.from_deck(ext_deck), m, log=lambda _s: None).sum())
+            ext_deck, Mesh.from_deck(ext_deck), m_run, log=lambda _s: None).sum())
     except ValueError as exc:
         raise ValueError(
             f"the generated mesh failed the phase-1 run-start guards: {exc}"
@@ -492,7 +500,8 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
         node_id_range=((int(new_node_ids[0]), int(new_node_ids[-1]))
                        if len(new_node_ids) else (0, 0)),
         elem_id_range=(int(new_elem_ids[0]), int(new_elem_ids[-1])),
-        total_candidates=total, written=bool(write))
+        total_candidates=total, written=bool(write),
+        original_elem_max=elem_max)
     log(f"[oropt] growth-mesh: {report.n_new_elems} new candidate elements, "
         f"{report.n_new_nodes} new nodes "
         f"(quality min {report.quality_min:.3f} / median "
@@ -529,13 +538,19 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
     return report
 
 
-def point_config_at(cfg_path: str | Path, out_dir: str | Path) -> None:
+def point_config_at(cfg_path: str | Path, out_dir: str | Path,
+                    original_elem_max: Optional[int] = None) -> None:
     """Rewrite ``model.case_dir`` in the YAML at *cfg_path* to *out_dir* — the
-    one-line config change that makes a run use the extended deck set. Only
-    that key is touched; everything else round-trips through the same
-    ``safe_load``/``safe_dump`` pair the app's own Save uses."""
+    one-line config change that makes a run use the extended deck set — and,
+    when *original_elem_max* is given (:attr:`GrowthMeshReport.
+    original_elem_max`), record it as ``model.growth_original_elem_max`` so
+    carve-off regions can tell the original part from the generated expansion
+    elements. Only those keys are touched; everything else round-trips through
+    the same ``safe_load``/``safe_dump`` pair the app's own Save uses."""
     raw = Config.read_yaml_dict(cfg_path)
     raw.setdefault("model", {})["case_dir"] = str(out_dir)
+    if original_elem_max is not None:
+        raw["model"]["growth_original_elem_max"] = int(original_elem_max)
     Path(cfg_path).write_text(
         yaml.safe_dump(raw, sort_keys=False, default_flow_style=False),
         encoding="utf-8")
@@ -571,7 +586,10 @@ def main(argv=None) -> int:
     if rep.written:
         print(f"[oropt] growth-mesh: done. To run on the extended decks set\n"
               f"    model.case_dir: {rep.out_dir}\n"
-              f"in {args.config} (or use the GUI button).", flush=True)
+              f"    model.growth_original_elem_max: {rep.original_elem_max}\n"
+              f"in {args.config} (or use the GUI button). The second key is the "
+              "original/expansion element-id boundary carve-off regions need.",
+              flush=True)
     return 0
 
 

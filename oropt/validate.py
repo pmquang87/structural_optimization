@@ -311,6 +311,19 @@ def check_config(cfg: Config, *, raw: dict | None = None,
         if kind != "polyhedron" and b.points:
             warn(f"growth box {label!r}: 'points' is only used by shape "
                  f"'polyhedron' -- ignored for shape {kind!r}")
+        if not b.carve and m.growth_original_elem_max is None:
+            err(f"growth box {label!r}: carve is off (carve: false) but "
+                "model.growth_original_elem_max is not set -- without the "
+                "original/expansion element-id boundary the original part "
+                "cannot be left alive. The growth-mesh step records it when "
+                "pointing the config at the extended decks; for a "
+                "hand-pre-meshed deck set it to the original part's highest "
+                "element id")
+    thr = m.growth_original_elem_max
+    if thr is not None and (isinstance(thr, bool)
+                            or not isinstance(thr, int) or thr <= 0):
+        err("model.growth_original_elem_max must be a positive element id "
+            f"(or blank): got {thr!r}")
     if boxes and cfg.optimizer_name() == "beso" \
             and cfg.beso.max_add_ratio < cfg.beso.evolution_rate:
         warn(f"growth boxes with beso.max_add_ratio={cfg.beso.max_add_ratio} < "

@@ -124,19 +124,52 @@ def resolve_growth_boxes(deck: Deck, boxes) -> list:
     return out
 
 
+def region_candidate_mask(deck: Deck, mesh: Mesh, box, model,
+                          label: str) -> tuple[np.ndarray, int]:
+    """``(candidate mask, kept-alive count)`` for a single resolved region.
+
+    The mask is the centroid-in-region element set; a region with ``carve``
+    off additionally excludes the *original* part elements — ids <=
+    ``model.growth_original_elem_max`` — so an overlapping region leaves the
+    part intact and only its expansion elements start void. The kept-alive
+    count is how many in-region elements that exclusion spared (0 for a
+    carving region). Raises ``ValueError`` when ``carve`` is off but no
+    original/expansion id boundary is configured — the single source of truth
+    for the run-start guard, the preview and the PREPARE re-check."""
+    bm = mesh.in_boxes_mask([box])
+    if getattr(box, "carve", True):
+        return bm, 0
+    thr = getattr(model, "growth_original_elem_max", None)
+    if thr is None:
+        raise ValueError(
+            f"growth box {label!r} has carve off (carve: false) but "
+            "model.growth_original_elem_max is not set, so the original part "
+            "cannot be told apart from the expansion elements. The growth-mesh "
+            "step records it when pointing the config at the extended decks "
+            "(the GUI's 'use these decks' button / the CLI hint); for a "
+            "hand-pre-meshed deck, renumber the expansion elements above the "
+            "original part's ids and set it to that boundary")
+    keep_alive = bm & (deck.elem_ids <= int(thr))
+    return bm & (deck.elem_ids > int(thr)), int(keep_alive.sum())
+
+
 def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
                           log: Callable[[str], None] = print) -> np.ndarray:
     """Boolean mask (aligned with ``deck.elem_ids``) of growth-candidate
-    elements: those whose centroid lies inside one of ``model.growth_boxes``.
-    Candidates start the run *void* and may be grown into by the optimiser's
-    bi-directional update. All-False when no boxes are configured.
+    elements: those whose centroid lies inside one of ``model.growth_boxes``
+    (minus, for a region with ``carve`` off, the original part's elements —
+    see :func:`region_candidate_mask`). Candidates start the run *void* and
+    may be grown into by the optimiser's bi-directional update. All-False when
+    no boxes are configured.
 
     Raises ``ValueError`` at run start — before any ~13-min solve — for the
     setup mistakes that would otherwise waste (or silently no-op) a multi-hour
     run:
 
     * a box selecting **no** design elements: the box volume was not pre-meshed
-      into the design part;
+      into the design part (or, with carve off, holds nothing but original
+      part elements);
+    * a carve-off box without a ``model.growth_original_elem_max`` boundary;
     * candidate connectivity referencing node ids below ``design_node_min``: the
       free-node guard could not pin those nodes while the elements are void, so
       the implicit tangent would go singular;
@@ -151,9 +184,17 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
     candidate = np.zeros(deck.n_design_elements, dtype=bool)
     box_masks = []
     for i, b in enumerate(boxes):
-        bm = mesh.in_boxes_mask([b])
         label = b.name or f"#{i + 1}"
+        bm, kept_alive = region_candidate_mask(deck, mesh, b, model, label)
         if not bm.any():
+            if kept_alive:
+                raise ValueError(
+                    f"growth box {label!r} contains only original part "
+                    f"elements ({kept_alive}, ids <= "
+                    f"{model.growth_original_elem_max}) and has carve off -- "
+                    "nothing would start void. Generate the expansion mesh "
+                    "with the growth-mesh step, or set carve: true for "
+                    "deliberate carve-and-regrow")
             raise ValueError(
                 f"growth box {label!r} contains no design elements -- the region "
                 "volume must be pre-meshed into the design part "
@@ -162,6 +203,9 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
                 "(python -m oropt.growthmesh / the GUI's Generate button)")
         log(f"[oropt] growth box {label!r}: {int(bm.sum())} candidate elements "
             "start void")
+        if kept_alive:
+            log(f"[oropt] growth box {label!r}: {kept_alive} in-region original "
+                "part elements stay alive (carve off)")
         box_masks.append((label, bm))
         candidate |= bm
 
@@ -217,9 +261,12 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
     """Count the design elements each growth region would start *void*, without
     launching a run — the data behind the GUI's "preview regions" button.
 
-    Per region: the centroid-in-region element count (0 flags a region whose
-    volume was not pre-meshed into the design part), plus a note for a region
-    referencing a ``/BOX/RECTA`` card absent from the deck. Also runs the real
+    Per region: the would-start-void element count — centroid-in-region, minus
+    the original part elements for a region with ``carve`` off (0 flags a region
+    whose volume was not pre-meshed into the design part), plus a note for a
+    region referencing a ``/BOX/RECTA`` card absent from the deck, for a
+    carve-off region missing its id boundary, and for in-region original
+    elements a carve-off region leaves alive. Also runs the real
     run-start guards (:func:`growth_candidate_mask`) and reports, in ``guard``, the
     first error that would abort a run (an empty region, candidate nodes below
     ``design_node_min``, or an unreachable candidate); ``guard`` is ``""`` when the
@@ -231,12 +278,21 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
         label = b.name or f"#{i + 1}"
         try:
             resolved = resolve_growth_boxes(deck, [b])[0]
+            bm, kept_alive = region_candidate_mask(deck, mesh, resolved, model,
+                                                   label)
         except ValueError as exc:
             rows.append(BoxPreview(label, b.shape_kind(), 0, str(exc)))
             continue
-        count = int(mesh.in_boxes_mask([resolved]).sum())
-        note = ("" if count else "no design elements inside -- the region volume "
-                "is not pre-meshed into the design part")
+        count = int(bm.sum())
+        if count:
+            note = (f"{kept_alive} in-region original element(s) stay alive "
+                    "(carve off)" if kept_alive else "")
+        elif kept_alive:
+            note = (f"only original part elements inside ({kept_alive}) and "
+                    "carve is off -- nothing would start void")
+        else:
+            note = ("no design elements inside -- the region volume "
+                    "is not pre-meshed into the design part")
         rows.append(BoxPreview(label, resolved.shape_kind(), count, note))
     total, guard = 0, ""
     if boxes:
