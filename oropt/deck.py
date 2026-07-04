@@ -283,6 +283,21 @@ class Deck:
         return (spec["x_min"], spec["x_max"], spec["y_min"], spec["y_max"],
                 spec["z_min"], spec["z_max"])
 
+    # ---- growth-mesh extension ----------------------------------------------
+    def extended_lines(self, node_lines: list[str], elem_lines: list[str]) -> list[str]:
+        """A copy of :attr:`lines` with *node_lines* appended at the end of the
+        first ``/NODE`` block and *elem_lines* at the end of the design
+        ``/TETRA4`` block — the deck-splicing seam of the growth-mesh PREPARE
+        step (:mod:`oropt.growthmesh`). Everything else is carried through
+        verbatim (the same principle as :meth:`write`); this deck object is not
+        modified — parse a new :class:`Deck` from the returned lines to see the
+        extended mesh."""
+        out = list(self.lines)
+        for pos, block in sorted([(self._node_hi, node_lines),
+                                  (self._elem_hi, elem_lines)], reverse=True):
+            out[pos:pos] = list(block)
+        return out
+
     # ---- rewrite -----------------------------------------------------------
     def write(self, out_path: str | Path, alive_mask: np.ndarray,
               no_pin: Optional[set] = None,

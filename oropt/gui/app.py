@@ -38,6 +38,8 @@ from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
 from oropt.gui.runstate import find_active_run
+from oropt.growthmesh import (GROWTH_MESH_DIRNAME, point_config_at,
+                              prepare_growth_mesh)
 from oropt.loop import preview_growth_boxes
 from oropt.mesh import Mesh, overlay_primitives
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
@@ -399,9 +401,11 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "the original part had none. Pick a **shape** per row and fill only that "
         "shape's coordinates: `box` uses the six `*_min`/`*_max` bounds, `sphere` "
         "uses `cx,cy,cz` + `radius`, `cylinder` uses the two axis end-points "
-        "`x1,y1,z1`–`x2,y2,z2` + `radius`. The region volume must be **pre-meshed** "
-        "into the design part (same `/TETRA4` block, node-conformal interface, "
-        "node ids ≥ design_node_min); a region over unmeshed space is an error at "
+        "`x1,y1,z1`–`x2,y2,z2` + `radius`. The region volume must contain "
+        "candidate elements: **pre-mesh** it into the design part (same "
+        "`/TETRA4` block, node-conformal interface, node ids ≥ design_node_min) "
+        "— or **generate** it with the ⚙️ *Generate growth mesh* button below; "
+        "a region over unmeshed space is an error at "
         "run start. Multiple regions act as a union; volume fractions are then "
         "relative to the enlarged (part + regions) space. A row may reference a "
         "`/BOX/{RECTA,SPHER,CYLIN}` card in the deck by **Deck /BOX id** instead of "
@@ -466,6 +470,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "throttled (validation warns otherwise). The Monitor's 3D view "
                 "outlines each region so you can place coordinates visually.")
         _render_growth_preview(cfg)
+        _render_growth_mesh(cfg, cfg_path)
 
     _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS",
                   "hca": "HCA"}
@@ -782,6 +787,89 @@ def _render_growth_preview(cfg: Config) -> None:
             f"{preview.total_candidates} of {preview.total_elements} design "
             f"elements ({pct:.1f}%) start void across all regions — regions are "
             "run-ready.")
+
+
+def _render_growth_mesh(cfg: Config, cfg_path: Path) -> None:
+    """The growth-mesh PREPARE step (phase 2, :mod:`oropt.growthmesh`) as a
+    button: TetGen-fill the regions with node-conformal candidate elements and
+    write the extended deck set to ``<case_dir>/growth_mesh/``, instead of
+    pre-meshing the region volume in a pre-processor.
+
+    Deliberately explicit, mirroring the CLI: nothing is written unless the
+    phase-1 run-start guards pass on the extended deck, the result lands in its
+    own folder for inspection/diffing, and a run only uses it after
+    ``model.case_dir`` is pointed there — the second button, which rewrites the
+    YAML and reruns so the Input tab shows the new folder."""
+    if st.session_state.pop("growth_mesh_pointed", None):
+        st.success(f"`model.case_dir` now points at the extended deck set "
+                   f"(saved to `{cfg_path}`). Iteration 0 still solves exactly "
+                   "the original part — the new elements start void.")
+    with st.expander("⚙️ Generate growth mesh (TetGen) — no pre-meshing needed"):
+        st.caption(
+            "Fills each region with new TET4 candidate elements that share the "
+            "part's surface **nodes** (TetGen `-Y` constrained "
+            "tetrahedralisation: the part surface is preserved exactly — exact "
+            "node conformity, no tied interface), then writes **extended "
+            f"starter decks** for every load case to `{GROWTH_MESH_DIRNAME}/` "
+            "inside the case directory (engine decks copied verbatim), for "
+            "inspection and diffing. New node ids go above max(existing) and "
+            "≥ `design_node_min`; element ids above max(existing). The "
+            "run-start guards are re-run on the extended deck **before** "
+            "anything is written. Needs the optional `tetgen` package "
+            "(`pip install \"oropt[growthmesh]\"`; TetGen itself is "
+            "AGPL-licensed). The generator only sees the design part — keep "
+            "regions clear of other parts (rigid bodies, shells).")
+        gcol = st.columns(2)
+        size_factor = gcol[0].number_input(
+            "Element size ×", value=1.0, min_value=0.1, step=0.1, format="%.2f",
+            key="growth_mesh_size",
+            help="Target element edge as a multiple of the part's mean surface "
+                 "edge length. 1.0 matches the part's own sizing; larger = "
+                 "coarser and faster.")
+        min_ratio = gcol[1].number_input(
+            "Quality bound (TetGen -q)", value=1.5, min_value=1.0, step=0.1,
+            format="%.2f", key="growth_mesh_minratio",
+            help="Radius-edge quality bound; lower = better-shaped tets, more "
+                 "elements.")
+        if st.button("⚙️ Generate & write extended decks",
+                     key="growth_mesh_generate",
+                     help="Runs TetGen on the primary case's starter deck and "
+                          "writes the extended deck set for every load case. "
+                          "Nothing is written if a run-start guard fails."):
+            saved = Config.from_dict(Config.read_yaml_dict(cfg_path))
+            if saved.model.growth_boxes != cfg.model.growth_boxes:
+                st.warning("The regions above have unsaved edits — generating "
+                           "from the on-screen regions. 💾 Save config before "
+                           "running, or the run will select candidates with "
+                           "the stale saved regions.")
+            try:
+                with st.spinner("Generating candidate mesh (TetGen) …"):
+                    st.session_state["growth_mesh_report"] = prepare_growth_mesh(
+                        cfg, size_factor=float(size_factor),
+                        min_ratio=float(min_ratio), log=lambda _s: None)
+            except (ValueError, RuntimeError) as exc:
+                st.session_state.pop("growth_mesh_report", None)
+                st.error(f"Growth-mesh generation failed: {exc}")
+        rep = st.session_state.get("growth_mesh_report")
+        if rep is None:
+            return
+        st.success(
+            f"{rep.n_new_elems} new candidate elements / {rep.n_new_nodes} new "
+            f"nodes (target edge {rep.target_edge:.3g}; quality min "
+            f"{rep.quality_min:.2f}, median {rep.quality_median:.2f}). Guards "
+            f"passed — {rep.total_candidates} elements start void on the "
+            f"extended deck. Written to `{rep.out_dir}`.")
+        st.dataframe(
+            pd.DataFrame([{"region": lbl, "new elements": n}
+                          for lbl, n in rep.per_region]),
+            hide_index=True, use_container_width=True)
+        if st.button("📁 Use the extended decks — point the config's case "
+                     "directory at them", key="growth_mesh_use",
+                     help="Rewrites model.case_dir in the config YAML to the "
+                          "growth_mesh folder (only that key is touched)."):
+            point_config_at(cfg_path, rep.out_dir)
+            st.session_state["growth_mesh_pointed"] = rep.out_dir
+            st.rerun()
 
 
 def _add_growth_overlay(pl, pv, boxes) -> int:

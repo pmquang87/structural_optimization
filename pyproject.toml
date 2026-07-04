@@ -24,11 +24,19 @@ gui = ["streamlit>=1.30", "stpyvista>=0.0.10"]
 # export stack: trame / trame-vtk / trame-vuetify / nest-asyncio2). Without it the
 # report falls back to the static topology PNG, so it's optional.
 report3d = ["pyvista[jupyter]>=0.43"]
-dev = ["pytest>=7.0", "ruff>=0.6"]
+# Growth-mesh PREPARE step (oropt.growthmesh): TetGen constrained
+# tetrahedralisation via the pyvista-maintained wrapper. Optional because it is
+# only needed to *generate* extended decks (never to run), and because TetGen
+# itself is AGPL-licensed — evaluate before redistributing a bundle.
+growthmesh = ["tetgen>=0.8.4"]
+# tetgen is in dev so CI exercises the TetGen-backed end-to-end tests (the
+# hermetic suite passes without it; those tests importorskip).
+dev = ["pytest>=7.0", "ruff>=0.6", "tetgen>=0.8.4"]
 
 [project.scripts]
 oropt = "oropt.run:main"
 oropt-animate = "oropt.animate:main"
+oropt-growthmesh = "oropt.growthmesh:main"
 
 [tool.setuptools]
 packages = ["oropt", "oropt.gui"]

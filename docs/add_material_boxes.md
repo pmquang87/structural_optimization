@@ -9,7 +9,9 @@ The recommended design is a config-defined list of boxes (mirroring LS-DYNA
 box starts **void** instead of alive, and the existing bi-directional machinery
 (BESO add-back, TOBS `dx ∈ {0,+1}` flips, level-set φ growth) grows material into
 it when the load path wants it. No solver-side blockers exist. What oropt must
-*not* attempt (in phase 1) is generating mesh itself.
+*not* attempt (in phase 1) is generating mesh itself. *(Phase 2 — since
+implemented, `oropt.growthmesh` — does generate it, but **node-conformally**,
+so nothing about the run changes; see §2 and §5.)*
 
 ---
 
@@ -60,21 +62,32 @@ domain* topology optimisation formalises growing past the initial envelope).
 An element-deletion optimiser cannot create elements. "Add material where there
 was none" therefore decomposes into two very different sub-problems:
 
-| | Route A — user pre-meshes the expansion volume (recommended) | Route B — oropt auto-generates box mesh (rejected for phase 1) |
-|---|---|---|
-| Mesh source | User extends the design part with tet-meshed box volumes in the pre-processor (or in the source `.k` before `k_to_rad_converter`) | oropt voxelises each box into hex-split tets, subtracts the part overlap, injects `/NODE` + `/TETRA4` cards |
-| Interface to part | **Conformal** (shared nodes; imprint + node-equivalence at the part surface) | Non-conformal — needs `/INTER/TYPE2` tied contact injection |
-| `keep_connected` | Works as-is (shared nodes ⇒ grown material is connected) | Broken — tied interfaces share no nodes, so grown material is dropped as a floating island unless adjacency is artificially augmented |
-| Deck philosophy | Preserved: deck still edited verbatim, cards only omitted | Violated: oropt writes new geometry, id allocation, tied-contact cards |
-| Solver risk | None new (same mechanics as today) | Real: tied penalty interfaces in an implicit nonlinear contact model, mesh quality, conditioning — each needs solver-in-the-loop testing at ~13 min/solve |
-| Effort | Small (config + mask + guards + GUI) | Large (mesh generation, dual-mesh bookkeeping, contact, months of validation) |
+| | Route A — user pre-meshes the expansion volume (phase 1) | Route B — auto-mesh + `/INTER/TYPE2` tie (**REJECTED**) | Route B′ — auto-mesh, node-conformal direct creation (**phase 2, implemented**) |
+|---|---|---|---|
+| Mesh source | User extends the design part with tet-meshed box volumes in the pre-processor (or in the source `.k` before `k_to_rad_converter`) | oropt voxelises each box into hex-split tets, subtracts the part overlap, injects `/NODE` + `/TETRA4` + tied-contact cards | `oropt.growthmesh` (explicit PREPARE step, CLI + GUI): TetGen `-Y` constrained tetrahedralisation of a PLC embedding the part's exterior surface; new `/NODE` + `/TETRA4` cards spliced into **extended starter decks** the user inspects before running |
+| Interface to part | **Conformal** (shared nodes; imprint + node-equivalence at the part surface) | Non-conformal — needs `/INTER/TYPE2` tied contact injection | **Conformal by construction** — `-Y` preserves the part's surface facets/vertices exactly (Steiner points interior-only), so new tets reuse the part's surface *node ids* |
+| `keep_connected` | Works as-is (shared nodes ⇒ grown material is connected) | Broken — tied interfaces share no nodes, so grown material is dropped as a floating island unless adjacency is artificially augmented | Works as-is (shared nodes, same as Route A) |
+| Deck philosophy | Preserved: deck still edited verbatim, cards only omitted | Violated: oropt writes new geometry *and* contact cards, and the tied master surface would have to be maintained as elements are deleted | Preserved at run time: the PREPARE step writes a new starter once, up front; the run still edits it verbatim, byte-identical phase-1 behaviour |
+| Solver risk | None new (same mechanics as today) | **Fatal, on verified grounds**: Radioss implicit supports `/INTER/TYPE2` only in its *kinematic* formulation — no penalty fallback (Altair *Implicit Features and Compatibility*) — and a kinematic tie **conflicts with the `/BCS` free-node pinning** oropt injects on exactly the void-candidate interface nodes (two kinematic conditions on the same DOFs); the tied master surface also evolves as interface elements are deleted | None new: iteration 0 solves exactly the original part; new elements start void; the existing free-node pinning covers their nodes; the phase-1 run-start guards double as self-checks of the generated mesh |
+| Effort | Manual pre-processor work per load case | Large (dual-mesh bookkeeping, contact, months of validation) | One command (`python -m oropt.growthmesh --config …`) or one GUI button |
 
-Route A gets the full user value — material growing outside the original part,
-multiple boxes, any optimiser — at a fraction of the risk, and matches the
-project's "the deck is edited verbatim" principle. Route B can remain a phase-2
-idea if pre-meshing proves too annoying in practice.
+Route A got the full user value first — material growing outside the original
+part, multiple regions, any optimiser — at a fraction of the risk, and matches
+the project's "the deck is edited verbatim" principle. Route B is **rejected
+outright** (not merely deferred): the `/INTER/TYPE2` implicit
+kinematic-formulation restriction and its clash with the free-node `/BCS`
+pinning are structural, not an effort problem. Route B′ (phase 2, §5) removes
+the pre-meshing burden while keeping every phase-1 mechanism untouched, because
+the generated mesh is exactly what a careful user would have produced by hand:
+node-conformal TET4 in the same `/TETRA4/<design_part_id>` block.
 
 ### Deck-preparation checklist (Route A, user-facing docs material)
+
+*(Everything below is what `oropt.growthmesh` automates — it allocates ids
+above max(existing) and ≥ `design_node_min`, splices the same cards into every
+load case's first `/NODE` block and design `/TETRA4` block, and re-runs the
+run-start guards on the result before writing. The checklist stays relevant
+for hand-meshed regions.)*
 
 * Mesh each box volume with TET4 and merge it into the **same design part**, so
   the cards land in the single `/TETRA4/<design_part_id>` block that
@@ -237,10 +250,11 @@ Every optimiser's `V0 = mesh.volumes.sum()` becomes the **envelope** volume, so:
 
 ## 4. Risks and open questions
 
-1. **Pre-meshing burden (the real cost).** The user must produce a conformal
-   extended mesh per load case and re-convert. This is standard pre-processor
-   work (imprint + equivalence), but it is manual; if it proves painful, phase 2
-   (auto-meshing + tied interface) exists — with the solver-risk caveats above.
+1. **Pre-meshing burden (the real cost of phase 1).** The user must produce a
+   conformal extended mesh per load case and re-convert. This is standard
+   pre-processor work (imprint + equivalence), but it is manual — which is
+   exactly what the phase-2 PREPARE step (`oropt.growthmesh`, §5) now
+   automates, node-conformally and without the tied-interface solver risk.
 2. **Growth starvation.** Filter-radius-limited advance means thick boxes fill
    slowly (~1 element layer/iter) and only while the interface stays
    high-energy. Mitigations: larger `filter_radius` for box runs, higher
@@ -297,13 +311,71 @@ Every optimiser's `V0 = mesh.volumes.sum()` becomes the **envelope** volume, so:
     centroid-in-region element count plus the run-start guard verdict
     (`loop.preview_growth_boxes`), so a mis-placed or un-meshed region is caught
     before a multi-hour run instead of when the loop aborts.
-* **Phase 2 (only if pre-meshing is a proven pain):** auto-generated box mesh +
-  `/INTER/TYPE2` tie + adjacency augmentation. Re-evaluate then; today the
-  cost/risk is not justified.
+* **Phase 2 — implemented: auto-generated, node-conformal candidate mesh
+  (`oropt.growthmesh`).** An explicit **PREPARE step** — `python -m
+  oropt.growthmesh --config cfg.yaml` (`--size-factor`, `--min-ratio`,
+  `--out-dir`, `--dry-run`) or the GUI's **⚙️ Generate growth mesh** button next
+  to the region preview — never something hidden inside run start. The earlier
+  route-B sketch (auto-mesh + `/INTER/TYPE2` tie) was **rejected on verified
+  solver grounds** — Radioss implicit supports `/INTER/TYPE2` only in its
+  kinematic formulation (no penalty fallback, per Altair *Implicit Features and
+  Compatibility*), which conflicts with the `/BCS` free-node pinning oropt
+  injects on exactly the void-candidate interface nodes, and the tied master
+  surface would evolve as interface elements are deleted. Instead the generated
+  mesh is **node-conformal with the part**, so every phase-1 mechanism
+  (`keep_connected`, run-start guards, verbatim per-iteration rewrite,
+  free-node pinning, `/SURF/PART/EXT` regeneration) works untouched. How:
+  * **Surface** — the design part's watertight exterior surface is extracted as
+    the TET4 boundary faces (faces used by exactly one element), keeping the
+    original node ids per face vertex.
+  * **PLC + TetGen** — that surface is embedded as internal facets in a domain
+    box (the AABB of part ∪ regions, slightly inflated), tetrahedralised by the
+    pip `tetgen` package (the pyvista-maintained wrapper; optional extra
+    `oropt[growthmesh]`; **TetGen itself is AGPL** — evaluate before
+    redistributing) with `-p -q -a -Y`: `-Y` preserves the input facets and
+    vertices exactly (Steiner points interior-only), which is what guarantees
+    the output shares the part's surface **nodes**. One TetGen subtlety, found
+    empirically and locked in by a comment + test: under `-Y` interior
+    refinement points that *encroach* an unsplittable boundary facet are
+    rejected, so leaving the domain walls as giant triangles silently vetoes
+    the `-a` sizing — the walls are therefore pre-subdivided at ~2× the target
+    edge (`growthmesh.box_shell`), with the domain margin keeping regions clear
+    of their encroachment zones.
+  * **Classification** — output tets are classified by centroid: inside the
+    part (exact point-in-tet against the existing elements) → duplicates,
+    dropped; outside every region (the same `mesh.primitive_member` geometry as
+    the candidate mask) → scaffolding, dropped. The survivors are the new
+    candidate elements; preserved surface vertices are mapped back to original
+    node ids by coordinate match, the rest get **new node ids above
+    max(existing) and ≥ `design_node_min`** (so the free-node guard can pin
+    them while void); element ids go above max(existing); node ordering is
+    flipped to the deck's own orientation sign.
+  * **Output contract** — the same new `/NODE` + `/TETRA4` lines are spliced
+    into *every* load case's starter (`Deck.extended_lines`; all cases share
+    the mesh) and written as a full inspectable deck set under
+    **`<case_dir>/growth_mesh/`** (`<stem>_0000.rad` extended, `<stem>_0001.rad`
+    engine copied verbatim). Point `model.case_dir` there — the CLI prints the
+    line, the GUI button rewrites it — and run: the run itself is byte-identical
+    phase-1 behaviour, iteration 0 still solves exactly the original part.
+  * **Self-checks** — the phase-1 run-start guards (empty region, node-min,
+    reachability) are re-run on the extended deck **before anything is
+    written**, and generated-mesh stats (element/node counts, per-region
+    counts, min/median shape quality, sizing) are reported. Element sizing
+    follows the part's mean surface edge length × `size_factor`.
+  * **Tests** — the pipeline (surface extraction, PLC assembly, classification,
+    id allocation, splicing, multi-case consistency, guard integration) is
+    hermetic against a fabricated backend; TetGen-backed end-to-end tests sit
+    behind `pytest.importorskip("tetgen")`, and `tetgen` is in the dev extra so
+    CI exercises them.
+  * **Placement remains the user's job** — the generator only sees the design
+    part; keep regions clear of *other* parts (rigid bodies, shells), or grown
+    material may interpenetrate them.
 
 ## 6. References
 
 * Altair Radioss LS-DYNA-input reference, [`*DEFINE_BOX`](https://help.altair.com/hwsolvers/rad/topics/solvers/rad/define_box_lsdyna_r.htm) — box id + two corner points, global or `LOCAL` skew variant (maps to `/BOX/RECTA` + `/SKEW/FIX`).
+* Altair Radioss user guide, *Implicit Features and Compatibility* — the implicit solver's supported-keyword matrix: `/INTER/TYPE2` is available in the **kinematic formulation only** (no penalty fallback), the basis for rejecting the tied-interface route (§2).
+* [TetGen](https://wias-berlin.de/software/tetgen/) (Hang Si, WIAS Berlin; **AGPL-3.0**) via the [pyvista-maintained `tetgen` wrapper](https://github.com/pyvista/tetgen) — constrained Delaunay tetrahedralisation; the `-Y` switch preserves the input surface mesh exactly (phase 2's conformity guarantee).
 * Sivapuram & Picelli, *Topology optimization of binary structures using ILP* (TOBS), FEAD 139 (2018) — void flip bounds `{0,+1}` (already implemented in `tobs.py`).
 * Huang & Xie, *Evolutionary Topology Optimization of Continuum Structures* (2010) — bi-directional add-back via filter-extrapolated void sensitivities; insensitivity of converged topology to the initial design for compliance problems.
 * [PCM-BESO (Optim. Eng. 2024)](https://link.springer.com/article/10.1007/s11081-024-09917-0) — boundary-growth technique expanding the design representation beyond the initial domain, AM-oriented.

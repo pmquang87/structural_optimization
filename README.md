@@ -53,6 +53,7 @@ oropt/
   results.py  anim_to_vtk -> pyvista: per-element energy & von-Mises, loaded-node displacement
   deck.py     parse /NODE + /TETRA4 once; verbatim filtered re-write; free-node pinning; engine trim
   mesh.py     centroids, volumes, sensitivity-filter matrix, connectivity, protected/keep-out regions, growth-box selection
+  growthmesh.py  growth-mesh PREPARE step: TetGen-fill the growth regions with node-conformal candidate tets -> extended starter decks
   beso.py     sensitivity -> filter + history average -> volume-target threshold + add-back + connectivity
   levelset.py nodal level-set alternative: energy -> nodal velocity -> phi evolution + smoothing -> bisected threshold
   tobs.py     binary-ILP alternative: per-iteration element flips chosen by an integer linear program (scipy HiGHS)
@@ -80,7 +81,10 @@ A Python 3.12 virtual environment lives in `.venv` (vtk/scipy/streamlit wheels):
 Optional extras: `report3d` adds the **trame** export backend
 (`pip install -e .[gui,report3d]`) so `report.html` embeds an interactive
 zoom/rotate viewer of the final design (via pyvista's `export_html`); without it
-the report falls back to a static image. `dev` adds pytest/ruff.
+the report falls back to a static image. `growthmesh` adds the **tetgen**
+wrapper for the growth-mesh PREPARE step (auto-generating candidate mesh in
+growth regions; TetGen itself is AGPL-licensed). `dev` adds pytest/ruff (and
+tetgen, so CI exercises the TetGen-backed tests).
 
 Requires a working OpenRadioss install (default `C:\OpenRadioss`) with Intel
 oneAPI MPI — the engine is launched as `mpiexec -np 1 engine_win64_impi.exe`
@@ -292,10 +296,12 @@ in progress.
   optimiser's bi-directional update (BESO add-back, TOBS `{0,+1}` flips,
   level-set growth) may *add* it where the load path wants — so the design can
   grow material where the original part had none, e.g. a reinforcement rib
-  beyond the original envelope. The region volume must be **pre-meshed** into
-  the design part first (same `/TETRA4/<design_part_id>` block, node-conformal
-  interface with the part — imprint + merge coincident interface nodes — and
-  node ids ≥ `design_node_min`); run start validates this and errors on an empty
+  beyond the original envelope. The region volume must contain candidate
+  elements — **pre-meshed** into the design part in a pre-processor (same
+  `/TETRA4/<design_part_id>` block, node-conformal interface with the part —
+  imprint + merge coincident interface nodes — and node ids ≥
+  `design_node_min`), or **auto-generated** by the growth-mesh PREPARE step
+  below; run start validates this and errors on an empty
   region, on non-design node ids, and on candidates not node-connected to the
   structure. Candidates are never frozen (a region overlapping a keep-out region
   stays growable, not force-materialised), iteration 0 solves exactly the
@@ -323,7 +329,27 @@ in progress.
   **red wireframe outline** over the 3D topology in the *Monitor*, the
   `report.html` render and the evolution GIF, so coordinates can be placed
   visually; the *Monitor* also shows how many candidate elements have been
-  grown. Full design study in
+  grown.
+
+  **No pre-meshed region volume? Generate it** — the growth-mesh PREPARE step
+  (`python -m oropt.growthmesh --config cfg.yaml`, or the GUI's **⚙️ Generate
+  growth mesh** button next to the region preview) fills each region with new
+  TET4 candidate elements by TetGen constrained tetrahedralisation of the space
+  around the part (`-Y`: the part's exterior surface is preserved exactly, so
+  the new elements **share the part's surface nodes** — exact node conformity,
+  no tied interface) and writes an **extended starter deck per load case** to
+  `<case_dir>/growth_mesh/` (engine decks copied verbatim) for inspection and
+  diffing. New node ids are allocated above max(existing) and ≥
+  `design_node_min`, element ids above max(existing), and the run-start guards
+  are re-run on the extended deck *before* anything is written. Point
+  `model.case_dir` at the new folder (one click in the GUI) and run — the run
+  itself is byte-identical phase-1 behaviour, iteration 0 still solves exactly
+  the original part. Element sizing follows the part's mean surface edge length
+  (`--size-factor` knob). Needs the optional
+  `pip install "oropt[growthmesh]"` extra (the pyvista-maintained `tetgen`
+  wrapper; note TetGen itself is **AGPL-licensed** — fine to use, evaluate
+  before redistributing a bundle). The generator only sees the design part, so
+  keep regions clear of other parts (rigid bodies, shells). Full design study in
   [`docs/add_material_boxes.md`](docs/add_material_boxes.md):
 
   ```yaml
@@ -548,10 +574,13 @@ zoom/rotate viewer inlined into `report.html` (and also written as the standalon
   (σ_max = 308.305 MPa, disp = 1.229 mm, NORMAL TERMINATION).
 * A hand-deletion (−16 % volume, 16 352 freed nodes auto-pinned) produces a deck
   that OpenRadioss solves to NORMAL TERMINATION.
-* `pytest` (301 tests, all hermetic — no OpenRadioss needed) covers deck
+* `pytest` (409 tests, all hermetic — no OpenRadioss needed) covers deck
   round-trip/pinning, mesh geometry/connectivity/protection, BESO ranking/threshold,
   the **growth boxes** (candidate selection, run-start guards, growth through
-  each optimiser's update),
+  each optimiser's update), the **growth-mesh** PREPARE step (surface
+  extraction, PLC assembly, classification, id allocation, deck splicing and
+  guard integration run against a fabricated backend; the TetGen-backed
+  end-to-end tests skip when the optional package is absent),
   the **level-set** (bisected volume targeting / protected / φ-thresholding /
   connectivity), **TOBS** (ILP feasibility / move-limit / volume targeting /
   protected) and **HCA** (setpoint bisection / move-limited density decay /

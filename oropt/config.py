@@ -81,9 +81,12 @@ class GrowthBox:
     bi-directional update wherever the load path wants them — letting the design
     grow material where the original part had none.
 
-    The region volume must be **pre-meshed** into the design part (same
-    ``/TETRA4/<design_part_id>`` block, node-conformal interface with the original
-    part, node ids >= ``design_node_min``); a region over unmeshed space selects no
+    The region volume must contain candidate elements: **pre-meshed** into the
+    design part (same ``/TETRA4/<design_part_id>`` block, node-conformal
+    interface with the original part, node ids >= ``design_node_min``) or
+    **auto-generated** by the growth-mesh PREPARE step
+    (:mod:`oropt.growthmesh` — TetGen-filled, node-conformal, written as
+    extended starter decks). A region over unmeshed space selects no
     elements and is an error at run start. Multiple regions act as a union. Bounds
     are inclusive; a region overlapping the original part volume voids those
     elements at start too (deliberate carve-and-regrow).

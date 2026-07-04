@@ -157,7 +157,9 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
             raise ValueError(
                 f"growth box {label!r} contains no design elements -- the region "
                 "volume must be pre-meshed into the design part "
-                f"(/TETRA4/{deck.design_part_id}) before material can grow there")
+                f"(/TETRA4/{deck.design_part_id}) before material can grow "
+                "there, or generated with the growth-mesh step "
+                "(python -m oropt.growthmesh / the GUI's Generate button)")
         log(f"[oropt] growth box {label!r}: {int(bm.sum())} candidate elements "
             "start void")
         box_masks.append((label, bm))
