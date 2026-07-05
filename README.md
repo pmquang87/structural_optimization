@@ -321,7 +321,10 @@ in progress.
   **`model.growth_original_elem_max`** are the part, ids above are expansion
   material. The growth-mesh PREPARE step allocates its new elements above the
   original ids and **records that boundary automatically** when pointing the
-  config at the extended decks (GUI button / CLI hint); for a hand-pre-meshed
+  config at the extended decks (GUI button / CLI hint), and the GUI's 🔍
+  preview button auto-fills it while unset with the loaded starter deck's
+  highest design element id (right for the original decks; correct it manually
+  if the deck already contains expansion elements); for a hand-pre-meshed
   deck, renumber the expansion elements above the part's ids and set the key
   yourself. With no boundary recorded nothing is identifiable as original, so
   a carve-off region **degrades to carving** — every in-region element starts
@@ -349,7 +352,8 @@ in progress.
   frames* editor, and a *Polyhedron points* editor — one x/y/z row per node,
   matched to its region by Name); a **🔍 Preview region element counts** button loads the deck
   and reports, per region, how many elements it would void plus the run-start
-  guard verdict — before committing to a run. Every region is drawn as a
+  guard verdict — before committing to a run — and auto-fills the
+  original-part element-id boundary from the deck while it is unset. Every region is drawn as a
   **red wireframe outline** over the 3D topology in the *Monitor*, the
   `report.html` render and the evolution GIF, so coordinates can be placed
   visually; the *Monitor* also shows how many candidate elements have been

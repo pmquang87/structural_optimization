@@ -515,20 +515,31 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                     cfg.model.growth_boxes, pt_edited.to_dict("records"))
         if any(not b.carve for b in cfg.model.growth_boxes):
             # Carve-off regions need the original/expansion element-id boundary;
-            # the ⚙️ growth-mesh "use these decks" button records it, this input
-            # covers hand-pre-meshed decks (and shows what was recorded).
+            # the ⚙️ growth-mesh "use these decks" button records it, the 🔍
+            # preview button auto-fills it from the deck, and this input covers
+            # hand-pre-meshed decks (and shows what was recorded/derived). The
+            # widget is session-state-driven (no value=) so the preview's
+            # auto-fill — stashed on click, because this widget is already
+            # instantiated by then — can update what it shows on its rerun.
+            _auto = st.session_state.pop("growth_orig_elem_max_autofill", None)
+            if _auto is not None:
+                st.session_state["growth_orig_elem_max"] = int(_auto)
+            elif "growth_orig_elem_max" not in st.session_state:
+                st.session_state["growth_orig_elem_max"] = int(
+                    cfg.model.growth_original_elem_max or 0)
             _thr = st.number_input(
                 "Original part: highest element id (for carve-off regions)",
                 min_value=0, step=1, format="%d",
-                value=int(cfg.model.growth_original_elem_max or 0),
                 key="growth_orig_elem_max",
                 help="Elements with an id up to this are the ORIGINAL part and "
                      "stay alive inside regions with Carve part unchecked; ids "
                      "above are expansion material and start void. The ⚙️ "
-                     "growth-mesh step's *use these decks* button records it "
-                     "automatically. 0 = unset: nothing is identifiable as "
-                     "original, so carve-off regions void everything inside "
-                     "(validation warns).")
+                     "growth-mesh step's *use these decks* button records it, "
+                     "and 🔍 *Preview region element counts* auto-fills it with "
+                     "the deck's highest design element id while it is unset. "
+                     "0 = unset: nothing is identifiable as original, so "
+                     "carve-off regions void everything inside (validation "
+                     "warns).")
             cfg.model.growth_original_elem_max = int(_thr) or None
         st.info(f"{len(cfg.model.growth_boxes)} growth region(s): their elements "
                 "start void and may be grown into. With BESO, keep "
@@ -813,32 +824,69 @@ def _render_growth_preview(cfg: Config) -> None:
     guards pass — before committing to a multi-hour run, instead of finding out
     only when the loop aborts. Reads the live editor state on ``cfg``. The deck
     load is cached (:func:`_load_deck_mesh`) so re-clicking after only editing
-    regions is instant."""
-    if not st.button(
-            "🔍 Preview region element counts", key="growth_preview",
-            help="Load the deck and count the design elements inside each region "
-                 "(they start void). Also runs the run-start guards, so a "
-                 "mis-placed or un-meshed region is caught now, not hours in."):
+    regions is instant.
+
+    Clicking also **auto-fills the original-part element-id boundary**
+    (``model.growth_original_elem_max``) while it is unset and a carve-off
+    region needs it: the loaded deck's highest design element id. The preview
+    is computed with the boundary applied, then one ``st.rerun`` refreshes the
+    id input above (it was instantiated before the click could be handled);
+    the computed preview rides across that rerun in session state."""
+    clicked = st.button(
+        "🔍 Preview region element counts", key="growth_preview",
+        help="Load the deck and count the design elements inside each region "
+             "(they start void). Also runs the run-start guards, so a "
+             "mis-placed or un-meshed region is caught now, not hours in. "
+             "While the original-part element-id boundary is unset, it is "
+             "auto-filled with the deck's highest design element id.")
+    preview, autofilled = None, None
+    if clicked:
+        cases = cfg.load_case_list()
+        if not cases:
+            st.warning("Define a load case (🔀 Load cases tab) first — the "
+                       "preview reads that case's starter deck.")
+            return
+        starter = cases[0].starter
+        if not starter.exists():
+            st.warning(f"Starter deck not found: `{starter}`. Check the case "
+                       "directory and the load case's stem.")
+            return
+        try:
+            with st.spinner(f"Loading `{starter.name}` and counting …"):
+                deck, mesh = _load_deck_mesh(
+                    str(starter), starter.stat().st_mtime,
+                    cfg.model.design_part_id, cfg.model.design_node_min)
+                if (cfg.model.growth_original_elem_max is None
+                        and deck.elem_ids.size
+                        and any(not b.carve for b in cfg.model.growth_boxes)):
+                    # Derive the original/expansion id boundary from the deck
+                    # itself — right for the original decks; a deck already
+                    # holding expansion elements needs it set by hand (the
+                    # success message below says so).
+                    autofilled = int(deck.elem_ids.max())
+                    cfg.model.growth_original_elem_max = autofilled
+                preview = preview_growth_boxes(deck, mesh, cfg.model)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not preview regions: {exc}")
+            return
+        if autofilled is not None:
+            st.session_state["growth_orig_elem_max_autofill"] = autofilled
+            st.session_state["growth_preview_stash"] = (preview, autofilled)
+            st.rerun()
+    else:
+        stashed = st.session_state.pop("growth_preview_stash", None)
+        if stashed is not None:
+            preview, autofilled = stashed
+    if preview is None:
         return
-    cases = cfg.load_case_list()
-    if not cases:
-        st.warning("Define a load case (🔀 Load cases tab) first — the preview "
-                   "reads that case's starter deck.")
-        return
-    starter = cases[0].starter
-    if not starter.exists():
-        st.warning(f"Starter deck not found: `{starter}`. Check the case "
-                   "directory and the load case's stem.")
-        return
-    try:
-        with st.spinner(f"Loading `{starter.name}` and counting …"):
-            deck, mesh = _load_deck_mesh(
-                str(starter), starter.stat().st_mtime,
-                cfg.model.design_part_id, cfg.model.design_node_min)
-            preview = preview_growth_boxes(deck, mesh, cfg.model)
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Could not preview regions: {exc}")
-        return
+    if autofilled is not None:
+        st.success(
+            f"Auto-filled **Original part: highest element id** = {autofilled} "
+            "— the highest design element id in the loaded starter deck. "
+            "Save the config to keep it. Derived from the *current* deck: if "
+            "it already contains expansion elements (hand-pre-meshed, or an "
+            "extended growth-mesh deck), correct it manually — the ⚙️ "
+            "growth-mesh *use these decks* button records the exact boundary.")
     st.dataframe(
         pd.DataFrame([{"region": r.name, "shape": r.shape,
                        "elements": r.count, "note": r.note or "✓"}
