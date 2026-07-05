@@ -673,7 +673,10 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
     used = np.unique(kept)
     new_vert = used[vert_map[used] < 0]
 
-    node_max = max(int(d.node_ids.max()) for d in decks)
+    # Over ALL /NODE blocks, not deck.node_ids (the first block only): converter
+    # output carries the other includes' nodes in later blocks, and a new id
+    # colliding with one of those is a starter-fatal duplicate declaration.
+    node_max = max(d.max_node_id() for d in decks)
     elem_max = max(int(d.elem_ids.max()) for d in decks)
     new_node_ids = allocate_ids(node_max, len(new_vert), m.design_node_min)
     vert_map = vert_map.copy()
