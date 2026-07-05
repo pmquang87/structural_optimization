@@ -31,18 +31,22 @@ POLL_S = 2.0   # cadence for re-checking liveness while a work dir is busy
 
 
 # ---- process launch --------------------------------------------------------
-def spawn_detached(cmd: list[str], cwd: str | Path) -> subprocess.Popen:
+def spawn_detached(cmd: list[str], cwd: str | Path,
+                   stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL) -> subprocess.Popen:
     """Start *cmd* as a process that outlives its parent (and the browser).
 
     Same detached flags the dashboard uses for a single run, so a queued run is
     indistinguishable from a manually launched one — and the runner can be killed
     or the machine rebooted mid-run without taking the solve down with it.
+    *stdout*/*stderr* are discarded by default; the growth-mesh PREPARE launch
+    (:mod:`oropt.gui.growthprep`) redirects them into its log file instead.
     """
     flags = 0
     if sys.platform == "win32":
         flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     return subprocess.Popen(cmd, cwd=str(cwd), creationflags=flags,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=stdout, stderr=stderr)
 
 
 def spawn_runner(queue_path: str | Path, project_root: str | Path) -> subprocess.Popen:
