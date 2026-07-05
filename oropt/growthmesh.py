@@ -25,7 +25,8 @@ EXTENDED starter decks the user can inspect and diff before running:
   AGPL-licensed). The design part's watertight exterior surface (the boundary
   faces of its TET4 mesh) is embedded as internal facets of a PLC whose outer
   boundary is the slightly inflated AABB of part ∪ regions (walls
-  pre-subdivided near the element scale — see :func:`box_shell`), and
+  pre-subdivided near the element scale where regions are close, coarse
+  elsewhere — see :func:`box_shell`), and
   tetrahedralised with TetGen's ``-Y`` switch: the input facets and vertices
   are preserved exactly, Steiner points appear only in the interior. Every output tetrahedron
   touching the part therefore reuses the part's own surface **nodes** — exact
@@ -35,6 +36,16 @@ EXTENDED starter decks the user can inspect and diff before running:
   output tets are then classified by centroid: those inside the part duplicate
   existing elements and are dropped, those outside every region are scaffolding
   and are dropped; the survivors are the new candidate elements.
+
+* **Element sizing** — a background sizing mesh (TetGen ``-m``, see
+  :class:`BgSizing`), NOT a global ``-a`` volume bound: the target-edge field
+  equals the part-derived element size inside every growth region (plus a
+  small halo) and coarsens with distance, capped at a fraction of the domain
+  diagonal. A global ``-a`` would mesh the scaffolding between the part and
+  the domain walls as finely as the candidates — for a large part with small
+  regions that is tens of millions of throw-away tets (memory runaway); with
+  the sizing field the scaffold cost scales with the *region* volume budget
+  plus a thin boundary layer along the part surface.
 
 * **Ids** — new node ids are allocated above ``max(existing)`` and >=
   ``design_node_min`` (so the free-node guard can pin them while void); new
@@ -69,9 +80,21 @@ GROWTH_MESH_DIRNAME = "growth_mesh"
 _TET_FACES = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])
 
 #: backend signature: (points (P,3), tris (F,3) indices into points,
-#: max tet volume, -q radius-edge ratio) -> (out points (Q,3), out tets (M,4))
-MeshBackend = Callable[[np.ndarray, np.ndarray, float, float],
+#: target tet volume inside the regions, -q radius-edge ratio, background
+#: sizing field or None for a single global -a bound)
+#: -> (out points (Q,3), out tets (M,4))
+MeshBackend = Callable[[np.ndarray, np.ndarray, float, float,
+                        Optional["BgSizing"]],
                        tuple[np.ndarray, np.ndarray]]
+
+#: background sizing-mesh resolution near the regions, x target_edge
+_BG_CELL_FACTOR = 4.0
+
+#: fine-sizing halo around each region AABB, x target_edge. Two background
+#: cells: every bg tet overlapping a region then has ALL its nodes at the
+#: target value, so the size interpolated anywhere inside the region is
+#: exactly target_edge (gradation cannot clip the region boundary).
+_SIZING_PAD_FACTOR = 2.0 * _BG_CELL_FACTOR
 
 
 # --------------------------------------------------------------------------- #
@@ -100,21 +123,29 @@ def mean_edge_length(points: np.ndarray, tris: np.ndarray) -> float:
     return float(np.linalg.norm(e, axis=1).mean())
 
 
-def box_shell(lo: np.ndarray, hi: np.ndarray, cell: float
+def box_shell(lo: np.ndarray, hi: np.ndarray, cell: float,
+              grids: Optional[list] = None
               ) -> tuple[np.ndarray, np.ndarray]:
     """Triangulated axis-aligned box shell over ``[lo, hi]`` with every wall
     subdivided into ~*cell*-sized quads (each split into two triangles).
 
     The subdivision matters: under ``-Y`` TetGen may not split boundary facets,
     and it *rejects* interior refinement points that encroach one — a wall left
-    as two giant triangles would silently veto the ``-a`` element sizing across
-    most of the domain (verified against tetgen 0.8.4). Pre-subdivided wall
-    vertices are ordinary input points, so refinement proceeds."""
+    as two giant triangles would silently veto the ``-a``/``-m`` element sizing
+    across most of the domain (verified against tetgen 0.8.4). Pre-subdivided
+    wall vertices are ordinary input points, so refinement proceeds.
+
+    *grids* (three 1-D arrays of wall grid lines, one per axis) overrides the
+    uniform subdivision: :func:`build_plc` passes :func:`graded_axis` grids so
+    the walls are fine only near the growth regions — under ``-m`` sizing the
+    far walls carry coarse tets and giant fine-wall grids would just burn
+    memory (all wall vertices are preserved input points)."""
     lo = np.asarray(lo, dtype=float)
     hi = np.asarray(hi, dtype=float)
-    ndiv = np.ceil((hi - lo) / max(float(cell), 1e-12)).astype(int)
-    ndiv = np.clip(ndiv, 1, 256)          # cap the wall triangle count
-    grids = [np.linspace(lo[a], hi[a], ndiv[a] + 1) for a in range(3)]
+    if grids is None:
+        ndiv = np.ceil((hi - lo) / max(float(cell), 1e-12)).astype(int)
+        ndiv = np.clip(ndiv, 1, 256)      # cap the wall triangle count
+        grids = [np.linspace(lo[a], hi[a], ndiv[a] + 1) for a in range(3)]
     pts_all, tri_all, off = [], [], 0
     for ax in range(3):                                  # wall-normal axis
         u, v = (ax + 1) % 3, (ax + 2) % 3
@@ -141,39 +172,57 @@ def box_shell(lo: np.ndarray, hi: np.ndarray, cell: float
 
 
 def build_plc(surf_points: np.ndarray, surf_tris: np.ndarray,
-              lo: np.ndarray, hi: np.ndarray, wall_cell: float
+              lo: np.ndarray, hi: np.ndarray, wall_cell: float,
+              fine_intervals: Optional[list] = None,
+              coarse_cell: Optional[float] = None
               ) -> tuple[np.ndarray, np.ndarray]:
     """Assemble the PLC: the part surface plus the subdivided outer box shell
     over ``[lo, hi]``. Returns ``(points, tris)`` with the surface points FIRST
     and un-reindexed, so index ``i < len(surf_points)`` still refers to surface
-    point ``i`` (the node-id mapping relies on this)."""
-    shell_pts, shell_tris = box_shell(lo, hi, wall_cell)
+    point ``i`` (the node-id mapping relies on this).
+
+    With *fine_intervals* (per-axis lists of ``(lo, hi)`` bands — the padded
+    region projections) and *coarse_cell*, the walls are subdivided at
+    *wall_cell* only inside the bands and coarsen geometrically to
+    *coarse_cell* away from them, matching the ``-m`` sizing field: a wall
+    facet only vetoes refinement it is actually near (see :func:`box_shell`)."""
+    if fine_intervals is not None:
+        cc = wall_cell if coarse_cell is None else max(coarse_cell, wall_cell)
+        grids = [graded_axis(lo[a], hi[a], fine_intervals[a], wall_cell, cc)
+                 for a in range(3)]
+        shell_pts, shell_tris = box_shell(lo, hi, wall_cell, grids=grids)
+    else:
+        shell_pts, shell_tris = box_shell(lo, hi, wall_cell)
     points = np.vstack([surf_points, shell_pts])
     tris = np.vstack([surf_tris, shell_tris + len(surf_points)])
     return points, tris
 
 
-def region_bounds(boxes) -> tuple[np.ndarray, np.ndarray]:
-    """Loose AABB ``(lo, hi)`` over resolved growth regions (all shapes;
+def region_aabb(box) -> tuple[np.ndarray, np.ndarray]:
+    """Loose AABB ``(lo, hi)`` of ONE resolved growth region (all shapes;
     oriented boxes via their world-space corners, polyhedra via their explicit
     node set)."""
-    los, his = [], []
-    for b in boxes:
-        kind = b.shape_kind()
-        if kind == "sphere":
-            c = np.array([b.cx, b.cy, b.cz], dtype=float)
-            los.append(c - b.radius); his.append(c + b.radius)
-        elif kind == "cylinder":
-            p = np.array([[b.x1, b.y1, b.z1], [b.x2, b.y2, b.z2]], dtype=float)
-            los.append(p.min(axis=0) - b.radius)
-            his.append(p.max(axis=0) + b.radius)
-        elif kind == "polyhedron":
-            p = np.asarray(b.points, dtype=float)
-            los.append(p.min(axis=0)); his.append(p.max(axis=0))
-        else:
-            c = box_corners(b)
-            los.append(c.min(axis=0)); his.append(c.max(axis=0))
-    return np.min(los, axis=0), np.max(his, axis=0)
+    kind = box.shape_kind()
+    if kind == "sphere":
+        c = np.array([box.cx, box.cy, box.cz], dtype=float)
+        return c - box.radius, c + box.radius
+    if kind == "cylinder":
+        p = np.array([[box.x1, box.y1, box.z1],
+                      [box.x2, box.y2, box.z2]], dtype=float)
+        return p.min(axis=0) - box.radius, p.max(axis=0) + box.radius
+    if kind == "polyhedron":
+        p = np.asarray(box.points, dtype=float)
+        return p.min(axis=0), p.max(axis=0)
+    c = box_corners(box)
+    return c.min(axis=0), c.max(axis=0)
+
+
+def region_bounds(boxes) -> tuple[np.ndarray, np.ndarray]:
+    """Loose AABB ``(lo, hi)`` over all resolved growth regions
+    (:func:`region_aabb` per region)."""
+    aabbs = [region_aabb(b) for b in boxes]
+    return (np.min([lo for lo, _ in aabbs], axis=0),
+            np.max([hi for _, hi in aabbs], axis=0))
 
 
 def points_in_tets(points: np.ndarray, tet_xyz: np.ndarray) -> np.ndarray:
@@ -257,6 +306,109 @@ def map_to_original_nodes(out_points: np.ndarray, surf_xyz: np.ndarray,
 
 
 # --------------------------------------------------------------------------- #
+# background sizing mesh (TetGen -m; hermetic construction, numpy only)
+# --------------------------------------------------------------------------- #
+
+@dataclasses.dataclass(frozen=True)
+class BgSizing:
+    """A coarse background tet mesh carrying a per-node target-edge field —
+    TetGen's ``-m`` metric input. This is what keeps the PREPARE step's memory
+    proportional to the *region* volume: the field is ``target_edge`` inside
+    every growth region (plus the :data:`_SIZING_PAD_FACTOR` halo) and grows
+    with distance, so only the candidates are meshed finely while the
+    scaffolding coarsens toward the cap."""
+    points: np.ndarray          # (N, 3) node coordinates
+    tets: np.ndarray            # (M, 4) indices into points
+    mtr: np.ndarray             # (N,) target edge length per node
+
+
+def graded_axis(lo: float, hi: float, intervals, fine: float, coarse: float,
+                growth: float = 1.5) -> np.ndarray:
+    """1-D grid over ``[lo, hi]``: ~*fine* spacing inside the ``(lo, hi)``
+    *intervals*, steps growing geometrically (factor *growth*) with distance
+    from the nearest interval, capped at *coarse*. The wall grids and the
+    background mesh both use this, so fine resolution exists exactly in the
+    bands the regions project onto and nowhere else."""
+    lo, hi = float(lo), float(hi)
+    fine = max(float(fine), 1e-12)
+    coarse = max(float(coarse), fine)
+    if not hi - lo > 0.0:
+        return np.array([lo, hi])
+    pts = [lo]
+    x = lo
+    while True:
+        d = min((max(a - x, x - b, 0.0) for a, b in intervals),
+                default=np.inf)
+        h = min(coarse, fine + (growth - 1.0) * d)
+        if np.isfinite(d) and d > 0.0:
+            h = min(h, max(d, fine))     # approach an interval, don't leap it
+        if x + 1.5 * h >= hi:            # absorb the tail into the last cell
+            pts.append(hi)
+            return np.asarray(pts)
+        x += h
+        pts.append(x)
+
+
+def box_grid_tets(gx: np.ndarray, gy: np.ndarray, gz: np.ndarray
+                  ) -> tuple[np.ndarray, np.ndarray]:
+    """Tensor-product grid over the three axis-line arrays, each cell split
+    into 6 Kuhn tets around its main diagonal — conforming across cells (all
+    face diagonals run min-corner to max-corner) and positively oriented
+    (TetGen walks the background mesh and assumes consistent orientation)."""
+    nx, ny, nz = len(gx), len(gy), len(gz)
+    xx, yy, zz = np.meshgrid(gx, gy, gz, indexing="ij")
+    pts = np.stack([xx, yy, zz], axis=-1).reshape(-1, 3)
+    idx = np.arange(nx * ny * nz).reshape(nx, ny, nz)
+    c = {(dx, dy, dz): idx[dx:nx - 1 + dx, dy:ny - 1 + dy,
+                           dz:nz - 1 + dz].ravel()
+         for dx in (0, 1) for dy in (0, 1) for dz in (0, 1)}
+    # the 6 monotone corner-to-corner paths 000 -> a -> b -> 111
+    paths = [((1, 0, 0), (1, 1, 0)), ((1, 0, 0), (1, 0, 1)),
+             ((0, 1, 0), (1, 1, 0)), ((0, 1, 0), (0, 1, 1)),
+             ((0, 0, 1), (1, 0, 1)), ((0, 0, 1), (0, 1, 1))]
+    tets = np.concatenate([np.stack([c[0, 0, 0], c[a], c[b], c[1, 1, 1]],
+                                    axis=1) for a, b in paths])
+    return pts, orient_tets(tets, pts, 1.0)
+
+
+def sizing_field(points: np.ndarray, aabbs, target: float, pad: float,
+                 cap: float, slope: float = 1.0) -> np.ndarray:
+    """Target edge length at each of *points*: *target* within *pad* of any
+    region AABB, growing at *slope* per unit distance beyond that, capped at
+    *cap*. Distance to the AABB (not the exact shape) errs on the fine side
+    for non-box regions — a little over-refinement around their corners, never
+    an under-resolved region."""
+    d = np.full(len(points), np.inf)
+    for lo, hi in aabbs:
+        v = np.maximum(np.maximum(lo - points, points - hi), 0.0)
+        d = np.minimum(d, np.linalg.norm(v, axis=1))
+    return np.clip(target + slope * np.maximum(d - pad, 0.0), target, cap)
+
+
+def build_sizing(lo: np.ndarray, hi: np.ndarray, boxes, target_edge: float,
+                 cap: float) -> BgSizing:
+    """The background sizing mesh for the (margin-inflated) domain box
+    ``[lo, hi]``: a graded tensor grid, fine (:data:`_BG_CELL_FACTOR` x
+    target) near the region AABBs, coarsening to *cap* in the far field. The
+    bg box is inflated by one *cap* cell so every PLC point lies strictly
+    inside it (a point-location miss segfaults tetgen, pyvista/tetgen#65),
+    and every axis keeps >= 4 grid lines (a 1-cell-thin background mesh
+    crashes TetGen's reconstruction, verified with tetgen 0.8.4)."""
+    aabbs = [region_aabb(b) for b in boxes]
+    h_bg = _BG_CELL_FACTOR * target_edge
+    pad = _SIZING_PAD_FACTOR * target_edge
+    grids = []
+    for a in range(3):
+        iv = [(alo[a] - pad, ahi[a] + pad) for alo, ahi in aabbs]
+        g = graded_axis(lo[a] - cap, hi[a] + cap, iv, h_bg, cap)
+        if len(g) < 4:
+            g = np.linspace(lo[a] - cap, hi[a] + cap, 4)
+        grids.append(g)
+    pts, tets = box_grid_tets(*grids)
+    return BgSizing(pts, tets, sizing_field(pts, aabbs, target_edge, pad, cap))
+
+
+# --------------------------------------------------------------------------- #
 # deck card formatting (matches the converter's fixed 10/20/20/20 columns)
 # --------------------------------------------------------------------------- #
 
@@ -286,15 +438,28 @@ def allocate_ids(existing_max: int, count: int, minimum: int = 0) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 def tetgen_backend(points: np.ndarray, tris: np.ndarray,
-                   max_volume: float, min_ratio: float
+                   max_volume: float, min_ratio: float,
+                   sizing: Optional[BgSizing] = None
                    ) -> tuple[np.ndarray, np.ndarray]:
     """Constrained tetrahedralisation of the PLC via the ``tetgen`` package.
 
     ``nobisect`` is TetGen's ``-Y``: the input facets/vertices (the part
     surface) are preserved exactly and Steiner points are inserted only in the
     interior — the property the whole node-conformity contract rests on.
-    ``max_volume`` (``-a``) carries the part-derived element sizing;
-    ``min_ratio`` (``-q``) the radius-edge quality bound."""
+    ``min_ratio`` (``-q``) is the radius-edge quality bound.
+
+    With *sizing* the element sizing comes from the background-mesh metric
+    (``-m``): fine only near the regions, so the scaffold outside them stops
+    consuming the fine element budget. Without it, ``max_volume`` (``-a``)
+    bounds every tet in the domain — the old behaviour, kept for callers
+    without a sizing field.
+
+    The ``-m`` run is normalised to a unit-scale box: the wrapper's
+    background-mesh path segfaults for domains more than a few absolute units
+    across regardless of offset (pyvista/tetgen#65, reproduced with 0.8.4 on
+    win/amd64); sizing is scale-invariant and the output is mapped back, the
+    preserved surface vertices landing within the coordinate-match tolerance
+    of :func:`map_to_original_nodes`."""
     try:
         import pyvista as pv
         import tetgen
@@ -305,15 +470,35 @@ def tetgen_backend(points: np.ndarray, tris: np.ndarray,
             "pip install \"oropt[growthmesh]\"  — note TetGen itself is "
             "AGPL-licensed (fine to use; evaluate before redistributing)."
         ) from exc
+    pts = np.asarray(points, dtype=float)
+    kwargs = dict(plc=True, nobisect=True, quality=True,
+                  minratio=float(min_ratio), steinerleft=-1, verbose=0)
+    offset, scale = np.zeros(3), 1.0
+    if sizing is None:
+        kwargs.update(fixedvolume=True, maxvolume=float(max_volume))
+    else:
+        try:
+            from tetgen.pytetgen import MTR_POINTDATA_KEY
+        except ImportError:                            # pragma: no cover
+            MTR_POINTDATA_KEY = "target_size"
+        bg_pts = np.asarray(sizing.points, dtype=float)
+        offset = bg_pts.min(axis=0)
+        scale = float((bg_pts.max(axis=0) - offset).max()) or 1.0
+        bg_tets = np.asarray(sizing.tets, dtype=np.int64)
+        cells = np.hstack([np.full((len(bg_tets), 1), 4, dtype=np.int64),
+                           bg_tets]).ravel()
+        celltypes = np.full(len(bg_tets), pv.CellType.TETRA, dtype=np.uint8)
+        grid = pv.UnstructuredGrid(cells, celltypes, (bg_pts - offset) / scale)
+        grid.point_data[MTR_POINTDATA_KEY] = \
+            np.asarray(sizing.mtr, dtype=float) / scale
+        kwargs["bgmesh"] = grid
+        pts = (pts - offset) / scale
     faces = np.hstack([np.full((len(tris), 1), 3, dtype=np.int64),
                        np.asarray(tris, dtype=np.int64)]).ravel()
-    plc = pv.PolyData(np.asarray(points, dtype=float), faces)
-    tg = tetgen.TetGen(plc)
-    out = tg.tetrahedralize(plc=True, nobisect=True, quality=True,
-                            minratio=float(min_ratio),
-                            fixedvolume=True, maxvolume=float(max_volume),
-                            steinerleft=-1, verbose=0)
-    return np.asarray(out[0], dtype=float), np.asarray(out[1], dtype=np.int64)
+    tg = tetgen.TetGen(pv.PolyData(pts, faces))
+    out = tg.tetrahedralize(**kwargs)
+    return (np.asarray(out[0], dtype=float) * scale + offset,
+            np.asarray(out[1], dtype=np.int64))
 
 
 # --------------------------------------------------------------------------- #
@@ -331,7 +516,7 @@ class GrowthMeshReport:
     n_generated: int            # backend output tets before classification
     per_region: list            # (region label, new candidate elements) rows
     target_edge: float          # element sizing used (model units)
-    max_volume: float           # the TetGen -a volume bound derived from it
+    max_volume: float           # target tet volume inside the regions
     quality_min: float          # min/median shape quality of the new elements
     quality_median: float
     node_id_range: tuple        # (first, last) new node ids
@@ -417,19 +602,34 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
     lo = np.minimum(surf_xyz.min(axis=0), rlo)
     hi = np.maximum(surf_xyz.max(axis=0), rhi)
     diag = float(np.linalg.norm(hi - lo))
-    # Walls subdivided at ~2x the target edge; the margin keeps the regions
-    # clear of the wall facets' encroachment zones (see box_shell).
-    margin = max(4.0 * target_edge, 1e-3 * diag)
-    points, tris = build_plc(surf_xyz, surf_tris, lo - margin, hi + margin,
-                             wall_cell=2.0 * target_edge)
+    # Far-field element scale: the -m sizing cap and the coarse wall cell.
+    cap_edge = max(diag / 16.0, 2.0 * target_edge)
+    # Walls subdivided at ~2x the target edge near the regions, coarsening to
+    # ~cap_edge away from them; the margin keeps the regions clear of the fine
+    # wall facets' encroachment zones and the part surface clear of the coarse
+    # ones (see box_shell).
+    margin = max(4.0 * target_edge, 0.6 * cap_edge, 1e-3 * diag)
+    dlo, dhi = lo - margin, hi + margin
+    pad = _SIZING_PAD_FACTOR * target_edge
+    aabbs = [region_aabb(b) for b in boxes]
+    fine_iv = [[(alo[a] - pad, ahi[a] + pad) for alo, ahi in aabbs]
+               for a in range(3)]
+    points, tris = build_plc(surf_xyz, surf_tris, dlo, dhi,
+                             wall_cell=2.0 * target_edge,
+                             fine_intervals=fine_iv, coarse_cell=cap_edge)
+    sizing = build_sizing(dlo, dhi, boxes, target_edge, cap_edge)
 
     log(f"[oropt] growth-mesh: part surface {len(surf_tris)} triangles / "
         f"{len(surf_ids)} nodes; mean edge {edge:.4g}, target edge "
-        f"{target_edge:.4g} (size_factor {size_factor}), max tet volume "
+        f"{target_edge:.4g} (size_factor {size_factor}), target tet volume "
         f"{max_volume:.4g}")
+    log(f"[oropt] growth-mesh: sizing field {target_edge:.4g} inside the "
+        f"regions (+{pad:.3g} halo) growing to {cap_edge:.4g} far away; "
+        f"background mesh {len(sizing.points)} nodes / {len(sizing.tets)} "
+        f"tets")
     log(f"[oropt] growth-mesh: tetrahedralising the PLC "
         f"({len(points)} points) ...")
-    out_points, out_tets = backend(points, tris, max_volume, min_ratio)
+    out_points, out_tets = backend(points, tris, max_volume, min_ratio, sizing)
     log(f"[oropt] growth-mesh: backend returned {len(out_tets)} tets / "
         f"{len(out_points)} points")
 
