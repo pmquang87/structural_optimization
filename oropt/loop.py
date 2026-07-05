@@ -6,6 +6,7 @@ monitor without ever touching the run. Resumable from ``checkpoint.npz``.
 from __future__ import annotations
 
 import dataclasses
+import difflib
 import shutil
 import time
 from pathlib import Path
@@ -84,6 +85,56 @@ def collect_stress_exclude_nodes(deck: Deck, model) -> np.ndarray:
     if explicit:
         parts.append(np.asarray([int(v) for v in explicit], dtype=np.int64))
     return np.unique(np.concatenate(parts)) if parts else np.empty(0, np.int64)
+
+
+def validate_group_ids(deck: Deck, model) -> None:
+    """Fail fast on configured /GRNOD/NODE group ids that select zero nodes.
+
+    :meth:`oropt.deck.Deck.group_nodes` silently returns empty for an id with
+    no matching ``/GRNOD/NODE/<id>`` block, so a typo'd ``bc_group_id`` /
+    ``freeze_group_ids`` / ``stress_exclude_group_ids`` entry would quietly
+    disable its region and let a multi-hour run be steered by results the
+    config meant to alter (a stress-exclusion id one digit off once kept a
+    load-introduction hot-spot in sigma_max, flagging a feasible design
+    INFEASIBLE for the whole run). Raises ``ValueError`` at run start --
+    before any ~13-min solve -- naming the offending setting and the deck's
+    actual group ids, and distinguishing an id **absent** from the deck
+    (likely a typo; the closest existing id is suggested) from a group that
+    exists but **lists no nodes** (fix the group in the pre-processor)."""
+    existing = deck.group_ids()
+    have = set(existing)
+    problems: list[str] = []
+    checks = (("bc_group_id", [getattr(model, "bc_group_id", None)]),
+              ("freeze_group_ids", getattr(model, "freeze_group_ids", []) or []),
+              ("stress_exclude_group_ids",
+               getattr(model, "stress_exclude_group_ids", []) or []))
+    for setting, gids in checks:
+        for gid in gids:
+            if gid is None:
+                continue
+            gid = int(gid)
+            if gid in have:
+                if not deck.group_nodes(gid).size:
+                    problems.append(f"{setting}: /GRNOD/NODE/{gid} exists in "
+                                    "the deck but lists no nodes")
+                continue
+            close = difflib.get_close_matches(
+                str(gid), [str(g) for g in existing], n=1)
+            hint = f" (closest in the deck: {close[0]})" if close else ""
+            problems.append(f"{setting}: no /GRNOD/NODE/{gid} in the deck{hint}")
+    if problems:
+        if existing:
+            avail = ", ".join(str(g) for g in existing[:20])
+            if len(existing) > 20:
+                avail += f", ... ({len(existing)} total)"
+        else:
+            avail = "none"
+        raise ValueError(
+            "configured node group(s) select zero nodes -- "
+            + "; ".join(problems)
+            + f". /GRNOD/NODE groups in the deck: {avail}. A zero-node group "
+            "silently disables its BC-protection / keep-out / stress-exclusion "
+            "region, so the run stops now instead of hours in")
 
 
 def stress_exclude_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
@@ -268,6 +319,7 @@ class GrowthPreview:
     total_elements: int     # deck.n_design_elements
     guard: str = ""         # run-start guard error that would abort a run, if any
     notice: str = ""        # config-level caveat (carve off with no id boundary)
+    group_guard: str = ""   # /GRNOD group-id guard error (typo'd bc/freeze/stress-exclude id), if any
 
 
 def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
@@ -286,7 +338,11 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
     first error that would abort a run (an empty region, candidate nodes below
     ``design_node_min``, or an unreachable candidate); ``guard`` is ``""`` when the
     regions are run-ready, with ``total_candidates`` the unique element count that
-    would then start void. Never raises."""
+    would then start void. Independently runs the /GRNOD group-id guard
+    (:func:`validate_group_ids`) -- even with no growth regions configured -- and
+    reports its error in ``group_guard``, so a typo'd keep-out / stress-exclusion /
+    BC group id surfaces in the preview panel instead of hours into a run.
+    Never raises."""
     boxes = getattr(model, "growth_boxes", []) or []
     rows: list = []
     for i, b in enumerate(boxes):
@@ -317,9 +373,14 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
             guard = str(exc)
     notice = (_NO_BOUNDARY_NOTE
               if any(_no_boundary(b, model) for b in boxes) else "")
+    group_guard = ""
+    try:
+        validate_group_ids(deck, model)
+    except ValueError as exc:
+        group_guard = str(exc)
     return GrowthPreview(rows=rows, total_candidates=total,
                          total_elements=deck.n_design_elements, guard=guard,
-                         notice=notice)
+                         notice=notice, group_guard=group_guard)
 
 
 def _clean_solve_dir(run_dir: Path) -> None:
@@ -510,6 +571,7 @@ def run_optimization(cfg: Config, resume: bool = False,
     log(f"[oropt] loading deck {primary.starter}"
         + (f" (+{n_cases - 1} more load case(s))" if n_cases > 1 else ""))
     deck = Deck.load(primary.starter, m.design_part_id, m.design_node_min)
+    validate_group_ids(deck, m)   # typo'd /GRNOD ids fail here, not hours in
     case_decks = [deck]
     for case in cases[1:]:
         cdeck = Deck.load(case.starter, m.design_part_id, m.design_node_min)

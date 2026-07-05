@@ -289,6 +289,12 @@ in progress.
   still take part in the optimisation; list them in `freeze_*` as well if you also
   want to protect them from removal. Editable on the GUI's *Optimiser / Output* tab;
   the *Monitor* and report then note how many elements σ_max is ignoring.
+  Every configured `/GRNOD/NODE` group id (`bc_group_id`, `freeze_group_ids`,
+  `stress_exclude_group_ids`) is **validated at run start**: an id the deck
+  doesn't contain — or a group that lists no nodes — aborts before the first
+  solve with the deck's actual group ids (a typo'd id would otherwise silently
+  select zero nodes and quietly disable its region). The GUI's *Preview region
+  element counts* button runs the same check without starting a run.
 * **Growth regions — add material** (`model.growth_boxes`, none by default) —
   regions (the LS-DYNA `*DEFINE_BOX` / Radioss `/BOX/...` family; multiple
   regions act as a union) marking **candidate growth material**: every design
@@ -619,8 +625,9 @@ zoom/rotate viewer inlined into `report.html` (and also written as the standalon
   (σ_max = 308.305 MPa, disp = 1.229 mm, NORMAL TERMINATION).
 * A hand-deletion (−16 % volume, 16 352 freed nodes auto-pinned) produces a deck
   that OpenRadioss solves to NORMAL TERMINATION.
-* `pytest` (409 tests, all hermetic — no OpenRadioss needed) covers deck
-  round-trip/pinning, mesh geometry/connectivity/protection, BESO ranking/threshold,
+* `pytest` (493 tests, all hermetic — no OpenRadioss needed) covers deck
+  round-trip/pinning, mesh geometry/connectivity/protection, the **/GRNOD
+  group-id run-start guard**, BESO ranking/threshold,
   the **growth boxes** (candidate selection, run-start guards, growth through
   each optimiser's update), the **growth-mesh** PREPARE step (surface
   extraction, PLC assembly, classification, id allocation, deck splicing and

@@ -174,6 +174,23 @@ class Deck:
             i = j
         return top
 
+    def group_ids(self) -> list[int]:
+        """Ids of every ``/GRNOD/NODE/<id>`` block in the deck (sorted, unique).
+
+        :meth:`group_nodes` silently returns empty for an id with no matching
+        block, so the run-start guard (:func:`oropt.loop.validate_group_ids`)
+        checks configured group ids against this list and can name the deck's
+        real ids when one is mistyped."""
+        ids: set[int] = set()
+        for ln in self.lines:
+            s = ln.strip()
+            if _GRNOD_RE.match(s):
+                try:
+                    ids.add(int(s.split("/")[3]))
+                except (IndexError, ValueError):
+                    continue
+        return sorted(ids)
+
     def group_nodes(self, group_id: int) -> np.ndarray:
         """Node ids listed in a specific ``/GRNOD/NODE/<group_id>`` block."""
         target = f"/GRNOD/NODE/{group_id}"
