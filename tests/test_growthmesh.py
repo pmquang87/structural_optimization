@@ -510,6 +510,36 @@ def test_prepare_multi_case_consistent_splice(tmp_path, mini_engine_path):
     assert np.isin(rep.node_id_range, db.node_ids).all()
 
 
+def test_deck_max_node_id_spans_all_node_blocks(tmp_path):
+    """Converter output carries the other includes' nodes in *later* /NODE
+    blocks; ``node_ids`` exposes only the first (design) block, so the id
+    ceiling for generated nodes must come from ``max_node_id()`` instead."""
+    p = _write_mini(tmp_path, extra_node="/NODE\n  60000042                 "
+                                         "9.0                 9.0"
+                                         "                 9.0")
+    d = Deck.load(p, 60000000, 60000000)
+    assert int(d.node_ids.max()) == 60000005         # first block only
+    assert d.max_node_id() == 60000042               # sees the second block
+
+
+def test_prepare_new_node_ids_clear_all_node_blocks(tmp_path, mini_engine_path):
+    """New node ids must clear every /NODE block, not just the design part's:
+    a collision with a later block's id is starter-fatal (ERROR 56 'NODE ID
+    DECLARED MULTIPLE TIMES', and the duplicate's differing coordinates fold
+    the original node's elements into ERROR 245 zero/negative volumes —
+    observed live on the elevator-linkage case, node 60417642)."""
+    _write_mini(tmp_path, extra_node="/NODE\n  60000042                 9.0"
+                                     "                 9.0"
+                                     "                 9.0")
+    cfg = _mini_cfg(tmp_path, [WING])
+    rep = prepare_growth_mesh(cfg, backend=_fake_backend, log=_silent)
+    assert rep.node_id_range == (60000043, 60000044)   # above ALL blocks
+    ext = Deck.load(tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad",
+                    60000000, 60000000)
+    assert ext.max_node_id() == 60000044
+    assert np.isin(rep.node_id_range, ext.node_ids).all()   # spliced in block 1
+
+
 def test_prepare_no_regions_raises(tmp_path):
     _write_mini(tmp_path)
     with pytest.raises(ValueError, match="no growth regions"):

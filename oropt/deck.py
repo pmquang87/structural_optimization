@@ -147,6 +147,33 @@ class Deck:
     def n_design_elements(self) -> int:
         return int(self.elem_ids.size)
 
+    def max_node_id(self) -> int:
+        """Highest node id across **all** ``/NODE`` blocks of the deck.
+
+        ``node_ids`` deliberately exposes only the first block (the design
+        part's, the one the optimiser rewrites), but converter output can
+        carry further ``/NODE`` blocks — one per source include, e.g. the
+        rigid parts' nodes — whose ids may exceed the first block's.
+        Generated-node id allocation must clear every block, or the starter
+        rejects the extended deck with *NODE ID=... HAS BEEN DECLARED
+        MULTIPLE TIMES* (and, the duplicate's coordinates differing, folds
+        the elements on the original node into zero/negative volumes)."""
+        top = 0
+        i, n = 0, len(self.lines)
+        while i < n:
+            if self.lines[i].strip() != "/NODE":
+                i += 1
+                continue
+            j = i + 1
+            while j < n and not _is_section(self.lines[j]):
+                if not _is_comment(self.lines[j]):
+                    nid = _parse_node(self.lines[j])[0]
+                    if nid > top:
+                        top = nid
+                j += 1
+            i = j
+        return top
+
     def group_nodes(self, group_id: int) -> np.ndarray:
         """Node ids listed in a specific ``/GRNOD/NODE/<group_id>`` block."""
         target = f"/GRNOD/NODE/{group_id}"
