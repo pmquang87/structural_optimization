@@ -214,6 +214,19 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     elif cfg.run.np != 1:
         warn(f"run.np={cfg.run.np}: the native implicit + solid-contact solver "
              "requires np=1 (it segfaults otherwise)")
+    # --- engine non-convergence watchdog ---
+    if cfg.run.engine_soft_timeout_s > 0 \
+            and cfg.run.engine_soft_timeout_s >= cfg.run.engine_timeout_s:
+        warn(f"run.engine_soft_timeout_s={cfg.run.engine_soft_timeout_s:g} >= "
+             f"engine_timeout_s={cfg.run.engine_timeout_s:g}: the hard kill "
+             "fires first (and fails the run), so the soft budget never "
+             "triggers the treat-as-infeasible back-off")
+    if cfg.run.diverge_fail_after < 1:
+        err(f"run.diverge_fail_after must be >= 1: got "
+            f"{cfg.run.diverge_fail_after}")
+    if cfg.run.diverge_max_cycles < 0:
+        err(f"run.diverge_max_cycles must be >= 0 (0 = off): got "
+            f"{cfg.run.diverge_max_cycles}")
 
     # --- numeric sanity (knobs of the active optimiser block) ---
     opt = cfg.active_opts()

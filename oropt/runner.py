@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,11 @@ class RunResult:
     returncode: Optional[int] = None
     cycles: Optional[int] = None
     elapsed_s: Optional[float] = None
+    # True when the engine was killed because the implicit solve was judged
+    # non-converging (a diverge-cycle streak or the soft wall-clock budget) --
+    # NOT a solver error. The loop treats such an iteration as INFEASIBLE and
+    # backs off instead of failing the run.
+    diverged: bool = False
 
 
 def build_env(cfg: Config) -> dict:
@@ -159,6 +165,123 @@ def _engine_ok(out_file: Path) -> tuple[bool, str]:
     return False, "no NORMAL TERMINATION found"
 
 
+# ---- implicit non-convergence watchdog --------------------------------------
+# A design whose load path was severed (e.g. over-carved by the optimiser) does
+# not make the implicit engine error out: every attempt prints
+# "--ITERATION DIVERGE with MAX_ITER REACHED--" then
+# "--NEXT TIMESTEP IS DECREASED BY-- 0.6667E+00" and the retry diverges again,
+# grinding until engine_timeout_s (typically hours). Healthy solves print
+# *isolated* DIVERGE lines too and recover -- the next step converges (an
+# iteration row ending in "C") and the timestep is increased back -- so only an
+# unbroken streak of diverge cycles with no accepted step between them counts.
+
+_DIVERGE_MARK = "--ITERATION DIVERGE"
+_DT_INCREASE_MARK = "IS INCREASED BY"
+# An accepted iteration row of the implicit convergence table, e.g.
+# "     2              4.929E-01  4.653E-02  1.835E-02     C"
+# (iter number, optional stiffness-reformed "Y", three residuals, Conv.stat C).
+_CONV_ROW = re.compile(
+    r"^\s*\d+\s+(?:Y\s+)?(?:[0-9][0-9.eE+-]*\s+){3}C\s*$")
+
+_POLL_S = 5.0   # engine watchdog poll interval (module-level so tests can shrink it)
+
+
+class DivergenceMonitor:
+    """Streaming detector for a non-converging implicit solve.
+
+    Feed it chunks of the growing engine listing (any split, mid-line is fine);
+    it tracks the current streak of consecutive ITERATION DIVERGE cycles,
+    resetting whenever a step is accepted (a converged iteration row or a
+    timestep increase). Returns a reason string once the streak reaches
+    *max_cycles*, ``None`` while the solve still looks alive. The check runs
+    after each whole chunk so a streak that already recovered within the same
+    chunk never trips. ``max_cycles <= 0`` disables detection."""
+
+    def __init__(self, max_cycles: int):
+        self.max_cycles = int(max_cycles)
+        self.streak = 0
+        self._tail = ""          # unfinished last line, waits for the next chunk
+
+    def feed(self, chunk: str) -> Optional[str]:
+        if self.max_cycles <= 0:
+            return None
+        if chunk:
+            lines = (self._tail + chunk).split("\n")
+            self._tail = lines.pop()
+            for line in lines:
+                if _DIVERGE_MARK in line:
+                    self.streak += 1
+                elif _DT_INCREASE_MARK in line or _CONV_ROW.match(line):
+                    self.streak = 0
+        if self.streak >= self.max_cycles:
+            return (f"{self.streak} consecutive ITERATION DIVERGE / "
+                    "timestep-decrease cycles without an accepted step "
+                    f"(run.diverge_max_cycles={self.max_cycles})")
+        return None
+
+
+def _read_new(path: Path, offset: list) -> str:
+    """New bytes of *path* since ``offset[0]`` (advanced in place); "" while the
+    file does not exist yet or nothing was appended."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset[0])
+            data = fh.read()
+            offset[0] += len(data)
+    except OSError:
+        return ""
+    return data.decode("utf-8", "replace")
+
+
+def _run_engine(cfg: Config, cmd, cwd: Path, env: dict, log: Path,
+                listing: Path) -> tuple[Optional[int], Optional[str]]:
+    """Run the engine under the non-convergence watchdog.
+
+    Like :func:`_run` but polls the growing listing (and the console log)
+    every ``_POLL_S`` seconds for a diverge-cycle streak, and enforces the soft
+    wall-clock budget ``run.engine_soft_timeout_s``. Returns ``(returncode,
+    None)`` when the engine exits on its own, or ``(None, reason)`` after
+    killing a solve judged non-converging. ``run.engine_timeout_s`` stays the
+    hard kill and raises :class:`subprocess.TimeoutExpired`, exactly like the
+    plain runner. (Killing the docker CLI leaves the container to be reaped by
+    ``--rm``, the same semantics the hard timeout always had.)"""
+    soft = cfg.run.engine_soft_timeout_s
+    hard = cfg.run.engine_timeout_s
+    # Fresh watch state; drop a stale listing from a previous solve in the same
+    # dir so an old diverge streak cannot trip the monitor before the engine
+    # recreates the file.
+    listing.unlink(missing_ok=True)
+    watch = [(listing, DivergenceMonitor(cfg.run.diverge_max_cycles), [0]),
+             (log, DivergenceMonitor(cfg.run.diverge_max_cycles), [0])]
+    start = time.monotonic()
+    with open(log, "w", encoding="utf-8", errors="replace") as fh:
+        proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=fh,
+                                stderr=subprocess.STDOUT)
+        try:
+            while True:
+                try:
+                    return proc.wait(timeout=_POLL_S), None
+                except subprocess.TimeoutExpired:
+                    pass
+                elapsed = time.monotonic() - start
+                if elapsed >= hard:
+                    raise subprocess.TimeoutExpired(cmd, hard)
+                if soft and soft > 0 and elapsed >= soft:
+                    return None, ("wall clock exceeded run.engine_soft_timeout_s"
+                                  f" ({soft:.0f} s)")
+                for path, monitor, offset in watch:
+                    reason = monitor.feed(_read_new(path, offset))
+                    if reason:
+                        return None, reason
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    pass
+
+
 def _parse_engine_stats(out_file: Path) -> tuple[Optional[int], Optional[float]]:
     if not out_file.exists():
         return None, None
@@ -200,20 +323,24 @@ def run_solver(cfg: Config, run_dir: str | Path,
             msg = f"{msg} [docker rc={cp.returncode}: {_log_tail(starter_log)}]"
         return RunResult(False, "starter", f"starter failed: {msg}", cp.returncode)
 
-    # --- engine ---
+    # --- engine (under the non-convergence watchdog) ---
     engine_log = run_dir / f"{stem}_engine.log"
+    listing = run_dir / f"{stem}_0001.out"
     try:
-        cp = _run(_engine_cmd(cfg, run_dir, stem), run_dir, env,
-                  engine_log, cfg.run.engine_timeout_s)
+        rc, diverged = _run_engine(cfg, _engine_cmd(cfg, run_dir, stem),
+                                   run_dir, env, engine_log, listing)
     except subprocess.TimeoutExpired:
         return RunResult(False, "engine", "engine timed out")
-    ok, msg = _engine_ok(run_dir / f"{stem}_0001.out")
-    cycles, elapsed = _parse_engine_stats(run_dir / f"{stem}_0001.out")
+    cycles, elapsed = _parse_engine_stats(listing)
+    if diverged:
+        return RunResult(False, "engine", f"engine did not converge: {diverged}",
+                         None, cycles, elapsed, diverged=True)
+    ok, msg = _engine_ok(listing)
     if not ok:
-        if cfg.docker.enabled and cp.returncode != 0:
-            msg = f"{msg} [docker rc={cp.returncode}: {_log_tail(engine_log)}]"
-        return RunResult(False, "engine", f"engine failed: {msg}", cp.returncode, cycles, elapsed)
-    return RunResult(True, "ok", msg, cp.returncode, cycles, elapsed)
+        if cfg.docker.enabled and rc != 0:
+            msg = f"{msg} [docker rc={rc}: {_log_tail(engine_log)}]"
+        return RunResult(False, "engine", f"engine failed: {msg}", rc, cycles, elapsed)
+    return RunResult(True, "ok", msg, rc, cycles, elapsed)
 
 
 def find_t01(run_dir: str | Path, stem: str) -> Optional[Path]:

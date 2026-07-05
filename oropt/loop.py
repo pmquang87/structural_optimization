@@ -668,6 +668,7 @@ def run_optimization(cfg: Config, resume: bool = False,
 
     vfs: list[float] = []
     elapsed = 0.0
+    consecutive_diverged = 0     # non-converged iterations in a row (watchdog)
     try:
         for it in range(start_iter, oc.max_iter):
             if should_stop and should_stop():
@@ -693,6 +694,66 @@ def run_optimization(cfg: Config, resume: bool = False,
             elapsed += iter_wall
 
             res = run_results[-1]
+            if not res.ok and res.diverged:
+                # ---- non-converged solve: INFEASIBLE, back off, carry on ---
+                # The engine watchdog killed a diverging implicit solve (severed
+                # load path, collapsing timestep). Its partial outputs are never
+                # parsed into the sensitivity; the iteration is treated like a
+                # violated constraint instead: the gate raises the volume target
+                # (worst violation -> the proportional back-off hits its cap)
+                # and the previous iteration's sensitivity re-grows material
+                # from the still-intact alive mask.
+                failed = cases[len(case_results)]
+                consecutive_diverged += 1
+                vf = opt.volume_fraction(alive)
+                infeasible_msg = (f"case {failed.name!r}: " if n_cases > 1 else "") \
+                    + "engine did not converge -- treated as infeasible"
+                log(f"[oropt] iter {it}: case {failed.name!r} did not converge "
+                    f"({res.message}); treated as INFEASIBLE, backing off "
+                    f"({consecutive_diverged}/{cfg.run.diverge_fail_after} "
+                    "consecutive)")
+                if consecutive_diverged >= cfg.run.diverge_fail_after:
+                    status.state = "failed"
+                    status.message = (
+                        f"{consecutive_diverged} consecutive iterations did not "
+                        "converge (run.diverge_fail_after="
+                        f"{cfg.run.diverge_fail_after}) -- last: {infeasible_msg}")
+                    status.iteration = it
+                    status.or_termination = res.message
+                    log(f"[oropt] SOLVE FAILED: {status.message}")
+                    break
+                vfs.append(vf)
+                status = st.Status(
+                    state="running", iteration=it, max_iter=oc.max_iter,
+                    volume_fraction=vf,
+                    sigma_allow=(primary.sigma_allow if primary.sigma_allow
+                                 is not None else float("nan")),
+                    d_allow=(min(primary_d_limits) if primary_d_limits
+                             else float("nan")),
+                    feasible=False, elements_alive=int(alive.sum()),
+                    elements_total=deck.n_design_elements,
+                    stress_excluded_elems=n_excluded,
+                    elements_candidate=n_candidate,
+                    elements_grown=int((alive & candidate).sum()),
+                    or_termination=res.message, iter_wall_s=iter_wall,
+                    elapsed_s=elapsed, eta_s=iter_wall * (oc.max_iter - it - 1),
+                    message=infeasible_msg, pid=pid)
+                st.write_status(work, status)
+                st.append_history(work, {
+                    "iteration": it, "volume_fraction": round(vf, 6),
+                    "sigma_max": float("nan"), "disp": float("nan"),
+                    "elements_alive": int(alive.sum()), "feasible": False,
+                    "iter_wall_s": round(iter_wall, 1),
+                    "or_termination": res.message})
+                # Without a previous sensitivity (very first iteration) there is
+                # nothing to re-grow with; the mask stays put and a
+                # deterministic re-diverge fails the run via diverge_fail_after.
+                if sens_prev is not None:
+                    target_vf = opt.next_target_vf(vf, False,
+                                                   violation=float("inf"))
+                    alive = opt.update(alive, sens_prev, target_vf)
+                st.save_checkpoint(work, it + 1, alive, sens_prev)
+                continue
             if not res.ok:
                 failed = cases[len(case_results)]
                 status.state = "failed"
@@ -702,6 +763,7 @@ def run_optimization(cfg: Config, resume: bool = False,
                 status.or_termination = res.message
                 log(f"[oropt] SOLVE FAILED: {status.message}")
                 break
+            consecutive_diverged = 0
 
             # ---- combine cases: weighted-sum sensitivity + worst-case gate -
             raws = [opt.raw_sensitivity(r, deck.elem_ids, alive)
