@@ -48,6 +48,15 @@ class RunOpts:
     use_mpi: bool = True       # launch engine via mpiexec -np N (the bare engine fails to load its MPI DLLs)
     starter_timeout_s: float = 600.0
     engine_timeout_s: float = 3600.0
+    # A non-converging implicit solve (e.g. an over-carved design severing the
+    # load path) never errors out: it prints "--ITERATION DIVERGE--" / timestep-
+    # decrease cycles forever and would grind until engine_timeout_s (often set
+    # to many hours as the hard kill). These knobs let the run react in minutes:
+    # the solve is killed, treated as INFEASIBLE (the gate backs off and the run
+    # continues from the previous design) instead of failing the whole run.
+    engine_soft_timeout_s: float = 0.0   # >0: per-solve wall-clock sanity budget (s); exceeded -> non-converged, not a run failure. engine_timeout_s stays the hard kill.
+    diverge_max_cycles: int = 12         # consecutive ITERATION DIVERGE / timestep-cut cycles with no accepted step between -> non-converging (0 = off). Healthy solves recover after 1-2; 12 means dt collapsed to ~0.8%.
+    diverge_fail_after: int = 3          # N consecutive non-converged iterations fail the run
     kmp_stacksize: str = "400m"
     anim_dt: float = 1.0       # animation output interval; >= termination time -> only the final state
 
