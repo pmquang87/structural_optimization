@@ -1054,3 +1054,43 @@ def test_resolve_growth_boxes_preserves_carve(tmp_path):
     [rb] = resolve_growth_boxes(
         deck, [GrowthBox(name="ref", deck_box_id=7001, carve=True)])
     assert rb.deck_box_id is None and rb.carve is True
+
+
+def test_app_preview_autofills_original_elem_max(tmp_path):
+    """Clicking 🔍 preview derives the original-part id boundary from the deck
+    (its highest design element id) while carve-off regions need it and it is
+    unset: the id input updates across the rerun and the preview table still
+    renders."""
+    import oropt
+    from pathlib import Path
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+
+    (tmp_path / "gp_0000.rad").write_text(GROWTH_DECK, encoding="utf-8")
+    cfg = Config()
+    cfg.model.case_dir = str(tmp_path)
+    cfg.work_dir = str(tmp_path / "work")
+    cfg.load_cases = [LoadCase(name="a", stem="gp", sigma_allow=1.0)]
+    cfg.model.growth_boxes = [BOX_E2]      # carve off by default, boundary unset
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg.to_yaml(cfg_path)
+
+    app_file = Path(oropt.__file__).resolve().parent / "gui" / "app.py"
+    at = AppTest.from_file(str(app_file), default_timeout=60)
+    at.run()
+    at.sidebar.text_input[0].set_value(str(cfg_path)).run()
+    assert not at.exception
+    thr = [n for n in at.number_input if n.key == "growth_orig_elem_max"]
+    assert thr and thr[0].value == 0                     # unset before the click
+    before = len(at.dataframe)
+    [b for b in at.button if b.key == "growth_preview"][0].click().run()
+    assert not at.exception
+    thr = [n for n in at.number_input if n.key == "growth_orig_elem_max"]
+    assert thr[0].value == 60000004        # GROWTH_DECK's highest element id
+    assert len(at.dataframe) > before      # preview table survived the rerun
+
+    # an explicitly set boundary is never overwritten by the auto-fill
+    thr[0].set_value(60000001).run()
+    [b for b in at.button if b.key == "growth_preview"][0].click().run()
+    assert not at.exception
+    thr = [n for n in at.number_input if n.key == "growth_orig_elem_max"]
+    assert thr[0].value == 60000001
