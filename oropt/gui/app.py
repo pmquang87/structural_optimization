@@ -836,7 +836,9 @@ def _render_growth_preview(cfg: Config) -> None:
         "🔍 Preview region element counts", key="growth_preview",
         help="Load the deck and count the design elements inside each region "
              "(they start void). Also runs the run-start guards, so a "
-             "mis-placed or un-meshed region is caught now, not hours in. "
+             "mis-placed or un-meshed region — or a typo'd keep-out / "
+             "stress-exclusion / BC /GRNOD group id — is caught now, not "
+             "hours in. "
              "While the original-part element-id boundary is unset, it is "
              "auto-filled with the deck's highest design element id.")
     preview, autofilled = None, None
@@ -896,9 +898,11 @@ def _render_growth_preview(cfg: Config) -> None:
            if preview.total_elements else 0.0)
     if preview.notice:
         st.warning(preview.notice)
+    if preview.group_guard:
+        st.error(f"⚠ Run-start guard would abort: {preview.group_guard}")
     if preview.guard:
         st.error(f"⚠ Run-start guard would abort: {preview.guard}")
-    else:
+    elif not preview.group_guard:
         st.success(
             f"{preview.total_candidates} of {preview.total_elements} design "
             f"elements ({pct:.1f}%) start void across all regions — regions are "
