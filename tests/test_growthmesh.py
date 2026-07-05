@@ -19,12 +19,14 @@ import pytest
 
 from oropt.config import Config, GrowthBox, LoadCase
 from oropt.deck import Deck, _parse_elem, _parse_node
-from oropt.growthmesh import (GROWTH_MESH_DIRNAME, allocate_ids, box_shell,
-                              build_plc, exterior_faces, format_elem_lines,
-                              format_node_lines, main, map_to_original_nodes,
-                              mean_edge_length, orient_tets, point_config_at,
-                              points_in_tets, prepare_growth_mesh,
-                              region_bounds, signed_volumes, tet_quality,
+from oropt.growthmesh import (GROWTH_MESH_DIRNAME, allocate_ids,
+                              box_grid_tets, box_shell, build_plc,
+                              build_sizing, exterior_faces, format_elem_lines,
+                              format_node_lines, graded_axis, main,
+                              map_to_original_nodes, mean_edge_length,
+                              orient_tets, point_config_at, points_in_tets,
+                              prepare_growth_mesh, region_aabb, region_bounds,
+                              signed_volumes, sizing_field, tet_quality,
                               tetgen_backend)
 from oropt.loop import growth_candidate_mask
 from oropt.mesh import Mesh
@@ -65,7 +67,7 @@ def _write_mini(tmp_path, stem="mini", extra_node: str = "") -> Path:
     return p
 
 
-def _fake_backend(points, tris, max_volume, min_ratio):
+def _fake_backend(points, tris, max_volume, min_ratio, sizing=None):
     """Fabricated 'TetGen': two good candidates on the x=0 face, one duplicate
     of an existing part element, one tet far outside every region."""
     surf = points[:5]                       # build_plc keeps surface points first
@@ -150,6 +152,137 @@ def test_region_bounds_polyhedron_points_min_max():
         [-0.5, 0.0, 0.25], [1.0, -2.0, 0.0], [0.0, 3.0, 0.5], [0.5, 0.5, 4.0]])])
     assert np.allclose(lo, [-0.5, -2.0, 0.0])
     assert np.allclose(hi, [1.0, 3.0, 4.0])
+
+
+# ---- background sizing mesh (the -m field replacing the global -a bound) -------
+def test_graded_axis_fine_in_band_coarse_far():
+    g = graded_axis(0.0, 100.0, [(10.0, 14.0)], fine=1.0, coarse=10.0)
+    assert g[0] == 0.0 and g[-1] == 100.0
+    steps = np.diff(g)
+    assert (steps > 0).all()
+    # ~fine spacing across the band, coarse cap far away from it
+    mids = (g[:-1] + g[1:]) / 2
+    in_band = (mids > 10.0) & (mids < 14.0)
+    assert in_band.any() and steps[in_band].max() <= 1.0 + 1e-9
+    far = mids > 60.0
+    assert steps[far].min() > 5.0
+    # and vastly fewer lines than a uniformly fine grid would need
+    assert len(g) < 40
+
+
+def test_graded_axis_no_intervals_all_coarse():
+    g = graded_axis(0.0, 100.0, [], fine=1.0, coarse=10.0)
+    assert g[0] == 0.0 and g[-1] == 100.0
+    assert np.diff(g).min() > 5.0
+
+
+def test_box_grid_tets_fill_conform_orient():
+    gx = np.array([0.0, 1.0, 3.0])
+    gy = np.array([0.0, 2.0])
+    gz = np.array([0.0, 1.0, 2.0])
+    pts, tets = box_grid_tets(gx, gy, gz)
+    assert len(pts) == 3 * 2 * 3 and len(tets) == 6 * (2 * 1 * 2)
+    vols = signed_volumes(pts[tets])
+    assert (vols > 0).all()                          # consistent orientation
+    assert vols.sum() == pytest.approx(3.0 * 2.0 * 2.0)   # fills the box
+    # conforming: every face is shared by exactly two tets or lies on the hull
+    faces = np.sort(tets[:, [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]]
+                    .reshape(-1, 3), axis=1)
+    _, counts = np.unique(faces, axis=0, return_counts=True)
+    assert set(counts.tolist()) <= {1, 2}
+
+
+def test_sizing_field_target_pad_slope_cap():
+    aabbs = [(np.zeros(3), np.ones(3))]
+    pts = np.array([[0.5, 0.5, 0.5],     # inside -> target
+                    [1.5, 0.5, 0.5],     # within pad -> target
+                    [3.0, 0.5, 0.5],     # d=2: target + slope*(2-pad)
+                    [90.0, 0.5, 0.5]])   # far -> cap
+    mtr = sizing_field(pts, aabbs, target=0.5, pad=1.0, cap=4.0, slope=1.0)
+    assert mtr[0] == 0.5 and mtr[1] == 0.5
+    assert mtr[2] == pytest.approx(0.5 + (2.0 - 1.0))
+    assert mtr[3] == 4.0
+
+
+def test_build_sizing_covers_domain_fine_only_near_region():
+    region = GrowthBox(name="r", x_min=0.0, x_max=2.0, y_min=0.0, y_max=2.0,
+                       z_min=0.0, z_max=2.0)
+    lo, hi = np.full(3, -1.0), np.full(3, 40.0)
+    s = build_sizing(lo, hi, [region], target_edge=0.25, cap=5.0)
+    assert (s.points.min(axis=0) <= lo).all()        # bg box encloses domain
+    assert (s.points.max(axis=0) >= hi).all()
+    assert len(s.mtr) == len(s.points)
+    assert s.mtr.min() == pytest.approx(0.25)        # target reached...
+    inside = ((s.points >= 0.0) & (s.points <= 2.0)).all(axis=1)
+    assert inside.any() and np.allclose(s.mtr[inside], 0.25)
+    far = (s.points > 20.0).all(axis=1)
+    assert far.any() and (s.mtr[far] == 5.0).all()   # ...and capped far away
+    # graded: far fewer nodes than a uniformly fine grid (41/0.25=164^3)
+    assert len(s.points) < 30_000
+
+
+def test_build_sizing_tiny_domain_keeps_min_grid():
+    region = GrowthBox(name="r", x_min=0.0, x_max=1.0, y_min=0.0, y_max=1.0,
+                       z_min=0.0, z_max=1.0)
+    s = build_sizing(np.zeros(3), np.ones(3), [region], target_edge=5.0,
+                     cap=10.0)
+    # >= 4 grid lines per axis even when one coarse cell would span the box
+    # (a 1-cell background mesh crashes TetGen's reconstruction)
+    for a in range(3):
+        assert len(np.unique(s.points[:, a])) >= 4
+
+
+def test_region_aabb_matches_region_bounds_per_shape():
+    shapes = [GrowthBox(shape="sphere", cx=1.0, cy=1.0, cz=1.0, radius=0.5),
+              GrowthBox(shape="cylinder", x1=2.0, y1=0.0, z1=0.0, x2=3.0,
+                        y2=0.0, z2=0.0, radius=0.25),
+              GrowthBox(x_min=-1.0, x_max=0.0, y_min=0.0, y_max=1.0,
+                        z_min=0.0, z_max=1.0)]
+    for b in shapes:
+        lo, hi = region_aabb(b)
+        blo, bhi = region_bounds([b])
+        assert np.allclose(lo, blo) and np.allclose(hi, bhi)
+
+
+def test_build_plc_graded_walls_fewer_points_than_uniform():
+    surf = np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0]])
+    tris = np.array([[0, 1, 2]])
+    lo, hi = np.full(3, -50.0), np.full(3, 50.0)
+    fine_iv = [[(-2.0, 2.0)]] * 3
+    p_uni, _ = build_plc(surf, tris, lo, hi, wall_cell=1.0)
+    p_grad, t_grad = build_plc(surf, tris, lo, hi, wall_cell=1.0,
+                               fine_intervals=fine_iv, coarse_cell=10.0)
+    assert len(p_grad) < len(p_uni) / 4
+    # the graded shell is still watertight
+    shell = t_grad[len(tris):]
+    edges = np.sort(shell[:, [[0, 1], [1, 2], [2, 0]]].reshape(-1, 2), axis=1)
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    assert set(counts.tolist()) == {2}
+
+
+def test_prepare_passes_sizing_field_to_backend(tmp_path, mini_engine_path):
+    """prepare wires a BgSizing into the backend: mtr equals the target edge
+    at background nodes inside the region and never exceeds the far cap."""
+    _write_mini(tmp_path)
+    seen = {}
+
+    def spy(points, tris, max_volume, min_ratio, sizing=None):
+        seen["sizing"] = sizing
+        return _fake_backend(points, tris, max_volume, min_ratio)
+
+    rep = prepare_growth_mesh(_mini_cfg(tmp_path, [WING]), backend=spy,
+                              log=_silent)
+    s = seen["sizing"]
+    assert s is not None and len(s.mtr) == len(s.points)
+    assert s.mtr.min() == pytest.approx(rep.target_edge)
+    # every bg node within the sizing halo of the region AABB carries the
+    # target edge (bg cells are bigger than this tiny region, so testing
+    # nodes strictly inside it would test nothing)
+    lo, hi = region_aabb(WING)
+    d = np.linalg.norm(np.maximum(np.maximum(lo - s.points,
+                                             s.points - hi), 0.0), axis=1)
+    near = d <= 8.0 * rep.target_edge
+    assert near.any() and np.allclose(s.mtr[near], rep.target_edge)
 
 
 # ---- classification geometry ---------------------------------------------------
@@ -385,7 +518,7 @@ def test_prepare_no_regions_raises(tmp_path):
 def test_prepare_nothing_to_add_raises(tmp_path):
     _write_mini(tmp_path)
 
-    def only_junk(points, tris, max_volume, min_ratio):
+    def only_junk(points, tris, max_volume, min_ratio, sizing=None):
         pts = np.vstack([points[:5], [[5.0, 5.0, 5.0], [5.0, 6.0, 5.0]]])
         return pts, np.array([[1, 4, 5, 6]])         # outside every region
     with pytest.raises(ValueError, match="adds no candidate elements"):
@@ -397,7 +530,7 @@ def test_prepare_nothing_to_add_raises(tmp_path):
 def test_prepare_guard_failure_writes_nothing(tmp_path):
     _write_mini(tmp_path)
 
-    def island(points, tris, max_volume, min_ratio):
+    def island(points, tris, max_volume, min_ratio, sizing=None):
         pts = np.vstack([points[:5],
                          [[-0.9, 0.0, 0.0], [-0.8, 0.0, 0.0],
                           [-0.9, 0.1, 0.0], [-0.9, 0.0, 0.1]]])
@@ -506,6 +639,63 @@ def test_tetgen_size_factor_scales_element_count(tmp_path):
     fine = prepare_growth_mesh(cfg, size_factor=0.7, write=False, log=_silent)
     coarse = prepare_growth_mesh(cfg, size_factor=2.0, write=False, log=_silent)
     assert fine.n_new_elems > coarse.n_new_elems
+
+
+def _write_bar(tmp_path, nx=24, stem="bar") -> Path:
+    """A nx x 1 x 1 bar of unit cubes (Kuhn tets) as a starter deck: a big
+    domain relative to a small end region, the memory-scaling scenario."""
+    pts, tets = box_grid_tets(np.arange(nx + 1.0), np.arange(2.0),
+                              np.arange(2.0))
+    node_ids = 60000001 + np.arange(len(pts))
+    elem_ids = 60000001 + np.arange(len(tets))
+    lines = (["#- bar", "/MAT/LAW1/3", "mat", "/NODE"]
+             + format_node_lines(node_ids, pts)
+             + ["/PART/60000000", "bar", "         3         3         0",
+                "/TETRA4/60000000"]
+             + format_elem_lines(elem_ids, node_ids[tets])
+             + ["/PROP/SOLID/3", "prop", "/END"])
+    p = tmp_path / f"{stem}_0000.rad"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def test_tetgen_scaffold_scales_with_region_not_domain(tmp_path):
+    """THE memory-scaling regression this module's -m sizing exists for: a
+    24x1x1 bar with a small region at one end. Under the old global -a bound
+    the whole margin-inflated domain (~3800 model-volume units) was meshed at
+    part sizing — measured ~26k tets on this exact case (and >=77M / >50 GB on
+    a real 2M-element model). With the background sizing field the scaffold
+    coarsens away from the region: measured ~6k tets. The bound asserts the
+    scaffold stays on the region-volume side of that gap with ~2x headroom.
+    The domain diagonal (~26 units) also exceeds the wrapper's ~4-unit -m
+    segfault threshold (pyvista/tetgen#65), so this test doubles as coverage
+    of the unit-scale normalisation in tetgen_backend."""
+    pytest.importorskip("tetgen")
+    nx = 24
+    _write_bar(tmp_path, nx=nx)
+    region = GrowthBox(name="end", x_min=nx - 0.001, x_max=nx + 1.5,
+                       y_min=-0.25, y_max=1.25, z_min=-0.25, z_max=1.25)
+    cfg = _mini_cfg(tmp_path, [region], stem="bar")
+    rep = prepare_growth_mesh(cfg, log=_silent)
+
+    assert rep.n_generated < 15_000          # old global -a produced ~26k
+    # the kept candidates stay near the region-volume budget ...
+    region_budget = 1.5 ** 3 / rep.max_volume
+    assert 0 < rep.n_new_elems < 30 * region_budget
+    # ... and are actually sized near the target edge, not the far-field cap
+    ext = Deck.load(tmp_path / GROWTH_MESH_DIRNAME / "bar_0000.rad",
+                    60000000, 60000000)
+    new_rows = ext.elem_ids > int(60000000 + len(box_grid_tets(
+        np.arange(nx + 1.0), np.arange(2.0), np.arange(2.0))[1]))
+    xyz = ext.node_xyz[Mesh.from_deck(ext).conn_rows]
+    mean_vol = float(np.abs(signed_volumes(xyz[new_rows])).mean())
+    assert mean_vol < 3.0 * rep.max_volume
+    # conformity survives the backend's unit-scale round trip: new elements
+    # reuse the bar's end-face node ids
+    end_face_ids = 60000001 + np.flatnonzero(
+        box_grid_tets(np.arange(nx + 1.0), np.arange(2.0),
+                      np.arange(2.0))[0][:, 0] == nx)
+    assert np.isin(end_face_ids, ext.elem_conn[new_rows]).any()
 
 
 # ---- GUI wiring -------------------------------------------------------------

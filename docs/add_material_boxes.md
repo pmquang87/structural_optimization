@@ -363,15 +363,40 @@ Every optimiser's `V0 = mesh.volumes.sum()` becomes the **envelope** volume, so:
     box (the AABB of part ∪ regions, slightly inflated), tetrahedralised by the
     pip `tetgen` package (the pyvista-maintained wrapper; optional extra
     `oropt[growthmesh]`; **TetGen itself is AGPL** — evaluate before
-    redistributing) with `-p -q -a -Y`: `-Y` preserves the input facets and
+    redistributing) with `-p -q -m -Y`: `-Y` preserves the input facets and
     vertices exactly (Steiner points interior-only), which is what guarantees
     the output shares the part's surface **nodes**. One TetGen subtlety, found
     empirically and locked in by a comment + test: under `-Y` interior
     refinement points that *encroach* an unsplittable boundary facet are
     rejected, so leaving the domain walls as giant triangles silently vetoes
-    the `-a` sizing — the walls are therefore pre-subdivided at ~2× the target
-    edge (`growthmesh.box_shell`), with the domain margin keeping regions clear
-    of their encroachment zones.
+    the element sizing — the walls are therefore pre-subdivided at ~2× the
+    target edge (`growthmesh.box_shell`) **in the bands facing the regions**
+    and coarsen geometrically away from them (`growthmesh.graded_axis`), with
+    the domain margin keeping the regions clear of the fine wall facets'
+    encroachment zones and the part clear of the coarse ones.
+  * **Element sizing = background mesh (`-m`), not a global `-a`** — the
+    first implementation passed one global `-a` volume bound at part sizing,
+    which meshed *the entire domain* (scaffolding included) as finely as the
+    candidates: on a real 2.07M-element part (99×40×215 mm AABB, 0.45 mm mean
+    edge) with two small polyhedron regions that meant ≥77M throw-away tets
+    and a >50 GB memory runaway. Instead `growthmesh.build_sizing` builds a
+    coarse Kuhn-tet background grid (`box_grid_tets` over `graded_axis`
+    lines) whose per-node target-size field (`sizing_field`) equals
+    `target_edge` inside every region AABB plus a two-background-cell halo
+    (every background tet overlapping a region then has all nodes at the
+    target, so interpolation can never clip the region boundary), grows
+    ~linearly with distance and is capped at ~diag/16; `tetgen_backend`
+    passes it as TetGen's `-m` metric (`BgSizing`), so the scaffold cost
+    scales with the *region* volume budget plus a thin boundary layer along
+    the part surface. Two wrapper landmines, found empirically against tetgen
+    0.8.4 and locked in by tests: the `-m` path **segfaults for domains more
+    than a few absolute units across** (offset-independent; open upstream as
+    [pyvista/tetgen#65](https://github.com/pyvista/tetgen/issues/65)) — the
+    backend therefore normalises PLC + background mesh into a unit-scale box
+    and maps the output back (sizing is scale-invariant; preserved vertices
+    still land within the node-mapping tolerance) — and a background mesh
+    thinner than ~3 grid lines per axis crashes TetGen's mesh
+    reconstruction, so `build_sizing` enforces ≥4 lines per axis.
   * **Classification** — output tets are classified by centroid: inside the
     part (exact point-in-tet against the existing elements) → duplicates,
     dropped; outside every region (the same `mesh.primitive_member` geometry as
