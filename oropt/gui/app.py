@@ -38,9 +38,9 @@ from oropt.gui.boxes import (BOX_COLUMNS, FRAME_COLUMNS, POINT_COLUMNS,
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
+from oropt.gui import growthprep
 from oropt.gui.runstate import find_active_run
-from oropt.growthmesh import (GROWTH_MESH_DIRNAME, point_config_at,
-                              prepare_growth_mesh)
+from oropt.growthmesh import GROWTH_MESH_DIRNAME, point_config_at
 from oropt.loop import preview_growth_boxes
 from oropt.mesh import Mesh, overlay_primitives
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
@@ -905,11 +905,43 @@ def _render_growth_preview(cfg: Config) -> None:
             "run-ready.")
 
 
+def _render_growth_mesh_progress(prep: Path) -> None:
+    """Live view of a running PREPARE subprocess: a fragment tails the log
+    every couple of seconds (only this block reruns — the rest of the app
+    stays interactive, like the Monitor's metrics fragment) and flips the
+    whole panel over with a full rerun once the child ends."""
+    @st.fragment(run_every=2.0)
+    def _progress():
+        status = growthprep.read_status(prep)
+        if status.state != growthprep.RUNNING:
+            st.rerun()          # full-app rerun → the panel renders the outcome
+        st.info(f"⚙️ Generating the candidate mesh (TetGen) in isolated "
+                f"subprocess {status.pid} — the dashboard stays responsive, "
+                "and a page reload re-attaches to the same run.")
+        if status.log_tail:
+            st.code(status.log_tail, language=None)
+        if st.button("🛑 Cancel generation", key="growth_mesh_cancel",
+                     help="Force-kill the PREPARE subprocess. Decks are only "
+                          "written after every guard passes, so cancelling "
+                          "leaves no partial deck set behind."):
+            growthprep.cancel(prep)
+            st.rerun()
+    _progress()
+
+
 def _render_growth_mesh(cfg: Config, cfg_path: Path) -> None:
     """The growth-mesh PREPARE step (phase 2, :mod:`oropt.growthmesh`) as a
     button: TetGen-fill the regions with node-conformal candidate elements and
     write the extended deck set to ``<case_dir>/growth_mesh/``, instead of
     pre-meshing the region volume in a pre-processor.
+
+    TetGen runs in an *isolated detached subprocess*
+    (:mod:`oropt.gui.growthprep`), never in-process: on a large model it can
+    allocate tens of GB (observed >50 GB) and a native crash is uncatchable,
+    either of which used to freeze or OOM-kill the whole dashboard. The panel
+    only launches the CLI and then *reads files* — the log tail while running,
+    the ``--json`` report when done — so the Streamlit script is never blocked
+    and a page reload re-attaches.
 
     Deliberately explicit, mirroring the CLI: nothing is written unless the
     phase-1 run-start guards pass on the extended deck, the result lands in its
@@ -947,9 +979,14 @@ def _render_growth_mesh(cfg: Config, cfg_path: Path) -> None:
             format="%.2f", key="growth_mesh_minratio",
             help="Radius-edge quality bound; lower = better-shaped tets, more "
                  "elements.")
+        prep = growthprep.prepare_dir(cfg)
+        status = growthprep.read_status(prep)
         if st.button("⚙️ Generate & write extended decks",
                      key="growth_mesh_generate",
-                     help="Runs TetGen on the primary case's starter deck and "
+                     disabled=status.state == growthprep.RUNNING,
+                     help="Runs TetGen on the primary case's starter deck in "
+                          "an isolated subprocess (a huge model can need tens "
+                          "of GB — the dashboard stays alive either way) and "
                           "writes the extended deck set for every load case. "
                           "Nothing is written if a run-start guard fails."):
             saved = Config.from_dict(Config.read_yaml_dict(cfg_path))
@@ -959,14 +996,21 @@ def _render_growth_mesh(cfg: Config, cfg_path: Path) -> None:
                            "running, or the run will select candidates with "
                            "the stale saved regions.")
             try:
-                with st.spinner("Generating candidate mesh (TetGen) …"):
-                    st.session_state["growth_mesh_report"] = prepare_growth_mesh(
-                        cfg, size_factor=float(size_factor),
-                        min_ratio=float(min_ratio), log=lambda _s: None)
-            except (ValueError, RuntimeError) as exc:
-                st.session_state.pop("growth_mesh_report", None)
-                st.error(f"Growth-mesh generation failed: {exc}")
-        rep = st.session_state.get("growth_mesh_report")
+                growthprep.start(cfg, prep, float(size_factor),
+                                 float(min_ratio), PROJECT_ROOT)
+            except (RuntimeError, OSError) as exc:
+                st.error(f"Could not launch the growth-mesh subprocess: {exc}")
+            status = growthprep.read_status(prep)
+        if status.state == growthprep.RUNNING:
+            _render_growth_mesh_progress(prep)
+            return
+        if status.state == growthprep.FAILED:
+            st.error(f"Growth-mesh generation failed: {status.error}")
+            if status.log_tail:
+                st.code(status.log_tail, language=None)
+            st.caption(f"Full log: `{prep / growthprep.LOG_NAME}`")
+            return
+        rep = status.report
         if rep is None:
             return
         st.success(

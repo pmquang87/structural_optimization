@@ -11,6 +11,8 @@ passes either way.
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -19,15 +21,15 @@ import pytest
 
 from oropt.config import Config, GrowthBox, LoadCase
 from oropt.deck import Deck, _parse_elem, _parse_node
-from oropt.growthmesh import (GROWTH_MESH_DIRNAME, allocate_ids,
-                              box_grid_tets, box_shell, build_plc,
-                              build_sizing, exterior_faces, format_elem_lines,
-                              format_node_lines, graded_axis, main,
-                              map_to_original_nodes, mean_edge_length,
-                              orient_tets, point_config_at, points_in_tets,
-                              prepare_growth_mesh, region_aabb, region_bounds,
-                              signed_volumes, sizing_field, tet_quality,
-                              tetgen_backend)
+from oropt.growthmesh import (GROWTH_MESH_DIRNAME, GrowthMeshReport,
+                              allocate_ids, box_grid_tets, box_shell,
+                              build_plc, build_sizing, exterior_faces,
+                              format_elem_lines, format_node_lines,
+                              graded_axis, main, map_to_original_nodes,
+                              mean_edge_length, orient_tets, point_config_at,
+                              points_in_tets, prepare_growth_mesh, region_aabb,
+                              region_bounds, report_from_dict, signed_volumes,
+                              sizing_field, tet_quality, tetgen_backend)
 from oropt.loop import growth_candidate_mask
 from oropt.mesh import Mesh
 
@@ -596,6 +598,46 @@ def test_cli_error_exit_without_regions(tmp_path, capsys):
     assert "no growth regions" in capsys.readouterr().out
 
 
+def test_report_from_dict_round_trips_asdict_json():
+    rep = GrowthMeshReport(
+        out_dir="gm", starters=["a_0000.rad"], engines=[], n_new_nodes=2,
+        n_new_elems=2, n_generated=4, per_region=[("wing", 2)],
+        target_edge=1.0, max_volume=0.1, quality_min=0.5, quality_median=0.8,
+        node_id_range=(60000006, 60000007),
+        elem_id_range=(60000003, 60000004), total_candidates=2, written=True,
+        original_elem_max=60000002)
+    d = json.loads(json.dumps(dataclasses.asdict(rep)))   # tuples -> lists
+    d["some_future_key"] = 1                              # unknown keys dropped
+    assert report_from_dict(d) == rep
+
+
+def test_cli_json_error_exit_writes_nothing(tmp_path):
+    _write_mini(tmp_path)
+    p = tmp_path / "cfg.yaml"
+    _mini_cfg(tmp_path, []).to_yaml(p)
+    jpath = tmp_path / "report.json"
+    assert main(["--config", str(p), "--json", str(jpath)]) == 2
+    assert not jpath.exists()
+
+
+def test_cli_json_report_hermetic(tmp_path, monkeypatch, mini_engine_path):
+    """--json hands the report across the process boundary — the GUI's
+    isolated PREPARE launch (oropt.gui.growthprep) parses it back into the
+    same GrowthMeshReport the in-process call used to return."""
+    import oropt.growthmesh as gm
+    monkeypatch.setattr(gm, "tetgen_backend", _fake_backend)
+    _write_mini(tmp_path)
+    p = tmp_path / "cfg.yaml"
+    _mini_cfg(tmp_path, [WING]).to_yaml(p)
+    jpath = tmp_path / "report.json"
+    assert main(["--config", str(p), "--json", str(jpath)]) == 0
+    rep = report_from_dict(json.loads(jpath.read_text(encoding="utf-8")))
+    assert rep.written and rep.n_new_elems == 2
+    assert rep.out_dir == str(tmp_path / GROWTH_MESH_DIRNAME)
+    assert rep.per_region == [("wing", 2)]
+    assert rep.original_elem_max == 60000002
+
+
 # =============================================================================
 # TetGen-backed end-to-end (skipped when the optional package is missing)
 # =============================================================================
@@ -627,9 +669,13 @@ def test_tetgen_cli_end_to_end(tmp_path, mini_engine_path):
     _mini_cfg(tmp_path, [WING]).to_yaml(p)
     assert main(["--config", str(p), "--dry-run"]) == 0
     assert not (tmp_path / GROWTH_MESH_DIRNAME).exists()
-    assert main(["--config", str(p)]) == 0
+    jpath = tmp_path / "report.json"
+    assert main(["--config", str(p), "--json", str(jpath)]) == 0
     assert (tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad").is_file()
     assert (tmp_path / GROWTH_MESH_DIRNAME / "mini_0001.rad").is_file()
+    rep = report_from_dict(json.loads(jpath.read_text(encoding="utf-8")))
+    assert rep.n_new_elems > 0
+    assert rep.starters == [str(tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad")]
 
 
 def test_tetgen_size_factor_scales_element_count(tmp_path):
@@ -699,22 +745,99 @@ def test_tetgen_scaffold_scales_with_region_not_domain(tmp_path):
 
 
 # ---- GUI wiring -------------------------------------------------------------
-def test_app_growth_mesh_button_renders(tmp_path):
-    """The 'Generate growth mesh' expander/button renders when regions are
-    configured (same AppTest wiring as the preview-button test)."""
-    import oropt
-    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
-
+def _growth_gui_cfg(tmp_path) -> Path:
+    """A mini case + config with one region and its own work folder — the
+    shared fixture wiring of every growth-mesh AppTest below."""
     _write_mini(tmp_path)
     cfg = _mini_cfg(tmp_path, [WING])
     cfg.work_dir = str(tmp_path / "work")
     cfg_path = tmp_path / "cfg.yaml"
     cfg.to_yaml(cfg_path)
+    return cfg_path
 
+
+def _growth_apptest(cfg_path: Path):
+    """The app loaded on *cfg_path* (same AppTest wiring as the preview-button
+    test; cold-import AppTests need a generous timeout)."""
+    import oropt
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
     app_file = Path(oropt.__file__).resolve().parent / "gui" / "app.py"
     at = AppTest.from_file(str(app_file), default_timeout=60)
     at.run()
     at.sidebar.text_input[0].set_value(str(cfg_path)).run()
+    return at
+
+
+def test_app_growth_mesh_button_renders(tmp_path):
+    """The 'Generate growth mesh' expander/button renders when regions are
+    configured (same AppTest wiring as the preview-button test)."""
+    at = _growth_apptest(_growth_gui_cfg(tmp_path))
     assert not at.exception
     keys = {b.key for b in at.button}
     assert "growth_mesh_generate" in keys
+
+
+def test_app_growth_mesh_generate_launches_subprocess(tmp_path, monkeypatch):
+    """Clicking ⚙️ Generate launches the PREPARE subprocess (growthprep.start,
+    faked here) instead of running TetGen in-process, and the panel flips to
+    the running view (cancel button) in the same script run."""
+    from oropt.gui import growthprep
+    calls = {}
+
+    def fake_start(cfg, prep, size_factor, min_ratio, cwd):
+        calls["params"] = (float(size_factor), float(min_ratio))
+        prep.mkdir(parents=True, exist_ok=True)
+        (prep / growthprep.PIDFILE).write_text(str(os.getpid()),
+                                               encoding="utf-8")
+        return os.getpid()
+
+    monkeypatch.setattr(growthprep, "start", fake_start)
+    at = _growth_apptest(_growth_gui_cfg(tmp_path))
+    next(b for b in at.button if b.key == "growth_mesh_generate").click().run()
+    assert not at.exception
+    assert calls["params"] == (1.0, 1.5)
+    assert any(b.key == "growth_mesh_cancel" for b in at.button)
+
+
+def test_app_growth_mesh_running_panel_reattaches(tmp_path):
+    """A live PREPARE pid file renders the running view (cancel button) even
+    in a fresh session — the panel re-attaches from files alone, so a page
+    reload or GUI restart never orphans a generation in flight."""
+    from oropt.gui import growthprep
+    cfg_path = _growth_gui_cfg(tmp_path)
+    prep = tmp_path / "work" / growthprep.PREPARE_DIRNAME
+    prep.mkdir(parents=True)
+    (prep / growthprep.PIDFILE).write_text(str(os.getpid()), encoding="utf-8")
+    (prep / growthprep.LOG_NAME).write_text(
+        "[oropt] growth-mesh: tetrahedralising the PLC (9 points) ...\n",
+        encoding="utf-8")
+    at = _growth_apptest(cfg_path)
+    assert not at.exception
+    assert any(b.key == "growth_mesh_cancel" for b in at.button)
+
+
+def test_app_growth_mesh_done_panel_and_point_button(tmp_path):
+    """A finished PREPARE's report.json renders the success panel from disk,
+    and 📁 use-decks still rewrites the config exactly like the old in-process
+    flow (case_dir + the original/expansion element-id boundary)."""
+    from oropt.gui import growthprep
+    cfg_path = _growth_gui_cfg(tmp_path)
+    prep = tmp_path / "work" / growthprep.PREPARE_DIRNAME
+    prep.mkdir(parents=True)
+    out_dir = tmp_path / GROWTH_MESH_DIRNAME
+    rep = GrowthMeshReport(
+        out_dir=str(out_dir), starters=[], engines=[], n_new_nodes=2,
+        n_new_elems=2, n_generated=4, per_region=[("wing", 2)],
+        target_edge=1.0, max_volume=0.1, quality_min=0.5, quality_median=0.8,
+        node_id_range=(60000006, 60000007),
+        elem_id_range=(60000003, 60000004), total_candidates=2, written=True,
+        original_elem_max=60000002)
+    (prep / growthprep.REPORT_NAME).write_text(
+        json.dumps(dataclasses.asdict(rep)), encoding="utf-8")
+    at = _growth_apptest(cfg_path)
+    assert not at.exception
+    next(b for b in at.button if b.key == "growth_mesh_use").click().run()
+    assert not at.exception
+    back = Config.from_yaml(cfg_path)
+    assert back.model.case_dir == str(out_dir)
+    assert back.model.growth_original_elem_max == 60000002

@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -529,6 +530,21 @@ class GrowthMeshReport:
     original_elem_max: int = 0
 
 
+def report_from_dict(data: dict) -> GrowthMeshReport:
+    """Rebuild a :class:`GrowthMeshReport` from its ``dataclasses.asdict``/JSON
+    form — the inverse of the CLI's ``--json`` file, which is how the GUI's
+    isolated PREPARE subprocess hands its result back. JSON turns the tuples
+    into lists (coerced back here); unknown keys (a newer writer) are dropped
+    the same way :meth:`oropt.config.Config.from_dict` drops them."""
+    known = {f.name for f in dataclasses.fields(GrowthMeshReport)}
+    d = {k: v for k, v in data.items() if k in known}
+    d["per_region"] = [tuple(r) for r in d.get("per_region", [])]
+    for k in ("node_id_range", "elem_id_range"):
+        if k in d:
+            d[k] = tuple(d[k])
+    return GrowthMeshReport(**d)
+
+
 def _load_case_decks(cfg: Config) -> tuple[list, list[Deck]]:
     """Load every case's starter deck and enforce the shared-mesh contract
     (same design-part element ids), exactly like run start does."""
@@ -772,6 +788,10 @@ def main(argv=None) -> int:
                          f"<case_dir>/{GROWTH_MESH_DIRNAME})")
     ap.add_argument("--dry-run", action="store_true",
                     help="generate, classify and guard-check but write nothing")
+    ap.add_argument("--json", default=None, metavar="PATH",
+                    help="on success, also write the report as JSON to PATH — "
+                         "how the GUI's isolated PREPARE subprocess hands the "
+                         "report back (see oropt.gui.growthprep)")
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
@@ -783,6 +803,9 @@ def main(argv=None) -> int:
     except (ValueError, RuntimeError) as exc:
         print(f"[oropt] growth-mesh: ERROR: {exc}", flush=True)
         return 2
+    if args.json:
+        Path(args.json).write_text(json.dumps(dataclasses.asdict(rep)),
+                                   encoding="utf-8")
     if rep.written:
         print(f"[oropt] growth-mesh: done. To run on the extended decks set\n"
               f"    model.case_dir: {rep.out_dir}\n"
