@@ -50,9 +50,10 @@ _NUMERIC: list[str] = ["x_min", "x_max", "y_min", "y_max", "z_min", "z_max",
                        "x1", "y1", "z1", "x2", "y2", "z2"]
 
 # Full column order of the main region data-editor. ``carve`` is the overlap
-# policy checkbox: on (default) = a region overlapping the original part voids
-# those elements too (carve-and-regrow); off = the original part stays alive and
-# only expansion elements (ids > model.growth_original_elem_max) start void.
+# policy checkbox: off (default) = the original part stays alive and only
+# expansion elements (ids > model.growth_original_elem_max) start void; on = a
+# region overlapping the original part voids those elements too
+# (carve-and-regrow).
 BOX_COLUMNS: list[str] = ["name", "shape", "carve", "deck_box_id", *_NUMERIC]
 
 # Columns of the oriented-frame data-editor: name + origin + local +x + in-plane.
@@ -116,7 +117,7 @@ def growth_boxes_from_records(records) -> list[GrowthBox]:
     is dropped too — unless it names a ``deck_box_id``, whose coordinates come from
     the deck at run start. An unrecognised shape is dropped (validation surfaces the
     typo on the coordinates path); a blank shape defaults to ``box``; a blank
-    ``carve`` cell defaults to on (carve-and-regrow, the historical behaviour).
+    ``carve`` cell defaults to off (part kept intact — the config default).
     The oriented frame is applied separately (:func:`apply_frame_records`)."""
     out: list[GrowthBox] = []
     for row in records:
@@ -127,7 +128,7 @@ def growth_boxes_from_records(records) -> list[GrowthBox]:
         if req is None:
             continue
         raw_carve = row.get("carve")
-        carve = True if _is_blank(raw_carve) else bool(raw_carve)
+        carve = False if _is_blank(raw_carve) else bool(raw_carve)
         deck_id = row.get("deck_box_id")
         if not _is_blank(deck_id):
             out.append(GrowthBox(name=name, shape=kind, carve=carve,

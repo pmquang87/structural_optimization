@@ -411,11 +411,13 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "a region over unmeshed space is an error at "
         "run start. Multiple regions act as a union; volume fractions are then "
         "relative to the enlarged (part + regions) space. A region **may overlap "
-        "the part**: with **Carve part** checked (default) the overlapped "
-        "original elements start void too (carve-and-regrow); unchecked, the "
-        "original part stays intact and only expansion elements start void — so "
-        "a region can be drawn generously into the part to guarantee the new "
-        "material attaches with no gap. A row may reference a "
+        "the part**: with **Carve part** unchecked (default) the original part "
+        "stays intact and only expansion elements start void — so a region can "
+        "be drawn generously into the part to guarantee the new material "
+        "attaches with no gap (needs the original-part element-id boundary, "
+        "recorded by the ⚙️ growth-mesh step; without it the region voids "
+        "everything inside). Check it for deliberate carve-and-regrow: the "
+        "overlapped original elements start void too. A row may reference a "
         "`/BOX/{RECTA,SPHER,CYLIN}` card in the deck by **Deck /BOX id** instead of "
         "coordinates; oriented (local-frame) boxes are set below.")
     # Capture the oriented-frame and polyhedron-point rows BEFORE the main table
@@ -442,12 +444,12 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                      "cylinder = two axis end-points + radius; polyhedron = "
                      "convex hull of the node list in the points table below."),
             "carve": st.column_config.CheckboxColumn(
-                "Carve part", default=True,
-                help="Checked (default): original-part elements inside the "
-                     "region start void too — deliberate carve-and-regrow. "
-                     "Unchecked: the original part stays alive; only expansion "
-                     "elements (ids above the original-part boundary below) "
-                     "start void."),
+                "Carve part", default=False,
+                help="Unchecked (default): the original part stays alive; "
+                     "only expansion elements (ids above the original-part "
+                     "boundary below) start void. Checked: original-part "
+                     "elements inside the region start void too — deliberate "
+                     "carve-and-regrow."),
             "deck_box_id": st.column_config.NumberColumn(
                 "Deck /BOX id", format="%d", step=1,
                 help="Reference a /BOX/{RECTA,SPHER,CYLIN} card in the deck by id "
@@ -524,8 +526,9 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                      "stay alive inside regions with Carve part unchecked; ids "
                      "above are expansion material and start void. The ⚙️ "
                      "growth-mesh step's *use these decks* button records it "
-                     "automatically; 0 = unset (a carve-off region then errors "
-                     "at run start).")
+                     "automatically. 0 = unset: nothing is identifiable as "
+                     "original, so carve-off regions void everything inside "
+                     "(validation warns).")
             cfg.model.growth_original_elem_max = int(_thr) or None
         st.info(f"{len(cfg.model.growth_boxes)} growth region(s): their elements "
                 "start void and may be grown into. With BESO, keep "
@@ -843,6 +846,8 @@ def _render_growth_preview(cfg: Config) -> None:
         hide_index=True, use_container_width=True)
     pct = (100.0 * preview.total_candidates / preview.total_elements
            if preview.total_elements else 0.0)
+    if preview.notice:
+        st.warning(preview.notice)
     if preview.guard:
         st.error(f"⚠ Run-start guard would abort: {preview.guard}")
     else:

@@ -91,16 +91,21 @@ class GrowthBox:
     are inclusive.
 
     A region **may overlap the original part**; :attr:`carve` picks what that
-    means. ``carve: true`` (default) voids the overlapped original elements at
-    start too — deliberate carve-and-regrow. ``carve: false`` keeps the original
-    part intact: only *expansion* elements in the region start void, where
-    "original" means element ids <= :attr:`Model.growth_original_elem_max` (the
-    growth-mesh PREPARE step allocates its new elements above the original ids
-    and records that boundary when pointing the config at the extended decks;
-    a hand-pre-meshed deck needs the expansion elements renumbered above it).
-    So an overlapping region can be drawn generously — hugging or cutting into
+    means. ``carve: false`` (default) keeps the original part intact: only
+    *expansion* elements in the region start void, where "original" means
+    element ids <= :attr:`Model.growth_original_elem_max` (the growth-mesh
+    PREPARE step allocates its new elements above the original ids and records
+    that boundary when pointing the config at the extended decks; a
+    hand-pre-meshed deck needs the expansion elements renumbered above it). So
+    an overlapping region can be drawn generously — hugging or cutting into
     the part to guarantee the expansion mesh attaches with no gap — without a
-    bite being carved out of the part at iteration 0.
+    bite being carved out of the part at iteration 0. ``carve: true`` opts into
+    deliberate **carve-and-regrow**: the overlapped original elements start
+    void too. When no boundary is recorded (``growth_original_elem_max`` blank)
+    nothing can be told apart from the part, so a carve-off region degrades to
+    carving — every in-region element starts void — with a validation warning
+    and a run-log note, keeping boundary-less phase-1 configs running
+    unchanged.
 
     ``shape`` selects the primitive (mirroring the Radioss ``/BOX`` family):
 
@@ -159,10 +164,12 @@ class GrowthBox:
     xy_axis: Optional[list] = None    # [bx, by, bz] a vector in the local +xy plane
     # --- optional: read the box corners from a /BOX/RECTA card in the deck ---
     deck_box_id: Optional[int] = None  # resolved to x_min..z_max at run start
-    # --- overlap policy: carve the original part (default) or leave it alive ---
-    # False -> only expansion elements (ids > Model.growth_original_elem_max)
-    # start void; the overlapped original part stays intact.
-    carve: bool = True
+    # --- overlap policy: leave the original part alive (default) or carve it ---
+    # False (default) -> only expansion elements (ids >
+    # Model.growth_original_elem_max) start void; the overlapped original part
+    # stays intact. True -> carve-and-regrow: overlapped originals start void
+    # too. With no boundary recorded, False degrades to carving (warned).
+    carve: bool = False
 
     def shape_kind(self) -> str:
         """Normalised shape selector: ``"box"``, ``"sphere"``, ``"cylinder"`` or
@@ -214,7 +221,8 @@ class Model:
     # and records this automatically when pointing the config at the extended
     # decks; for a hand-pre-meshed deck, renumber the expansion elements above
     # the part's ids and set it here. None (default) = no boundary known; a
-    # carve=False region then errors at run start.
+    # carve=False region then degrades to carving (every in-region element
+    # starts void), with a validation warning and a run-log note.
     growth_original_elem_max: Optional[int] = None
 
     def __post_init__(self):

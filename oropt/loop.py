@@ -124,31 +124,42 @@ def resolve_growth_boxes(deck: Deck, boxes) -> list:
     return out
 
 
-def region_candidate_mask(deck: Deck, mesh: Mesh, box, model,
-                          label: str) -> tuple[np.ndarray, int]:
+#: log/preview note for a carve-off region running without an id boundary —
+#: nothing is identifiable as "original part", so the region carves after all.
+_NO_BOUNDARY_NOTE = (
+    "carve is off but model.growth_original_elem_max is not set -- no "
+    "original/expansion element-id boundary is known, so every in-region "
+    "element starts void (a part overlap is carved, as if carve were true). "
+    "The growth-mesh step records the boundary when pointing the config at "
+    "the extended decks; set it manually for a hand-pre-meshed deck")
+
+
+def _no_boundary(box, model) -> bool:
+    """True for a carve-off region with no original/expansion id boundary —
+    the (warned) degrade-to-carving case."""
+    return (not getattr(box, "carve", False)
+            and getattr(model, "growth_original_elem_max", None) is None)
+
+
+def region_candidate_mask(deck: Deck, mesh: Mesh, box, model
+                          ) -> tuple[np.ndarray, int]:
     """``(candidate mask, kept-alive count)`` for a single resolved region.
 
     The mask is the centroid-in-region element set; a region with ``carve``
-    off additionally excludes the *original* part elements — ids <=
-    ``model.growth_original_elem_max`` — so an overlapping region leaves the
-    part intact and only its expansion elements start void. The kept-alive
-    count is how many in-region elements that exclusion spared (0 for a
-    carving region). Raises ``ValueError`` when ``carve`` is off but no
-    original/expansion id boundary is configured — the single source of truth
-    for the run-start guard, the preview and the PREPARE re-check."""
+    off (the default) additionally excludes the *original* part elements —
+    ids <= ``model.growth_original_elem_max`` — so an overlapping region
+    leaves the part intact and only its expansion elements start void. The
+    kept-alive count is how many in-region elements that exclusion spared (0
+    for a carving region). When ``carve`` is off but no id boundary is
+    configured, nothing can be told apart from the part, so the region
+    degrades to carving — full in-region mask, kept-alive 0 — and the caller
+    surfaces :data:`_NO_BOUNDARY_NOTE` (run log / preview / validation).
+    The single source of truth for the run-start guard, the preview and the
+    PREPARE re-check."""
     bm = mesh.in_boxes_mask([box])
-    if getattr(box, "carve", True):
-        return bm, 0
     thr = getattr(model, "growth_original_elem_max", None)
-    if thr is None:
-        raise ValueError(
-            f"growth box {label!r} has carve off (carve: false) but "
-            "model.growth_original_elem_max is not set, so the original part "
-            "cannot be told apart from the expansion elements. The growth-mesh "
-            "step records it when pointing the config at the extended decks "
-            "(the GUI's 'use these decks' button / the CLI hint); for a "
-            "hand-pre-meshed deck, renumber the expansion elements above the "
-            "original part's ids and set it to that boundary")
+    if getattr(box, "carve", False) or thr is None:
+        return bm, 0
     keep_alive = bm & (deck.elem_ids <= int(thr))
     return bm & (deck.elem_ids > int(thr)), int(keep_alive.sum())
 
@@ -169,7 +180,6 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
     * a box selecting **no** design elements: the box volume was not pre-meshed
       into the design part (or, with carve off, holds nothing but original
       part elements);
-    * a carve-off box without a ``model.growth_original_elem_max`` boundary;
     * candidate connectivity referencing node ids below ``design_node_min``: the
       free-node guard could not pin those nodes while the elements are void, so
       the implicit tangent would go singular;
@@ -185,7 +195,7 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
     box_masks = []
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
-        bm, kept_alive = region_candidate_mask(deck, mesh, b, model, label)
+        bm, kept_alive = region_candidate_mask(deck, mesh, b, model)
         if not bm.any():
             if kept_alive:
                 raise ValueError(
@@ -206,6 +216,8 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
         if kept_alive:
             log(f"[oropt] growth box {label!r}: {kept_alive} in-region original "
                 "part elements stay alive (carve off)")
+        elif _no_boundary(b, model):
+            log(f"[oropt] growth box {label!r}: {_NO_BOUNDARY_NOTE}")
         box_masks.append((label, bm))
         candidate |= bm
 
@@ -255,6 +267,7 @@ class GrowthPreview:
     total_candidates: int   # unique elements across all regions (0 if a guard trips)
     total_elements: int     # deck.n_design_elements
     guard: str = ""         # run-start guard error that would abort a run, if any
+    notice: str = ""        # config-level caveat (carve off with no id boundary)
 
 
 def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
@@ -264,9 +277,11 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
     Per region: the would-start-void element count — centroid-in-region, minus
     the original part elements for a region with ``carve`` off (0 flags a region
     whose volume was not pre-meshed into the design part), plus a note for a
-    region referencing a ``/BOX/RECTA`` card absent from the deck, for a
-    carve-off region missing its id boundary, and for in-region original
-    elements a carve-off region leaves alive. Also runs the real
+    region referencing a ``/BOX/RECTA`` card absent from the deck and for
+    in-region original elements a carve-off region leaves alive. When carve-off
+    regions run without an id boundary (they degrade to carving), the single
+    config-level ``notice`` carries the caveat instead of repeating it on every
+    row. Also runs the real
     run-start guards (:func:`growth_candidate_mask`) and reports, in ``guard``, the
     first error that would abort a run (an empty region, candidate nodes below
     ``design_node_min``, or an unreachable candidate); ``guard`` is ``""`` when the
@@ -278,8 +293,7 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
         label = b.name or f"#{i + 1}"
         try:
             resolved = resolve_growth_boxes(deck, [b])[0]
-            bm, kept_alive = region_candidate_mask(deck, mesh, resolved, model,
-                                                   label)
+            bm, kept_alive = region_candidate_mask(deck, mesh, resolved, model)
         except ValueError as exc:
             rows.append(BoxPreview(label, b.shape_kind(), 0, str(exc)))
             continue
@@ -301,8 +315,11 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
                 deck, mesh, model, log=lambda _m: None).sum())
         except ValueError as exc:
             guard = str(exc)
+    notice = (_NO_BOUNDARY_NOTE
+              if any(_no_boundary(b, model) for b in boxes) else "")
     return GrowthPreview(rows=rows, total_candidates=total,
-                         total_elements=deck.n_design_elements, guard=guard)
+                         total_elements=deck.n_design_elements, guard=guard,
+                         notice=notice)
 
 
 def _clean_solve_dir(run_dir: Path) -> None:

@@ -878,7 +878,7 @@ def test_app_polyhedron_preview_counts(tmp_path):
 
 
 # =====================================================================
-# Part overlap policy: carve (default) vs carve-off (original part kept)
+# Part overlap policy: carve-off (default; original part kept) vs carve
 # =====================================================================
 
 # Covers e1 (.25,.25,.25) AND e2 (.5,.5,.5) -- overlaps the "original part".
@@ -892,10 +892,10 @@ def test_growth_carve_flag_yaml_roundtrip(tmp_path):
         "growth_original_elem_max": 60000001,
         "growth_boxes": [
             {"name": "olap", "x_min": 0.0, "x_max": 1.0, "y_min": 0.0,
-             "y_max": 1.0, "z_min": 0.0, "z_max": 1.0, "carve": False}]}})
-    assert cfg.model.growth_boxes[0].carve is False
+             "y_max": 1.0, "z_min": 0.0, "z_max": 1.0, "carve": True}]}})
+    assert cfg.model.growth_boxes[0].carve is True
     assert cfg.model.growth_original_elem_max == 60000001
-    assert GrowthBox().carve is True                 # default: carve-and-regrow
+    assert GrowthBox().carve is False              # default: part kept intact
     assert Model().growth_original_elem_max is None
     p = tmp_path / "c.yaml"
     cfg.to_yaml(p)
@@ -914,21 +914,25 @@ def test_unknown_keys_carve_known_and_typo_flagged():
 
 
 # ---- run-start candidate selection ---------------------------------------------
-def test_candidate_mask_carve_default_voids_overlapped_part(tmp_path):
-    """Historical behaviour unchanged: carve on (default) voids the overlapped
-    original elements too -- deliberate carve-and-regrow."""
+def test_candidate_mask_carve_true_voids_overlapped_part(tmp_path):
+    """carve: true opts into carve-and-regrow: the overlapped original elements
+    start void too, boundary or not."""
     deck, mesh = _load(tmp_path)
-    mask = growth_candidate_mask(deck, mesh, Model(growth_boxes=[BOX_E1_E2]),
-                                 log=_silent)
-    assert mask.tolist() == [True, True, False, False]
+    carving = dataclasses.replace(BOX_E1_E2, carve=True)
+    for thr in (None, 60000001):
+        mask = growth_candidate_mask(
+            deck, mesh, Model(growth_boxes=[carving],
+                              growth_original_elem_max=thr), log=_silent)
+        assert mask.tolist() == [True, True, False, False]
 
 
 def test_candidate_mask_carve_off_keeps_original_part(tmp_path):
+    """The default: with the id boundary recorded, in-region original elements
+    stay alive -- only expansion elements start void."""
     deck, mesh = _load(tmp_path)
     lines: list[str] = []
-    no_carve = dataclasses.replace(BOX_E1_E2, carve=False)
     mask = growth_candidate_mask(
-        deck, mesh, Model(growth_boxes=[no_carve],
+        deck, mesh, Model(growth_boxes=[BOX_E1_E2],
                           growth_original_elem_max=60000001),
         log=lines.append)
     # e1 (id 60000001, original) stays alive; e2 (expansion) starts void
@@ -937,18 +941,23 @@ def test_candidate_mask_carve_off_keeps_original_part(tmp_path):
                for ln in lines)
 
 
-def test_candidate_mask_carve_off_without_boundary_raises(tmp_path):
+def test_candidate_mask_no_boundary_degrades_to_carving_with_note(tmp_path):
+    """Carve off (default) without an id boundary cannot tell the part apart,
+    so the region voids everything it contains -- exactly the pre-flag
+    behaviour, keeping boundary-less phase-1 configs running -- and the run
+    log says so."""
     deck, mesh = _load(tmp_path)
-    no_carve = dataclasses.replace(BOX_E1_E2, carve=False)
-    with pytest.raises(ValueError, match="growth_original_elem_max"):
-        growth_candidate_mask(deck, mesh, Model(growth_boxes=[no_carve]),
-                              log=_silent)
+    lines: list[str] = []
+    mask = growth_candidate_mask(deck, mesh, Model(growth_boxes=[BOX_E1_E2]),
+                                 log=lines.append)
+    assert mask.tolist() == [True, True, False, False]
+    assert any("growth_original_elem_max is not set" in ln for ln in lines)
 
 
 def test_candidate_mask_carve_off_only_original_inside_raises(tmp_path):
     deck, mesh = _load(tmp_path)
     only_e1 = GrowthBox(name="skin", x_min=0.2, x_max=0.3, y_min=0.2,
-                        y_max=0.3, z_min=0.2, z_max=0.3, carve=False)
+                        y_max=0.3, z_min=0.2, z_max=0.3)
     with pytest.raises(ValueError, match="only original part elements"):
         growth_candidate_mask(
             deck, mesh, Model(growth_boxes=[only_e1],
@@ -959,29 +968,29 @@ def test_candidate_mask_carve_off_only_original_inside_raises(tmp_path):
 # ---- preview -------------------------------------------------------------------
 def test_preview_carve_off_counts_and_notes(tmp_path):
     deck, mesh = _load(tmp_path)
-    no_carve = dataclasses.replace(BOX_E1_E2, carve=False)
     pv = preview_growth_boxes(
-        deck, mesh, Model(growth_boxes=[no_carve],
+        deck, mesh, Model(growth_boxes=[BOX_E1_E2],
                           growth_original_elem_max=60000001))
     [row] = pv.rows
     assert row.count == 1                      # e2 only; e1 stays alive
     assert "stay alive" in row.note and "carve off" in row.note
-    assert pv.total_candidates == 1 and pv.guard == ""
+    assert pv.total_candidates == 1 and pv.guard == "" and pv.notice == ""
 
 
-def test_preview_carve_off_missing_boundary_noted_and_guarded(tmp_path):
+def test_preview_no_boundary_notice_once_not_per_row(tmp_path):
     deck, mesh = _load(tmp_path)
-    no_carve = dataclasses.replace(BOX_E1_E2, carve=False)
-    pv = preview_growth_boxes(deck, mesh, Model(growth_boxes=[no_carve]))
-    assert pv.rows[0].count == 0
-    assert "growth_original_elem_max" in pv.rows[0].note
-    assert "growth_original_elem_max" in pv.guard
+    pv = preview_growth_boxes(deck, mesh,
+                              Model(growth_boxes=[BOX_E2, BOX_E3]))
+    assert [r.count for r in pv.rows] == [1, 1]     # degrade: all in-region void
+    assert all(r.note == "" for r in pv.rows)       # rows stay clean ...
+    assert "growth_original_elem_max" in pv.notice  # ... one config-level notice
+    assert pv.guard == "" and pv.total_candidates == 2
 
 
 def test_preview_carve_off_only_original_noted(tmp_path):
     deck, mesh = _load(tmp_path)
     only_e1 = GrowthBox(name="skin", x_min=0.2, x_max=0.3, y_min=0.2,
-                        y_max=0.3, z_min=0.2, z_max=0.3, carve=False)
+                        y_max=0.3, z_min=0.2, z_max=0.3)
     pv = preview_growth_boxes(
         deck, mesh, Model(growth_boxes=[only_e1],
                           growth_original_elem_max=60000004))
@@ -990,14 +999,19 @@ def test_preview_carve_off_only_original_noted(tmp_path):
 
 
 # ---- validation ------------------------------------------------------------------
-def test_validate_carve_off_requires_boundary():
-    no_carve = dataclasses.replace(BOX_E1_E2, carve=False)
-    probs = _growth_problems(_cfg([no_carve]))
-    assert any(p.startswith("error") and "growth_original_elem_max" in p
-               for p in probs)
-    cfg = _cfg([no_carve], optimizer="tobs")
+def test_validate_carve_off_without_boundary_warns_once():
+    probs = [str(p) for p in check_config(_cfg([BOX_E1_E2, BOX_E3],
+                                               optimizer="tobs"))]
+    hits = [p for p in probs if "growth_original_elem_max" in p]
+    assert len(hits) == 1 and hits[0].startswith("warning")
+    cfg = _cfg([BOX_E1_E2], optimizer="tobs")
     cfg.model.growth_original_elem_max = 60000001
-    assert _growth_problems(cfg) == []
+    assert not any("growth_original_elem_max" in str(q)
+                   for q in check_config(cfg))
+    # all regions carving explicitly -> nothing to warn about either
+    carving = dataclasses.replace(BOX_E1_E2, carve=True)
+    assert not any("growth_original_elem_max" in str(q)
+                   for q in check_config(_cfg([carving], optimizer="tobs")))
 
 
 def test_validate_boundary_must_be_positive_int():
@@ -1012,31 +1026,31 @@ def test_validate_boundary_must_be_positive_int():
 
 # ---- GUI row helpers ----------------------------------------------------------------
 def test_gui_records_roundtrip_carve_flag():
-    boxes = [dataclasses.replace(BOX_E1_E2, carve=False),
-             GrowthBox(name="keep", shape="sphere", cx=0.0, cy=0.0, cz=0.0,
-                       radius=1.0)]
+    boxes = [BOX_E1_E2,                                # default: carve off
+             GrowthBox(name="recut", shape="sphere", cx=0.0, cy=0.0, cz=0.0,
+                       radius=1.0, carve=True)]
     recs = records_from_growth_boxes(boxes)
     assert recs[0]["carve"] is False and recs[1]["carve"] is True
     assert growth_boxes_from_records(recs) == boxes
 
 
-def test_gui_blank_carve_defaults_to_on():
-    # a row from an older saved table (no carve cell) keeps carving
+def test_gui_blank_carve_defaults_to_off():
+    # a row without a carve cell follows the config default: part kept intact
     row = {"name": "b", "shape": "sphere", "carve": None,
            "cx": 0.0, "cy": 0.0, "cz": 0.0, "radius": 1.0}
     [b] = growth_boxes_from_records([row])
-    assert b.carve is True
+    assert b.carve is False
 
 
 def test_gui_carve_flag_kept_for_deck_ref_rows():
-    rows = [{"name": "ref", "shape": "box", "carve": False,
+    rows = [{"name": "ref", "shape": "box", "carve": True,
              "deck_box_id": 7001}]
     [b] = growth_boxes_from_records(rows)
-    assert b.deck_box_id == 7001 and b.carve is False
+    assert b.deck_box_id == 7001 and b.carve is True
 
 
 def test_resolve_growth_boxes_preserves_carve(tmp_path):
     deck, _ = _load_with_box(tmp_path)
     [rb] = resolve_growth_boxes(
-        deck, [GrowthBox(name="ref", deck_box_id=7001, carve=False)])
-    assert rb.deck_box_id is None and rb.carve is False
+        deck, [GrowthBox(name="ref", deck_box_id=7001, carve=True)])
+    assert rb.deck_box_id is None and rb.carve is True

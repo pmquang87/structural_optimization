@@ -305,19 +305,25 @@ Every optimiser's `V0 = mesh.volumes.sum()` becomes the **envelope** volume, so:
     so the phase-2 generator works unchanged. In the GUI the node list gets its
     own name-keyed table (one x/y/z row per node, dynamic rows — the oriented-frame
     pattern), since N points don't fit the fixed-column region table.
-  * **Part-overlap policy / carve opt-out** (added after phase 2) — a region
+  * **Part-overlap policy / carve flag** (added after phase 2) — a region
     may always overlap the original part; historically that *carved* it (the
     overlapped elements start void — carve-and-regrow). Per-region
-    `carve: false` now keeps the original part intact: only expansion elements
-    start void, where "original" = element ids ≤
-    `model.growth_original_elem_max`. The id boundary is knowable because the
+    `carve: false` — now the **default** — keeps the original part intact:
+    only expansion elements start void, where "original" = element ids ≤
+    `model.growth_original_elem_max`; `carve: true` opts into deliberate
+    carve-and-regrow. The id boundary is knowable because the
     PREPARE step allocates new elements above max(original id) and records the
     boundary via `point_config_at` (GUI's *use these decks* button / CLI hint);
     hand-pre-meshed decks renumber the expansion elements above it. Purely
     geometric alternatives were rejected: at run start the extended deck IS the
     part, so original-vs-expansion is unknowable without the id provenance.
-    Lets a region be drawn generously into the part so the generated mesh hugs
-    the surface with no sliver gaps, without eating the part at iteration 0.
+    With **no boundary recorded** a carve-off region *degrades to carving*
+    (nothing is identifiable as original) with a validation warning and a
+    run-log note — chosen over a hard error so boundary-less phase-1 configs
+    (regions over hand-pre-meshed expansion volume) keep running unchanged
+    under the flipped default. Lets a region be drawn generously into the part
+    so the generated mesh hugs the surface with no sliver gaps, without eating
+    the part at iteration 0.
   * **Oriented (local-system) boxes** — an optional local frame
     (`origin` + `x_axis` + `xy_axis`, Gram-Schmidt-orthonormalised in
     `mesh.local_frame_basis`) mirrors `*DEFINE_BOX_LOCAL` -> `/BOX/RECTA` +
