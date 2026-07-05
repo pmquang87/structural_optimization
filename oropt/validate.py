@@ -311,19 +311,25 @@ def check_config(cfg: Config, *, raw: dict | None = None,
         if kind != "polyhedron" and b.points:
             warn(f"growth box {label!r}: 'points' is only used by shape "
                  f"'polyhedron' -- ignored for shape {kind!r}")
-        if not b.carve and m.growth_original_elem_max is None:
-            err(f"growth box {label!r}: carve is off (carve: false) but "
-                "model.growth_original_elem_max is not set -- without the "
-                "original/expansion element-id boundary the original part "
-                "cannot be left alive. The growth-mesh step records it when "
-                "pointing the config at the extended decks; for a "
-                "hand-pre-meshed deck set it to the original part's highest "
-                "element id")
     thr = m.growth_original_elem_max
     if thr is not None and (isinstance(thr, bool)
                             or not isinstance(thr, int) or thr <= 0):
         err("model.growth_original_elem_max must be a positive element id "
             f"(or blank): got {thr!r}")
+    # Carve-off (the default) needs the original/expansion element-id boundary
+    # to actually protect the part; without one it degrades to carving. One
+    # config-level warning -- not per region, and not an error, so a plain
+    # phase-1 config (regions over hand-pre-meshed expansion volume, no
+    # boundary, no part overlap) keeps validating clean enough to run.
+    if thr is None and any(not b.carve for b in boxes):
+        warn("growth regions with carve off (the default) but no "
+             "model.growth_original_elem_max -- no original/expansion "
+             "element-id boundary is known, so every in-region element starts "
+             "void and a region overlapping the part will carve it (as if "
+             "carve were true). The growth-mesh step records the boundary "
+             "when pointing the config at the extended decks; set it manually "
+             "for a hand-pre-meshed deck, or set carve: true to make carving "
+             "explicit")
     if boxes and cfg.optimizer_name() == "beso" \
             and cfg.beso.max_add_ratio < cfg.beso.evolution_rate:
         warn(f"growth boxes with beso.max_add_ratio={cfg.beso.max_add_ratio} < "

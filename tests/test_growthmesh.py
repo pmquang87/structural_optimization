@@ -35,9 +35,10 @@ from conftest import MINI_DECK
 # generated tets there share those surface nodes -> reachable.
 WING = GrowthBox(name="wing", x_min=-1.0, x_max=-0.001, y_min=-0.5, y_max=1.5,
                  z_min=-0.5, z_max=1.5)
-# Region carving the part's second tet (centroid (.5,.5,.5)): carve-and-regrow.
+# Region carving the part's second tet (centroid (.5,.5,.5)): carving must now
+# be opted into explicitly (carve defaults to off / part kept intact).
 CARVE = GrowthBox(name="carve", shape="sphere", cx=0.5, cy=0.5, cz=0.5,
-                  radius=0.11)
+                  radius=0.11, carve=True)
 
 _TWO_TETS = np.array([[60000001, 60000002, 60000003, 60000004],
                       [60000002, 60000003, 60000004, 60000005]])
@@ -311,31 +312,32 @@ def test_prepare_pipeline_hermetic_polyhedron_region(tmp_path, mini_engine_path)
 
 
 def test_prepare_overlapping_region_carve_off(tmp_path, mini_engine_path):
-    """A region overlapping the part is fine either way; with carve off the
-    overlapped original element stays alive on the extended deck -- only the
-    generated expansion elements are candidates. The report carries the
-    original/expansion id boundary carve-off regions need at run time."""
+    """A region overlapping the part is fine either way; by default (carve off)
+    the overlapped original element stays alive on the extended deck -- only
+    the generated expansion elements are candidates. carve: true opts into the
+    carve-and-regrow variant. The report carries the original/expansion id
+    boundary carve-off regions need at run time."""
     _write_mini(tmp_path)
     # covers the fake backend's two new tets AND e1's centroid (.25,.25,.25)
     overlap = GrowthBox(name="olap", x_min=-1.0, x_max=0.4, y_min=-0.5,
                         y_max=1.5, z_min=-0.5, z_max=1.5)
-    carving = prepare_growth_mesh(_mini_cfg(tmp_path, [overlap]),
-                                  backend=_fake_backend, log=_silent)
+    rep = prepare_growth_mesh(_mini_cfg(tmp_path, [overlap]),
+                              backend=_fake_backend, log=_silent)
+    assert rep.n_new_elems == 2
+    assert rep.total_candidates == 2             # e1 stays alive (default)
+    assert rep.original_elem_max == 60000002
+
+    carving = prepare_growth_mesh(
+        _mini_cfg(tmp_path, [dataclasses.replace(overlap, carve=True)]),
+        backend=_fake_backend, log=_silent)
     assert carving.n_new_elems == 2
     assert carving.total_candidates == 3         # 2 new + carved original e1
     assert carving.original_elem_max == 60000002
 
-    no_carve = dataclasses.replace(overlap, carve=False)
-    rep = prepare_growth_mesh(_mini_cfg(tmp_path, [no_carve]),
-                              backend=_fake_backend, log=_silent)
-    assert rep.n_new_elems == 2
-    assert rep.total_candidates == 2             # e1 stays alive
-    assert rep.original_elem_max == 60000002
-
     # the run agrees once the config carries the recorded boundary
     ext = Deck.load(tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad",
                     60000000, 60000000)
-    cfg = _mini_cfg(tmp_path, [no_carve])
+    cfg = _mini_cfg(tmp_path, [overlap])
     cfg.model.growth_original_elem_max = rep.original_elem_max
     mask = growth_candidate_mask(ext, Mesh.from_deck(ext), cfg.model,
                                  log=_silent)
