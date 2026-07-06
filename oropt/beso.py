@@ -70,9 +70,13 @@ def gate_target_vf(cfg, current_vf: float, feasible: bool,
     the way TOSCA's controller mode / LS-TaSC's constrained scaling react to the
     stress level instead of an on/off flag:
 
-    * ``backoff_gain > 0`` — infeasible growth is ``ER * min(gain*(v-1), cap)``
-      instead of a full ER step, so a 1 % violation triggers a nudge and a 50 %
-      violation a (capped) surge, rather than the same fixed step for both;
+    * ``backoff_gain > 0`` — infeasible growth is
+      ``ER * max(floor, min(gain*(v-1), cap))`` instead of a full ER step, so a
+      1 % violation triggers a nudge and a 50 % violation a (capped) surge,
+      rather than the same fixed step for both. ``backoff_floor`` bounds the
+      nudge from below: without it a persistent hair-above-the-limit violation
+      (say 0.3 %) yields ``ER*gain*0.003`` ~ nothing, and the run sits in a
+      limit cycle pinned just above the allowable;
     * ``damping_threshold < 1`` — while feasible with ``v`` above the threshold,
       removal slows by ``(1-v)/(1-threshold)``, gliding the design into the
       limit instead of overshooting and ping-ponging feasible/infeasible.
@@ -80,8 +84,9 @@ def gate_target_vf(cfg, current_vf: float, feasible: bool,
     er = cfg.evolution_rate
     if not feasible:
         if violation is not None and cfg.backoff_gain > 0.0:
-            er *= max(0.0, min(cfg.backoff_gain * (violation - 1.0),
-                               cfg.backoff_cap))
+            er *= max(cfg.backoff_floor,
+                      min(cfg.backoff_gain * (violation - 1.0),
+                          cfg.backoff_cap))
         return min(1.0, current_vf * (1.0 + er))    # back off toward feasibility
     if violation is not None and cfg.damping_threshold < 1.0 \
             and violation > cfg.damping_threshold:

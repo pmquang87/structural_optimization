@@ -245,6 +245,15 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             f"got {opt.backoff_gain}")
     if opt.backoff_cap <= 0:
         err(f"backoff_cap must be > 0: got {opt.backoff_cap}")
+    if opt.backoff_floor < 0:
+        err(f"backoff_floor must be >= 0 (0 = purely proportional back-off): "
+            f"got {opt.backoff_floor}")
+    elif opt.backoff_floor > opt.backoff_cap:
+        err(f"backoff_floor must be <= backoff_cap: "
+            f"got {opt.backoff_floor} > {opt.backoff_cap}")
+    if getattr(opt, "nucleation_rate", 0.0) < 0:
+        err(f"nucleation_rate must be >= 0 (0 = interface-only evolution): "
+            f"got {opt.nucleation_rate}")
     if not (0 < opt.damping_threshold <= 1):
         err(f"damping_threshold must be in (0, 1] (1.0 = off): "
             f"got {opt.damping_threshold}")

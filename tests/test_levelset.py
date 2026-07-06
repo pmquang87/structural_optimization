@@ -128,6 +128,96 @@ def test_update_drops_island_not_connected_to_anchor():
     assert alive[:n - 1].any()      # the connected chain survives
 
 
+# ---- hole nucleation (regression: elevator-linkage run, 2026-07-06) -----------
+def _bar_mesh(n=24):
+    """A 1-D chain of ``n`` unit-volume tets along x (element i shares 3 nodes
+    with element i+1): free surfaces everywhere, so where material is removed is
+    entirely up to the optimiser — not to island-dropping."""
+    conn = np.array([[i, i + 1, i + 2, i + 3] for i in range(n)])
+    cent = np.zeros((n, 3))
+    cent[:, 0] = np.arange(n, dtype=float)
+    return Mesh(centroids=cent, volumes=np.ones(n), conn_rows=conn,
+                n_nodes=int(conn.max()) + 1, design_node_min=0)
+
+
+def test_solid_bar_carves_low_energy_interior_without_prevoid():
+    """On a fully solid bar with NO pre-existing void, the low-energy mid-span
+    must be carved within a few updates (hole nucleation on a free surface).
+    The old binary phi init gave every element the same clamp value, so away
+    from a void fringe the bisection had nothing to discriminate on."""
+    n = 24
+    mesh = _bar_mesh(n)
+    protected = np.zeros(n, bool)
+    protected[0] = protected[n - 1] = True          # anchors at both ends
+    ls = _ls(mesh, protected)
+    # realistic skewed energy: load paths at both ends, slack mid-span
+    x = np.arange(n, dtype=float)
+    sens = (1e-3 + np.exp(-0.5 * ((x - 4.0) / 3.0) ** 2)
+            + np.exp(-0.5 * ((x - (n - 5.0)) / 3.0) ** 2))
+
+    alive = np.ones(n, bool)
+    for target in (0.9, 0.8, 0.7):
+        alive = ls.update(alive, sens, target)
+
+    removed = np.flatnonzero(~alive)
+    assert removed.size >= 4                        # material actually went away
+    assert removed.min() >= 8 and removed.max() <= n - 9   # ... from the slack mid-span
+    assert alive[:5].all() and alive[-5:].all()     # the loaded ends are intact
+
+
+def test_carving_is_not_pinned_to_existing_void_interface():
+    """The live-run defect (elevator linkage, 2026-07-06): with a binary phi
+    init only the smoothing fringe next to an existing void (the growth boxes)
+    had any phi variation, so the bisection removed the elements AT the void
+    interface — even the hot ones carrying load — while a far low-energy pocket
+    was never touched (29,105 of 29,769 removals inside a box over 6
+    iterations). On this bar the old init removed the hot interface elements
+    [8, 9]; the energy-rank init must carve the slack pocket instead."""
+    n = 40
+    mesh = _bar_mesh(n)
+    protected = np.zeros(n, bool)
+    protected[16] = protected[n - 1] = True         # anchors either side of the pocket
+    ls = _ls(mesh, protected, smoothing_passes=3)   # production default fringe
+    alive = np.ones(n, bool)
+    alive[:8] = False                               # pre-void "growth box" at the left
+    sens = np.full(n, 0.01)                         # skewed bulk: ~1 % of the peak
+    sens[:8] = 0.0                                  # dead elements report no energy
+    sens[8:12] = 1.0                                # the void interface carries the load
+    sens[24:28] = 0.001                             # slack pocket far from the void
+
+    vf = ls.volume_fraction(alive)                  # 32/40
+    new = ls.update(alive, sens, vf - 2.0 / n)      # one update, budget ~2 elements
+
+    removed = set(np.flatnonzero(alive & ~new))
+    assert removed                                  # something was removed
+    assert removed <= set(range(24, 28))            # ... and only from the slack pocket
+    assert new[8:12].all()                          # the hot interface elements survive
+
+
+def test_constant_volume_swap_resurrects_hot_void_and_carves_pocket():
+    """Bi-directional exchange at a *constant* volume target: a high-energy void
+    region rises above the threshold while the low-energy pocket sinks below it
+    (the nucleation reaction term keeps slack material sinking even when the
+    volume budget alone asks for no net removal)."""
+    n = 24
+    mesh = _bar_mesh(n)
+    protected = np.zeros(n, bool)
+    protected[6] = protected[n - 1] = True          # anchors either side of the pocket
+    ls = _ls(mesh, protected)
+    alive = np.ones(n, bool)
+    alive[:4] = False                               # hot void: resurrection candidate
+    sens = np.full(n, 1.0)
+    sens[:4] = 5.0                                  # void region would carry load
+    sens[10:14] = 1e-3                              # slack pocket
+
+    vf = ls.volume_fraction(alive)                  # constant target: 20/24
+    for _ in range(4):
+        alive = ls.update(alive, sens, vf)
+
+    assert alive[:4].all()          # hot void resurrected
+    assert not alive[10:14].any()   # slack pocket carved in exchange
+
+
 # ---- sensitivity delegation (shares the BESO helpers) -------------------------
 def test_raw_sensitivity_and_filter_match_beso():
     mesh = _fan_mesh(5)

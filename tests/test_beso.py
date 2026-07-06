@@ -110,6 +110,7 @@ def test_next_target_vf_proportional_backoff_scales_with_violation():
     b = _beso()                              # er = 0.2
     b.cfg.backoff_gain = 5.0
     b.cfg.backoff_cap = 4.0
+    b.cfg.backoff_floor = 0.0                # purely proportional (no floor)
     fixed = b.next_target_vf(0.8, feasible=False)         # classic +ER step
     just_over = b.next_target_vf(0.8, feasible=False, violation=1.01)
     way_over = b.next_target_vf(0.8, feasible=False, violation=1.2)
@@ -126,6 +127,26 @@ def test_next_target_vf_proportional_backoff_scales_with_violation():
     # cap of 1x ER reproduces the classic step even for a huge violation
     b.cfg.backoff_cap = 1.0
     assert b.next_target_vf(0.8, feasible=False, violation=100.0) == fixed
+
+
+def test_next_target_vf_backoff_floor_guarantees_meaningful_backstep():
+    """Regression (elevator-linkage run, 2026-07-06): at a 0.3 % sigma overshoot
+    the proportional back-step is ER*gain*0.003 ~ nothing, so the run sat in a
+    limit cycle pinned just above the allowable. The floor bounds the back-step
+    from below: any persistent violation recovers at least floor*ER volume."""
+    b = _beso()                              # er = 0.2
+    b.cfg.backoff_gain = 5.0                 # 0.3 % overshoot -> gain*(v-1) = 0.015
+    assert b.cfg.backoff_floor == 0.25       # the default is on
+    floored = b.next_target_vf(0.8, feasible=False, violation=1.003)
+    assert floored == pytest.approx(0.8 * (1 + 0.2 * 0.25))
+    # above the floor the step is proportional again
+    assert b.next_target_vf(0.8, feasible=False, violation=1.2) \
+        == pytest.approx(0.8 * (1 + 0.2 * 1.0))
+    # the floor only shapes the proportional controller: with gain 0 the classic
+    # binary gate already takes a full ER step
+    b.cfg.backoff_gain = 0.0
+    assert b.next_target_vf(0.8, feasible=False, violation=1.003) \
+        == pytest.approx(0.8 * 1.2)
 
 
 def test_next_target_vf_damps_removal_near_the_limit():
