@@ -172,6 +172,25 @@ def test_nonpositive_backoff_cap_is_error(tmp_path):
     assert any("backoff_cap must be > 0" in e for e in _errors(cfg))
 
 
+def test_negative_backoff_floor_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.backoff_floor = -0.1
+    assert any("backoff_floor must be >= 0" in e for e in _errors(cfg))
+
+
+def test_backoff_floor_above_cap_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.beso.backoff_floor = 5.0            # default cap is 4.0
+    assert any("backoff_floor must be <= backoff_cap" in e for e in _errors(cfg))
+
+
+def test_negative_nucleation_rate_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.optimizer = "levelset"
+    cfg.levelset.nucleation_rate = -0.5
+    assert any("nucleation_rate must be >= 0" in e for e in _errors(cfg))
+
+
 @pytest.mark.parametrize("dt", [0.0, -0.2, 1.5])
 def test_damping_threshold_out_of_range_is_error(tmp_path, dt):
     cfg = _good_cfg(tmp_path)

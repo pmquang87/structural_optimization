@@ -577,21 +577,29 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "cases (σ_max/σ_allow and d/d_allow; v ≤ 1 = feasible). Defaults "
                 "= the classic binary gate (fixed ±ER step from feasible/"
                 "infeasible alone), which is known to ping-pong across the limit.")
-    b = st.columns(4)
+    b = st.columns(5)
     aopt.backoff_gain = b[0].number_input(
         "Back-off gain", value=float(aopt.backoff_gain), min_value=0.0,
         step=0.5, format="%.2f", key=f"bogain_{opt_name}",
         help="0 = classic gate: any violation grows the target by one full "
              "evolution-rate step. > 0 = proportional: the growth step is "
-             "ER·min(gain·(v−1), cap), so a 1 % violation triggers a nudge and "
-             "a large one a capped surge. Size it so gain·(typical overshoot) "
-             "≈ 1, e.g. 10–20.")
+             "ER·max(floor, min(gain·(v−1), cap)), so a 1 % violation triggers "
+             "a nudge and a large one a capped surge. Size it so "
+             "gain·(typical overshoot) ≈ 1, e.g. 10–20.")
     aopt.backoff_cap = b[1].number_input(
         "Back-off cap (×ER)", value=float(aopt.backoff_cap), min_value=0.1,
         step=0.5, format="%.1f", key=f"bocap_{opt_name}",
         help="Cap on the proportional growth step, in multiples of the "
              "evolution rate. Only used when the gain is > 0.")
-    aopt.damping_threshold = b[2].number_input(
+    aopt.backoff_floor = b[2].number_input(
+        "Back-off floor (×ER)", value=float(aopt.backoff_floor), min_value=0.0,
+        step=0.05, format="%.2f", key=f"boflr_{opt_name}",
+        help="Floor on the proportional back-step, in fractions of the "
+             "evolution rate: a persistent hair-above-the-limit violation "
+             "still backs off by at least floor·ER instead of sitting in a "
+             "limit cycle pinned just above the allowable. Only used when the "
+             "gain is > 0.")
+    aopt.damping_threshold = b[3].number_input(
         "Damping threshold", value=float(aopt.damping_threshold),
         min_value=0.05, max_value=1.0, step=0.01, format="%.2f",
         key=f"damp_{opt_name}",
@@ -599,7 +607,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
              "(1−v)/(1−threshold) so the design glides into the limit instead "
              "of overshooting and oscillating. 1.0 = off (full rate until "
              "infeasible); 0.9–0.95 is typical.")
-    aopt.addback_stress_bias = b[3].number_input(
+    aopt.addback_stress_bias = b[4].number_input(
         "Add-back stress bias", value=float(aopt.addback_stress_bias),
         min_value=0.0, step=0.5, format="%.2f", key=f"abbias_{opt_name}",
         help="When a stress limit is violated, scale the sensitivity driving "
@@ -621,7 +629,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
             help="Relaxation band (×V0) on the linearised volume constraint so the "
                  "binary ILP is always feasible (the paper's ε).")
     elif opt_name == "levelset":
-        t = st.columns(3)
+        t = st.columns(4)
         cfg.levelset.dt = t[0].number_input(
             "Level-set dt", value=float(cfg.levelset.dt), step=0.1,
             help="Pseudo-time step for the φ evolution.")
@@ -632,6 +640,13 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         cfg.levelset.band_width = t[2].number_input(
             "Band width", value=float(cfg.levelset.band_width), step=0.5,
             help="Clamp |φ| to this each step to keep the field bounded.")
+        cfg.levelset.nucleation_rate = t[3].number_input(
+            "Nucleation rate", value=float(cfg.levelset.nucleation_rate),
+            min_value=0.0, step=0.1, format="%.2f",
+            help="Reaction term (crude topological derivative): low-energy "
+                 "regions sink by dt·rate·(1 − Vn) per iteration, so holes can "
+                 "nucleate in the free interior instead of only at existing "
+                 "void interfaces. 0 = off.")
     elif opt_name == "hca":
         t = st.columns(3)
         cfg.hca.kp = t[0].number_input(

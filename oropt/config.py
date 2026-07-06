@@ -263,6 +263,7 @@ class Beso:
     # --- feasibility back-off controller (defaults = the classic binary gate) ---
     backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
     backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
 
@@ -302,12 +303,14 @@ class LevelSet:
     # --- feasibility back-off controller (defaults = the classic binary gate) ---
     backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
     backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
     # --- level-set specific ---
     dt: float = 1.0                  # pseudo-time step for the phi evolution
     smoothing_passes: int = 3        # Laplacian/Jacobi smoothing passes per iteration (regularisation)
     band_width: float = 3.0          # clamp |phi| to this after each step to keep the field bounded
+    nucleation_rate: float = 0.5     # topological-derivative-style reaction: phi sinks by dt*rate*(1 - Vn/Vmax), so low-energy interior material can cross the threshold (nucleate holes away from existing void interfaces) instead of parking at the +band_width clamp. 0 = off (interface-only evolution)
 
 
 @dataclass
@@ -354,6 +357,7 @@ class TobsOpts:
     # --- feasibility back-off controller (defaults = the classic binary gate) ---
     backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
     backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
     # --- TOBS specific ---
@@ -401,6 +405,7 @@ class HcaOpts:
     # --- feasibility back-off controller (defaults = the classic binary gate) ---
     backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
     backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
     # --- HCA specific ---

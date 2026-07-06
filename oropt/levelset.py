@@ -9,7 +9,10 @@ and history-averaged by :func:`filter_history` (shared with BESO). Each iteratio
 
 * scatter the filtered per-element energy onto nodes (volume-weighted average over
   incident elements) -> a nodal "velocity" ``Vn`` (high energy -> grow, low ->
-  erode);
+  erode), minus a nucleation reaction term ``nucleation_rate * (1 - Vn)`` (a
+  crude topological derivative) so low-energy regions carry a *negative* speed
+  and can sink below the threshold anywhere — not only at an existing void
+  interface;
 * evolve ``phi <- phi + dt*(Vn - lambda)`` and apply a few Laplacian/Jacobi
   smoothing passes as reaction-diffusion-style regularisation (cheap and stable
   on an unstructured tet mesh — no full Hamilton-Jacobi solve);
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import numpy as np
 from scipy import sparse
+from scipy.stats import rankdata
 
 from .beso import blend_history, gate_target_vf, map_sensitivity
 from .config import LevelSet as LevelSetCfg
@@ -67,8 +71,8 @@ class LevelSet:
         self._node_vol = np.asarray(B.T @ self.vol).ravel()   # sum of incident vols / node
         self._smooth_op = self._build_smooth_op(B)
 
-        # Nodal level-set field; initialised lazily from the first alive mask seen
-        # (so it matches the current / resumed geometry).
+        # Nodal level-set field; initialised lazily from the first alive mask and
+        # sensitivity seen (so it matches the current / resumed geometry).
         self.phi: np.ndarray | None = None
 
     # ---- node graph / smoothing -------------------------------------------
@@ -113,12 +117,31 @@ class LevelSet:
         """Mean of a nodal field over each element's 4 nodes."""
         return phi[self.mesh.conn_rows].mean(axis=1)
 
-    def _init_phi(self, alive_mask: np.ndarray) -> np.ndarray:
-        """Smoothed signed indicator of the current alive set: +inside, -outside."""
-        ind = np.where(np.asarray(alive_mask, dtype=bool), 1.0, -1.0)
-        phi = self._scatter(ind)
+    def _init_phi(self, alive_mask: np.ndarray, sens: np.ndarray) -> np.ndarray:
+        """Signed energy-rank spread: alive elements over (0, +band_width] by
+        their filtered-energy rank, void elements over [-band_width, 0).
+
+        A binary indicator (+1 alive / -1 void) is NOT used: it gives every
+        element away from an alive/void interface the same value, so the tau
+        bisection can only ever pick elements in the smoothing fringe next to
+        existing voids — low-energy material in the free interior is never
+        carved (no hole nucleation; observed live on the elevator-linkage run).
+        Rank-spreading each set instead orders the whole part from step 0 while
+        keeping the sign contract (alive <=> phi >= 0) so a resumed geometry
+        still thresholds back to the mask it was initialised from.
+        """
+        alive = np.asarray(alive_mask, dtype=bool)
+        s = np.asarray(sens, dtype=float)
+        bw = self.cfg.band_width
+        phi_e = np.zeros(alive.size)
+        for mask, lo, hi in ((alive, 0.0, bw), (~alive, -bw, 0.0)):
+            k = int(mask.sum())
+            if k:
+                r = rankdata(s[mask], method="average")        # ties stay tied
+                phi_e[mask] = lo + (hi - lo) * r / (k + 1.0)   # open interval
+        phi = self._scatter(phi_e)
         phi = self._smooth(phi, self.cfg.smoothing_passes)
-        return np.clip(phi, -self.cfg.band_width, self.cfg.band_width)
+        return np.clip(phi, -bw, bw)
 
     # ---- public: thresholding ---------------------------------------------
     def elements_alive(self, phi: np.ndarray) -> np.ndarray:
@@ -198,7 +221,7 @@ class LevelSet:
         """
         alive_mask = np.asarray(alive_mask, dtype=bool)
         if self.phi is None:
-            self.phi = self._init_phi(alive_mask)
+            self.phi = self._init_phi(alive_mask, sens)
 
         # nodal velocity from the shape sensitivity (normalised so dt is meaningful)
         Vn = self._scatter(np.asarray(sens, dtype=float))
@@ -206,8 +229,15 @@ class LevelSet:
         if scale > 0:
             Vn = Vn / scale
 
+        # nucleation reaction term (crude topological derivative): low-energy
+        # nodes get a negative speed instead of the >= 0 pure-energy velocity.
+        # Its uniform part is absorbed by tau; what remains lets slack material
+        # sink below the threshold anywhere — and un-pins nodes parked at the
+        # +band_width clamp, where the pure-energy velocity would hold them.
+        vel = Vn - self.cfg.nucleation_rate * (1.0 - Vn)
+
         # evolve + regularise (smoothing preserves constants -> see _solve_tau)
-        phi_base = self._smooth(self.phi + self.cfg.dt * Vn, self.cfg.smoothing_passes)
+        phi_base = self._smooth(self.phi + self.cfg.dt * vel, self.cfg.smoothing_passes)
 
         # bisect the threshold so the kept volume meets the per-iteration target
         target_V = target_vf * self.V0
