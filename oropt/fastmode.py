@@ -17,8 +17,10 @@ contact patches so the linear stiffness matrix has a real load+support path:
 
 The engine then reproduces the nonlinear peak von-Mises to within ~14% in ~3 min
 vs ~1h49m. It is a **ranking/flagging screen, not a certifying stress** — the
-tied linear read is ~14% non-conservative, which the calibrated
-:data:`~oropt.config.FAST_MODE_SIGMA_ALLOW` (254 MPa) folds back in.
+tied linear read is ~14% non-conservative, so pick each case's ``sigma_allow``
+with that bias in mind (fast mode uses ``sigma_allow`` exactly as normal mode; it
+is never overridden). On the elevator-linkage pull case the rated peak reads 254
+vs the nonlinear 294 against a 292 MPa yield, so ~254 MPa screens near that yield.
 
 **Discovery, not hard-coding.** The tie topology is discovered from the deck
 (:func:`discover_tie`): the loading rigid body is the one whose master node carries

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from oropt.config import (FAST_MODE_SIGMA_ALLOW, Config, LoadCase, unknown_keys)
+from oropt.config import Config, LoadCase, unknown_keys
 
 
 def test_run_folder_defaults_to_case_dir():
@@ -152,25 +152,19 @@ def test_resolved_case_carries_fast_mode():
     assert slow.fast_mode is False
 
 
-def test_fast_mode_blank_sigma_allow_uses_calibrated_254():
-    # fast mode + blank sigma_allow -> the calibrated fast-mode allowable
+def test_fast_mode_uses_sigma_allow_like_normal_mode():
+    # fast mode never overrides sigma_allow: blank stays unconstrained (as normal),
+    # and an explicit limit is passed through untouched.
     cfg = Config()
-    cfg.load_cases = [LoadCase(name="f", stem="lc_f", fast_mode=True)]
-    [rc] = cfg.load_case_list()
-    assert rc.sigma_allow == FAST_MODE_SIGMA_ALLOW == 254.0
-
-
-def test_fast_mode_explicit_sigma_allow_wins():
-    # an explicit per-case sigma_allow overrides the calibration
-    cfg = Config()
-    cfg.load_cases = [LoadCase(name="f", stem="lc_f", sigma_allow=400.0,
+    cfg.load_cases = [LoadCase(name="blank", stem="lc_b", fast_mode=True),
+                      LoadCase(name="set", stem="lc_s", sigma_allow=254.0,
                                fast_mode=True)]
-    [rc] = cfg.load_case_list()
-    assert rc.sigma_allow == 400.0
+    blank, set_ = cfg.load_case_list()
+    assert blank.fast_mode is True and blank.sigma_allow is None
+    assert set_.fast_mode is True and set_.sigma_allow == 254.0
 
 
 def test_non_fast_blank_sigma_allow_stays_unconstrained():
-    # the 254 default is fast-mode only; a normal case with a blank limit is None
     cfg = Config()
     cfg.load_cases = [LoadCase(name="n", stem="lc_n")]
     [rc] = cfg.load_case_list()

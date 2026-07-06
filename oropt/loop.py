@@ -496,6 +496,17 @@ def worst_violation(cases, case_results) -> float:
     return max(ratios, default=0.0)
 
 
+def _solve_activity(it: int, case: ResolvedCase, i: int, n_cases: int) -> str:
+    """One-line "what is solving right now" for the live ``Status.activity``.
+
+    Names the iteration, the load case and — the point of the fast-mode monitor —
+    whether this solve is the fast tied-linear screen or the full nonlinear solve,
+    so the GUI shows what is running during the minutes a solve takes."""
+    mode = "fast linear (tied)" if case.fast_mode else "full nonlinear"
+    where = f" [case {i + 1}/{n_cases}]" if n_cases > 1 else ""
+    return f"iter {it}: solving {case.name!r} — {mode}{where}"
+
+
 def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
                 no_pin: set, solve_dir: Path, anim_dt: float,
                 exclude_elem_ids: Optional[np.ndarray] = None,
@@ -638,8 +649,9 @@ def run_optimization(cfg: Config, resume: bool = False,
         if case.fast_mode:
             tie = discover_tie(cdeck, m.design_node_min)
             fast_ties[i] = tie
+            lim = "unset" if case.sigma_allow is None else f"{case.sigma_allow:g} MPa"
             log(f"[oropt] case {case.name!r}: FAST MODE (tied linear screen, "
-                f"sigma_allow={case.sigma_allow} MPa); {tie.summary()}")
+                f"sigma_allow={lim}); {tie.summary()}")
     mesh = Mesh.from_deck(deck)
     bc_nodes = deck.group_nodes(m.bc_group_id)
     no_pin = set(int(v) for v in bc_nodes)            # already kinematically constrained
@@ -763,6 +775,12 @@ def run_optimization(cfg: Config, resume: bool = False,
             case_results = []
             for i, (case, cdeck) in enumerate(zip(cases, case_decks)):
                 csolve = _case_solve_dir(solve_root, n_cases, i)
+                # Publish the live activity BEFORE the solve so the GUI shows what
+                # is running during the minutes it takes (fast linear vs nonlinear).
+                status.state = "running"
+                status.iteration = it
+                status.activity = _solve_activity(it, case, i, n_cases)
+                st.write_status(work, status)
                 res, r = _solve_case(cfg, case, cdeck, alive, no_pin,
                                      csolve, cfg.run.anim_dt, exclude_elem_ids,
                                      fast_tie=fast_ties[i])
@@ -866,6 +884,7 @@ def run_optimization(cfg: Config, resume: bool = False,
                 disp_feasible = all(feas for *_, feas in rows)
                 per_case.append({
                     "name": case.name,
+                    "fast_mode": bool(case.fast_mode),
                     "sigma_max": float(r.sigma_max), "sigma_allow": case.sigma_allow,
                     "disp": float(c_disp), "d_allow": c_d_allow,
                     "disp_constraints": [

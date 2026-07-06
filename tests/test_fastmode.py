@@ -203,3 +203,26 @@ def test_build_fast_case_intersects_with_alive_mesh(tmp_path):
     assert info == {"load_tied": 0, "support_tied": 2}
     assert _grnod(starter, 90007) == {1000, 1001}       # no dead nodes tied in
     assert _grnod(starter, 90010) == {2000, 2001, 60000003, 60000004}
+
+
+# ---- live monitor ----------------------------------------------------------
+def test_solve_activity_names_the_mode():
+    from oropt.config import Config, LoadCase
+    from oropt.loop import _solve_activity
+    cfg = Config()
+    cfg.load_cases = [LoadCase(name="pull", stem="s0", fast_mode=True),
+                      LoadCase(name="push", stem="s1")]
+    fast, slow = cfg.load_case_list()
+    assert _solve_activity(3, fast, 0, 2) == \
+        "iter 3: solving 'pull' — fast linear (tied) [case 1/2]"
+    assert "full nonlinear" in _solve_activity(3, slow, 1, 2)
+    # a single-case run omits the [case i/n] suffix
+    assert _solve_activity(0, fast, 0, 1) == \
+        "iter 0: solving 'pull' — fast linear (tied)"
+
+
+def test_status_activity_roundtrips(tmp_path):
+    from oropt.status import Status, read_status, write_status
+    act = "iter 5: solving 'pull' — fast linear (tied)"
+    write_status(tmp_path, Status(state="running", activity=act))
+    assert read_status(tmp_path).activity == act
