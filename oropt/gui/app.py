@@ -1189,6 +1189,18 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
             d3 = df[["disp"]].copy(); d3["d_allow"] = status.d_allow
             cols[2].caption("disp vs limit"); cols[2].line_chart(d3)
 
+        # Run log tail: the loop's stdout is discarded by the detached launch, so
+        # this is the only place the run's progress — and every best-effort
+        # post-run step's skip reason (d3plot / smooth / animate / report) — is
+        # visible in the browser (e.g. "animate: ... skipped"). Auto-expanded on
+        # failure so the reason isn't buried; mirrors the PREPARE panel's tail.
+        log_tail = st_io.read_log_tail(work)
+        if log_tail:
+            with st.expander("📜 Run log (tail) — progress & post-run "
+                             "(d3plot / smooth / animate / report) messages",
+                             expanded=status.state == "failed"):
+                st.code(log_tail, language=None)
+
     monitor()
 
     # The 3D topology preview lives in its OWN fragment, deliberately *without*

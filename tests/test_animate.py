@@ -224,6 +224,39 @@ def test_render_frames_includes_growth_boxes_in_spec(tmp_path, monkeypatch):
     assert captured["spec"]["boxes"][0]["kind"] == "box"
 
 
+def test_render_frames_drops_unserialisable_overlay_but_keeps_frames(
+        tmp_path, monkeypatch):
+    """Regression: an overlay that won't JSON-serialise (numpy hull indices used
+    to slip through) must not sink the GIF. The box spec is dropped, the frames
+    still render, and the reason is logged loudly."""
+    import json
+    from pathlib import Path
+
+    import numpy as np
+    from PIL import Image
+
+    from oropt._render import RenderResult
+
+    captured: dict = {}
+
+    def fake_run_render(script, args, timeout):
+        captured["spec"] = json.loads(Path(args[0]).read_text(encoding="utf-8"))
+        for pstr in captured["spec"]["pngs"]:
+            Image.new("RGB", (8, 8), (0, 0, 0)).save(pstr)
+        return RenderResult(True, 0, "")
+    monkeypatch.setattr(anim, "run_render", fake_run_render)
+
+    frames = [_touch(tmp_path, f"topology_iter000{i}.vtu") for i in range(2)]
+    bad_boxes = [{"kind": "box", "name": "b", "corners": [[0.0, 0.0, 0.0]],
+                  "edges": [[np.int32(0), np.int32(1)]]}]   # numpy -> not JSON-safe
+    logs: list[str] = []
+    out = anim._render_frames(frames, AnimateOpts(), tmp_path, logs.append,
+                              boxes=bad_boxes)
+    assert out and len(out) == 2                     # frames still rendered
+    assert captured["spec"]["boxes"] == []           # overlay dropped, not fatal
+    assert any("overlay not JSON-serialisable" in m for m in logs)
+
+
 def test_cli_out_flag_passes_through(tmp_path, monkeypatch):
     captured: dict = {}
 

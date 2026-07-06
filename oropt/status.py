@@ -29,6 +29,7 @@ HISTORY = "history.csv"
 TOPOLOGY = "topology_latest.vtu"
 PIDFILE = "run.pid"
 CHECKPOINT = "checkpoint.npz"
+RUN_LOG = "run.log"        # the loop's tee'd stdout (see oropt.run._tee_log)
 
 _HISTORY_COLS = ["iteration", "volume_fraction", "sigma_max", "disp",
                  "elements_alive", "feasible", "iter_wall_s", "or_termination"]
@@ -103,6 +104,25 @@ def append_history(work_dir: str | Path, row: dict) -> None:
         if new:
             w.writeheader()
         w.writerow(row)
+
+
+def read_log_tail(work_dir: str | Path, n: int = 200) -> str:
+    """Last *n* non-blank lines of the run's ``run.log`` (``""`` when absent).
+
+    The GUI launches the loop detached with its stdout discarded, so ``run.log``
+    (written by :func:`oropt.run._tee_log`) is the only durable record of the
+    run's progress and — the reason this exists — the skip reason of every
+    best-effort post-run step (d3plot / smooth / animate / report), which each
+    only *log* their outcome. The Monitor tails it so those surface in the
+    browser, mirroring the PREPARE panel's log tail. Best-effort: an unreadable
+    log reads as empty rather than raising into the GUI.
+    """
+    p = Path(work_dir) / RUN_LOG
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(s for s in lines[-n:] if s.strip())
 
 
 def read_history(work_dir: str | Path) -> list[dict]:

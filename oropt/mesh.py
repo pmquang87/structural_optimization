@@ -163,7 +163,11 @@ def polyhedron_hull_edges(points: np.ndarray) -> list[list[int]] | None:
         return None
     edges = {tuple(sorted((s[k], s[(k + 1) % 3])))
              for s in hull.simplices for k in range(3)}
-    return [list(e) for e in sorted(edges)]
+    # Cast the numpy hull indices (intc) to plain ints: the overlay spec is
+    # JSON-serialised for the isolated render subprocess (animate/report), and
+    # numpy scalars are not JSON-serialisable -- leaving them numpy silently
+    # kills the whole evolution GIF and drops the report's growth-box outlines.
+    return [[int(i), int(j)] for i, j in sorted(edges)]
 
 
 def overlay_primitives(boxes) -> list[dict]:
