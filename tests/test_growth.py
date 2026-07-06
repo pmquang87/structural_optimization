@@ -781,6 +781,17 @@ def test_overlay_primitives_polyhedron_hull_edges():
     assert all(0 <= i < 4 and 0 <= j < 4 and i != j for i, j in pr["edges"])
 
 
+def test_overlay_primitives_polyhedron_edges_are_json_serialisable():
+    # Regression: the polyhedron hull edges came back as numpy intc scalars, so
+    # json.dumps(overlay_primitives(...)) raised -- which silently killed the
+    # whole topology-evolution GIF and dropped the report's growth-box outlines.
+    import json
+    poly = GrowthBox(name="w", shape="polyhedron", points=_TET_POINTS)
+    [pr] = overlay_primitives([poly])
+    assert all(type(i) is int and type(j) is int for i, j in pr["edges"])
+    json.dumps(overlay_primitives([poly]))          # must not raise
+
+
 def test_overlay_primitives_polyhedron_interior_point_unreferenced():
     # an interior point contributes no hull edge -- only the hull is drawn
     poly = GrowthBox(name="w", shape="polyhedron",

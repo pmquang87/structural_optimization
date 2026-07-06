@@ -277,7 +277,25 @@ def _render_frames(frames: list[Path], opts: AnimateOpts, tmp: Path,
         "boxes": boxes or [],
     }
     spec_path = tmp / "anim_spec.json"
-    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    # Pre-validate the spec is JSON-serialisable *before* launching the render.
+    # The growth-region overlay is decoration; a non-serialisable box spec (e.g.
+    # numpy indices leaking through) must never sink the whole GIF -- drop the
+    # overlay and animate the frames anyway, matching the report's
+    # overlay-is-best-effort behaviour, and say so loudly. Only if even the
+    # frames-only spec won't serialise do we give up.
+    try:
+        payload = json.dumps(spec)
+    except TypeError as exc:
+        log(f"[oropt] animate: growth-region overlay not JSON-serialisable "
+            f"({exc}); rendering without it")
+        spec["boxes"] = []
+        try:
+            payload = json.dumps(spec)
+        except TypeError as exc2:
+            log(f"[oropt] animate: render spec not JSON-serialisable "
+                f"({exc2}) - skipped")
+            return None
+    spec_path.write_text(payload, encoding="utf-8")
     result = run_render(_RENDER_RUNNER, [spec_path], float(opts.render_timeout_s))
     if not result.ok:
         if result.returncode is None:                 # timed out / could not launch

@@ -40,6 +40,17 @@ def test_history_append(tmp_path):
     assert rows[2]["sigma_max"] == "302"
 
 
+def test_read_log_tail_absent_is_empty(tmp_path):
+    assert st.read_log_tail(tmp_path) == ""            # no run.log yet -> ""
+
+
+def test_read_log_tail_returns_last_n_nonblank_lines(tmp_path):
+    (tmp_path / st.RUN_LOG).write_text(
+        "line1\n\nline2\n\nline3\n", encoding="utf-8")
+    assert st.read_log_tail(tmp_path) == "line1\nline2\nline3"   # blanks dropped
+    assert st.read_log_tail(tmp_path, n=1) == "line3"            # only the tail
+
+
 def test_checkpoint_roundtrip(tmp_path):
     alive = np.array([True, False, True, True])
     sens = np.array([1.0, 2, 3, 4])
