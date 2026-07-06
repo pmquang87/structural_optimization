@@ -218,6 +218,109 @@ def test_constant_volume_swap_resurrects_hot_void_and_carves_pocket():
     assert not alive[10:14].any()   # slack pocket carved in exchange
 
 
+# ---- velocity normalisation (regression: H2 squash, elevator-linkage run) -----
+def test_speed_scale_ignores_protected_artefact_peak():
+    """The unit speed must come from material the optimiser can act on: on the
+    elevator-linkage run the global sens argmax sat in the stress-excluded,
+    PROTECTED load-introduction region (max/median 417x), so max-normalisation
+    left 73% of alive elements moving at < 1% of dt and handed the evolution to
+    tau + smoothing instead of the mechanics (docs/levelset_stuck_analysis.md,
+    H2)."""
+    n = 24
+    mesh = _bar_mesh(n)
+    protected = np.zeros(n, bool); protected[0] = True
+    ls = _ls(mesh, protected)
+    alive = np.ones(n, bool)
+    sens = np.linspace(2.0, 1.0, n)
+    sens[0] = 500.0                                  # protected artefact peak
+
+    scale = ls._speed_scale(alive, sens)
+    assert scale <= 2.0 + 1e-9                       # the artefact does not own it
+    assert scale == pytest.approx(
+        np.percentile(np.abs(sens[alive & ~protected]), 99.0))
+
+    # a dead element's (stale) energy doesn't set the scale either
+    alive[5] = False
+    sens[5] = 300.0
+    assert ls._speed_scale(alive, sens) <= 2.0 + 1e-9
+
+
+def test_speed_scale_degenerate_fallbacks():
+    """p99 of a pool that is >= 99% zeros is 0 -- the scale falls back to the
+    pool max, then to the global max, and is 0.0 only for an all-zero field
+    (update() then skips normalising instead of dividing by zero)."""
+    protected = np.zeros(200, bool); protected[0] = True
+    ls = _ls(_fan_mesh(200), protected)
+    alive = np.ones(200, bool)
+
+    sens = np.zeros(200); sens[4] = 7.0             # 198/199 actionable are zero
+    assert ls._speed_scale(alive, sens) == 7.0      # pool max, not p99 (= 0)
+
+    sens = np.zeros(200); sens[0] = 9.0             # actionable all-zero
+    assert ls._speed_scale(alive, sens) == 9.0      # global max keeps dt bounded
+
+    ls_all = _ls(_fan_mesh(200), np.ones(200, bool))  # everything protected
+    sens = np.linspace(1.0, 2.0, 200)
+    assert ls_all._speed_scale(alive, sens) == pytest.approx(
+        np.percentile(sens, 99.0))                  # pool = every element
+
+    assert ls._speed_scale(alive, np.zeros(200)) == 0.0
+    out = ls.update(alive, np.zeros(200), target_vf=0.9)   # no div-by-zero
+    assert out.any()
+
+
+def test_artefact_peak_does_not_squash_the_swap():
+    """The H2 regression end to end: the constant-volume swap above, but with a
+    protected element carrying a 500x load-introduction artefact. Under
+    max-normalisation the artefact rescaled every real velocity to ~1e-3 of dt,
+    so the hot void could not climb the ~1.5 phi gap to the threshold in any
+    realistic number of updates; the robust scale keeps the swap timeline the
+    same as without the artefact."""
+    n = 24
+    mesh = _bar_mesh(n)
+    protected = np.zeros(n, bool)
+    protected[6] = protected[n - 1] = True          # anchors either side of the pocket
+    ls = _ls(mesh, protected)
+    alive = np.ones(n, bool)
+    alive[:4] = False                               # hot void: resurrection candidate
+    sens = np.full(n, 1.0)
+    sens[:4] = 5.0                                  # void region would carry load
+    sens[10:14] = 1e-3                              # slack pocket
+    sens[n - 1] = 500.0                             # protected artefact peak
+
+    vf = ls.volume_fraction(alive)                  # constant target
+    for _ in range(4):
+        alive = ls.update(alive, sens, vf)
+
+    assert alive[:4].all()          # hot void resurrected despite the artefact
+    assert not alive[10:14].any()   # slack pocket carved in exchange
+
+
+def test_update_invariant_to_protected_artefact_magnitude():
+    """Seam contract: how hot the protected artefact is must not steer the
+    evolution. Its incident nodes clip to speed 1 either way and the scale is
+    computed without it, so 100x vs 10000x gives bit-identical masks and phi.
+    (Pre-fix the scale WAS the artefact, so every velocity in the part shrank
+    in proportion to it.)"""
+    n = 40
+    mesh = _bar_mesh(n)
+    protected = np.zeros(n, bool)
+    protected[0] = protected[n - 1] = True
+    base = 1e-3 + np.linspace(1.0, 0.2, n)          # generic decreasing energy
+    masks, phis = [], []
+    for peak in (100.0, 10000.0):
+        ls = _ls(mesh, protected)
+        sens = base.copy()
+        sens[0] = peak                              # protected artefact
+        alive = np.ones(n, bool)
+        for target in (0.9, 0.8):
+            alive = ls.update(alive, sens, target)
+        masks.append(alive)
+        phis.append(ls.phi)
+    assert np.array_equal(masks[0], masks[1])
+    assert np.array_equal(phis[0], phis[1])
+
+
 # ---- sensitivity delegation (shares the BESO helpers) -------------------------
 def test_raw_sensitivity_and_filter_match_beso():
     mesh = _fan_mesh(5)

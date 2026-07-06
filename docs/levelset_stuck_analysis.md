@@ -22,6 +22,15 @@ i.e. **pre-PR #57**).
 > the loop warns on grow-stall / removal-spike signatures. Regression
 > coverage: `tests/test_levelset_leak.py`. The two reproduction scripts below
 > demonstrate the *defect* and are era-pinned to commit `2280f86`.
+>
+> **Note on the H2 fix** (`fix/levelset-h2-normalisation`, 2026-07-06, PR #60
+> — the last of the three mechanisms): the velocity-normalisation squash
+> measured under H2 below is fixed. The unit speed is now the p99 |sens| over
+> the alive *non-protected* elements (`LevelSet._speed_scale`) and the
+> normalised velocity is clipped to [-1, 1], so the stress-excluded protected
+> load-introduction peak saturates at speed 1 instead of owning the scale.
+> Regression coverage: the "velocity normalisation" section of
+> `tests/test_levelset.py`.
 
 ## TL;DR
 
@@ -337,7 +346,8 @@ in progress. Mapping this analysis onto it:
   severance/divergence risk — see the stall/step-size guard below. The H2
   squash also still compresses the *velocity* ordering during evolution (the
   rank init carries most of the discrimination), and the normalisation peak
-  still sits in the stress-excluded protected load region.
+  still sits in the stress-excluded protected load region (both since fixed —
+  see the H2 note at the top / PR #60).
 
 **Still open on `master` at the time of this analysis — since closed by
 `fix/levelset-volume-leak` (the primary defect of this run):**

@@ -310,7 +310,7 @@ class LevelSet:
     dt: float = 1.0                  # pseudo-time step for the phi evolution
     smoothing_passes: int = 3        # Laplacian/Jacobi smoothing passes per iteration (regularisation)
     band_width: float = 3.0          # clamp |phi| to this after each step to keep the field bounded
-    nucleation_rate: float = 0.5     # topological-derivative-style reaction: phi sinks by dt*rate*(1 - Vn/Vmax), so low-energy interior material can cross the threshold (nucleate holes away from existing void interfaces) instead of parking at the +band_width clamp. 0 = off (interface-only evolution)
+    nucleation_rate: float = 0.5     # topological-derivative-style reaction: phi sinks by dt*rate*(1 - Vn), Vn = the velocity normalised to the p99 alive non-protected sensitivity, so low-energy interior material can cross the threshold (nucleate holes away from existing void interfaces) instead of parking at the +band_width clamp. 0 = off (interface-only evolution)
 
 
 @dataclass
