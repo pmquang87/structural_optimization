@@ -181,6 +181,14 @@ def render_load_cases_tab(cfg: Config, cfg_path: Path) -> None:
             "sigma_allow": st.column_config.NumberColumn(
                 "σ_allow [MPa]", min_value=0.0, step=1.0,
                 help="Per-case von-Mises stress limit. Blank → no stress limit."),
+            "fast_mode": st.column_config.CheckboxColumn(
+                "Fast mode", default=False,
+                help="Screen this case with a validated TIED LINEAR solve "
+                     "(~35× faster) instead of the full nonlinear one. The "
+                     "load/support contact patches are auto-tied so the linear "
+                     "step has a real load+support path. A ranking/flagging "
+                     "screen, not a certifying stress (reads ~14% low): a blank "
+                     "σ_allow then uses the calibrated 254 MPa. Default off."),
         })
     cfg.load_cases = load_cases_from_records(lc_edited.to_dict("records"))
     n = len(cfg.load_cases)

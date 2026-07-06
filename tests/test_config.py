@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from oropt.config import Config, unknown_keys
+from oropt.config import (FAST_MODE_SIGMA_ALLOW, Config, LoadCase, unknown_keys)
 
 
 def test_run_folder_defaults_to_case_dir():
@@ -125,3 +125,60 @@ def test_protect_bc_and_smooth_defaults_and_roundtrip(tmp_path):
     assert back.smooth.enabled is False
     assert back.smooth.method == "laplacian"
     assert back.smooth.output_format == "both"
+
+
+# ---- per-load-case fast mode -----------------------------------------------
+def test_load_case_fast_mode_defaults_off_and_roundtrips(tmp_path):
+    cfg = Config()
+    cfg.load_cases = [LoadCase(name="a", stem="lc_a", sigma_allow=300.0),
+                      LoadCase(name="b", stem="lc_b", sigma_allow=300.0,
+                               fast_mode=True)]
+    assert cfg.load_cases[0].fast_mode is False        # default off
+    assert cfg.load_cases[1].fast_mode is True
+    p = tmp_path / "cfg.yaml"
+    cfg.to_yaml(p)
+    back = Config.from_yaml(p)
+    assert [lc.fast_mode for lc in back.load_cases] == [False, True]
+    assert back.load_cases == cfg.load_cases           # dataclass field equality
+
+
+def test_resolved_case_carries_fast_mode():
+    cfg = Config()
+    cfg.load_cases = [LoadCase(name="fast", stem="lc_f", sigma_allow=300.0,
+                               fast_mode=True),
+                      LoadCase(name="slow", stem="lc_s", sigma_allow=300.0)]
+    fast, slow = cfg.load_case_list()
+    assert fast.fast_mode is True
+    assert slow.fast_mode is False
+
+
+def test_fast_mode_blank_sigma_allow_uses_calibrated_254():
+    # fast mode + blank sigma_allow -> the calibrated fast-mode allowable
+    cfg = Config()
+    cfg.load_cases = [LoadCase(name="f", stem="lc_f", fast_mode=True)]
+    [rc] = cfg.load_case_list()
+    assert rc.sigma_allow == FAST_MODE_SIGMA_ALLOW == 254.0
+
+
+def test_fast_mode_explicit_sigma_allow_wins():
+    # an explicit per-case sigma_allow overrides the calibration
+    cfg = Config()
+    cfg.load_cases = [LoadCase(name="f", stem="lc_f", sigma_allow=400.0,
+                               fast_mode=True)]
+    [rc] = cfg.load_case_list()
+    assert rc.sigma_allow == 400.0
+
+
+def test_non_fast_blank_sigma_allow_stays_unconstrained():
+    # the 254 default is fast-mode only; a normal case with a blank limit is None
+    cfg = Config()
+    cfg.load_cases = [LoadCase(name="n", stem="lc_n")]
+    [rc] = cfg.load_case_list()
+    assert rc.fast_mode is False
+    assert rc.sigma_allow is None
+
+
+def test_fast_mode_coerced_to_bool_from_truthy_yaml():
+    # a hand-written `fast_mode: 1` becomes a real bool
+    lc = LoadCase(name="f", stem="lc_f", fast_mode=1)
+    assert lc.fast_mode is True

@@ -19,6 +19,7 @@ from .beso import Beso, combine_sensitivity
 from .config import Config, ResolvedCase
 from .d3plot import convert_final
 from .deck import Deck, prepare_engine
+from .fastmode import FastModeTie, build_fast_case, discover_tie
 from .hca import Hca
 from .levelset import LevelSet
 from .manufacturing import apply_manufacturing, manufacturing_active
@@ -497,19 +498,34 @@ def worst_violation(cases, case_results) -> float:
 
 def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
                 no_pin: set, solve_dir: Path, anim_dt: float,
-                exclude_elem_ids: Optional[np.ndarray] = None):
+                exclude_elem_ids: Optional[np.ndarray] = None,
+                fast_tie: Optional[FastModeTie] = None):
     """Write the alive deck for one load case, solve it, extract its results.
 
     The per-case "solve + extract" unit reused for every case each iteration. The
     case's ``stem`` / ``disp_node_id`` are passed straight to ``run_solver`` /
     ``extract`` (they accept them explicitly), so one *cfg* drives every case.
     *exclude_elem_ids* (the stress-exclusion set, shared by all cases) is forwarded
-    to ``extract`` so the case's ``sigma_max`` ignores those elements. Returns
-    ``(run_result, results)`` where *results* is ``None`` if the solve failed (the
-    caller surfaces *run_result*)."""
+    to ``extract`` so the case's ``sigma_max`` ignores those elements.
+
+    When ``case.fast_mode`` is set the alive starter is turned into a tied-linear
+    deck (:func:`oropt.fastmode.build_fast_case`, using the precomputed *fast_tie*)
+    and solved with a plain ``/IMPL/LINEAR`` engine instead of the nonlinear one;
+    ``extract`` then reads the anim von-Mises exactly as usual. With ``fast_mode``
+    off the path is byte-identical to before. Returns ``(run_result, results)``
+    where *results* is ``None`` if the solve failed (the caller surfaces
+    *run_result*)."""
     _clean_solve_dir(solve_dir)
-    deck.write(solve_dir / f"{case.stem}_0000.rad", alive, no_pin=no_pin)
-    prepare_engine(case.engine, solve_dir / f"{case.stem}_0001.rad", anim_dt=anim_dt)
+    starter = solve_dir / f"{case.stem}_0000.rad"
+    engine = solve_dir / f"{case.stem}_0001.rad"
+    deck.write(starter, alive, no_pin=no_pin)
+    if case.fast_mode:
+        if fast_tie is None:                     # precomputed in run_optimization
+            raise ValueError(f"fast-mode case {case.name!r} has no discovered tie")
+        build_fast_case(deck, alive, starter, case.engine, engine, fast_tie,
+                        anim_dt=anim_dt)
+    else:
+        prepare_engine(case.engine, engine, anim_dt=anim_dt)
     res = run_solver(cfg, solve_dir, stem=case.stem)
     if not res.ok:
         return res, None
@@ -612,6 +628,18 @@ def run_optimization(cfg: Config, resume: bool = False,
                 f"design-part element set than the primary case {primary.name!r}; "
                 "all load cases must share the same mesh")
         case_decks.append(cdeck)
+    # Fast-mode ties: discovered once per fast-mode case (parsing the full deck is
+    # a few seconds, so it is not repeated every iteration). The load/support tie
+    # patches sit in protected regions -> they stay alive, so the tie is stable
+    # across iterations; _solve_case re-intersects it with the alive mesh each time
+    # via build_fast_case. Non-fast cases keep a None entry and solve as before.
+    fast_ties: list[Optional[FastModeTie]] = [None] * n_cases
+    for i, (case, cdeck) in enumerate(zip(cases, case_decks)):
+        if case.fast_mode:
+            tie = discover_tie(cdeck, m.design_node_min)
+            fast_ties[i] = tie
+            log(f"[oropt] case {case.name!r}: FAST MODE (tied linear screen, "
+                f"sigma_allow={case.sigma_allow} MPa); {tie.summary()}")
     mesh = Mesh.from_deck(deck)
     bc_nodes = deck.group_nodes(m.bc_group_id)
     no_pin = set(int(v) for v in bc_nodes)            # already kinematically constrained
@@ -736,7 +764,8 @@ def run_optimization(cfg: Config, resume: bool = False,
             for i, (case, cdeck) in enumerate(zip(cases, case_decks)):
                 csolve = _case_solve_dir(solve_root, n_cases, i)
                 res, r = _solve_case(cfg, case, cdeck, alive, no_pin,
-                                     csolve, cfg.run.anim_dt, exclude_elem_ids)
+                                     csolve, cfg.run.anim_dt, exclude_elem_ids,
+                                     fast_tie=fast_ties[i])
                 run_results.append(res)
                 if r is None:                       # this case failed -> abort iter
                     break

@@ -136,3 +136,35 @@ def test_app_renders_with_load_case_editor(tmp_path):
     # repoint at our multi-case config and rerun
     at.sidebar.text_input[0].set_value(str(cfg_path)).run()
     assert not at.exception
+
+
+# ---- fast-mode checkbox column ---------------------------------------------
+def test_fast_mode_column_present_and_defaults_off():
+    assert "fast_mode" in CASE_COLUMNS
+    [rec] = records_from_load_cases([LoadCase(name="a", stem="lc_a")])
+    assert rec["fast_mode"] is False                     # unchecked by default
+
+
+def test_fast_mode_roundtrips_through_records():
+    cases = [LoadCase(name="fast", stem="lc_f", sigma_allow=254.0, fast_mode=True),
+             LoadCase(name="slow", stem="lc_s", sigma_allow=300.0)]
+    recs = records_from_load_cases(cases)
+    assert [r["fast_mode"] for r in recs] == [True, False]
+    assert load_cases_from_records(recs) == cases
+
+
+def test_fast_mode_blank_or_missing_cell_is_false():
+    # a checkbox cell may arrive missing (older row), None or NaN -> unchecked
+    for cell in ({}, {"fast_mode": None}, {"fast_mode": float("nan")}):
+        row = {"name": "x", "stem": "lc_x", "weight": 1.0, **cell}
+        [lc] = load_cases_from_records([row])
+        assert lc.fast_mode is False
+
+
+def test_fast_mode_truthy_text_is_checked():
+    # a hand-edited CSV/text cell reads leniently
+    for val, want in (("true", True), ("1", True), ("false", False),
+                      ("", False), (True, True), (False, False)):
+        [lc] = load_cases_from_records([{"name": "x", "stem": "lc_x",
+                                         "fast_mode": val}])
+        assert lc.fast_mode is want, (val, want)
