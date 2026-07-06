@@ -864,8 +864,26 @@ def _render_growth_preview(cfg: Config) -> None:
              "mis-placed or un-meshed region — or a typo'd keep-out / "
              "stress-exclusion / BC /GRNOD group id — is caught now, not "
              "hours in. "
-             "While the original-part element-id boundary is unset, it is "
-             "auto-filled with the deck's highest design element id.")
+             "While the original-part element-id boundary is unset (0), it is "
+             "auto-filled with the CURRENT deck's highest design element id — "
+             "so run this on the ORIGINAL folder, not an extended growth_mesh "
+             "deck (see the note below).")
+    if any(not b.carve for b in cfg.model.growth_boxes):
+        st.caption(
+            "⚠️ **Getting *Original part: highest element id* right (carve-off "
+            "regions).** It must be the **original** deck's highest element id, "
+            "fixed *before* any expansion elements exist. This button auto-fills "
+            "it **only while the field is 0/unset**, reading whichever deck "
+            "`case_dir` points at now — so let it auto-fill only with `case_dir` "
+            "on the **original** folder. Once `case_dir` points at a "
+            "**growth_mesh / extended** deck, do **not** rely on this: it would "
+            "capture the extended deck's (higher) max, so every generated "
+            "candidate is misread as original part and the run aborts with "
+            "*“contains only original part elements … nothing would start "
+            "void.”* On an extended deck the boundary comes from the ⚙️ *use "
+            "these decks* button — it records the exact boundary **and** fills "
+            "this field with it on the rerun — or type it in by hand (this "
+            "🔍 preview will not overwrite a field that is already non-zero).")
     preview, autofilled = None, None
     if clicked:
         cases = cfg.load_case_list()
@@ -1062,6 +1080,13 @@ def _render_growth_mesh(cfg: Config, cfg_path: Path) -> None:
             point_config_at(cfg_path, rep.out_dir,
                             original_elem_max=rep.original_elem_max)
             st.session_state["growth_mesh_pointed"] = rep.out_dir
+            # Push the recorded boundary through the same channel the 🔍 preview
+            # uses so the "Original part: highest element id" field — a sticky
+            # session-state widget — actually shows it on the rerun, instead of
+            # keeping (and, worse, re-saving) its stale/0 value over the correct
+            # boundary point_config_at just wrote to the YAML.
+            st.session_state["growth_orig_elem_max_autofill"] = int(
+                rep.original_elem_max)
             st.rerun()
 
 
