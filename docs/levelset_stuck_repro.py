@@ -1,5 +1,14 @@
 """Synthetic reproduction of the elevator-linkage level-set stall (2026-07-05/06).
 
+HISTORICAL -- run this at commit 2280f86 (the analysis-era master). The script
+*demonstrates the defect*: its assertions require the prune leak to be
+present, and its instrumented replica mirrors the defect-era ``update()``
+internals. The leak has since been closed (``fix/levelset-volume-leak``:
+``update()`` re-syncs phi to the incoming mask and refunds the pruned volume
+to the bisection budget, so on fixed code the replica assert trips at the
+first pruned iteration). Live regression coverage of the closed leak is
+``tests/test_levelset_leak.py``.
+
 The real run (levelset, ER 0.015, backoff_gain 1.0, min_member_layers 1, two
 growth boxes, code at 2d3c1ce = pre-PR#57) pinned sigma_max ~0.5-1.7 MPa above
 the 292 MPa limit from iteration 2 on. The proportional back-off then asked

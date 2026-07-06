@@ -21,6 +21,12 @@ and history-averaged by :func:`filter_history` (shared with BESO). Each iteratio
 * threshold ``phi`` -> new alive mask, force protected elements alive, and drop
   islands not connected to the anchor.
 
+The loop may prune the returned mask further (manufacturing constraints,
+island-dropping) before feeding it back; the next :meth:`LevelSet.update`
+reconciles ``phi`` with that mask and refunds the pruned volume to the
+bisection budget, so removal-only post-passes stay volume-neutral instead of
+compounding into a per-iteration erosion (docs/levelset_stuck_analysis.md).
+
 The smoothing operator is row-stochastic, so it preserves constants; a uniform
 ``-dt*lambda`` shift therefore commutes with smoothing, which keeps the
 thresholded volume *exactly monotone* in ``lambda`` and makes the bisection
@@ -43,6 +49,12 @@ from .results import Results
 # Fixed (not a config knob) to keep the level-set config minimal; 0.5 is a stable
 # Jacobi/Laplacian relaxation.
 _SMOOTH_RELAX = 0.5
+
+# Node-push passes when re-syncing phi to an externally pruned mask. One pass
+# suffices unless the -band_width clamp truncates a push; each extra pass
+# shrinks any clamped element's residual mean geometrically, and a residual
+# past the cap is simply reconciled again on the next update.
+_RESYNC_PASSES = 8
 
 
 class LevelSet:
@@ -211,6 +223,48 @@ class LevelSet:
                 hi = mid
         return hi
 
+    # ---- reconcile phi with the mask the loop actually kept -----------------
+    def _resync_phi(self, alive_mask: np.ndarray) -> float:
+        """Lower phi so every element that is phi-alive but dead in *alive_mask*
+        thresholds dead, and return the volume reconciled away.
+
+        The loop's post-passes (manufacturing open, island-dropping) only ever
+        *remove* elements, and they act on the mask, not on phi. Left alone,
+        that pruned ("phantom") volume still counts as kept in
+        :meth:`_removable_vol_at`, so every subsequent bisection erodes real
+        interface material to pay for it while the prune re-shaves the fresh
+        fringe — a permanent leak (docs/levelset_stuck_analysis.md). Moving the
+        interface to match the prune lets the fringe anneal; refunding the
+        returned volume to the budget makes the prune volume-neutral over the
+        update+prune pair. The push is minimal — each stale element's nodes
+        drop by that element's own mean plus a hair (shared nodes take the
+        deepest incident push), so it lands just below the threshold and the
+        evolution can still resurrect it if the energy field asks. Elements
+        alive in *alive_mask* but phi-dead (nothing grows masks outside
+        ``update``) are left to the bisection, which keeps volume exact
+        regardless of where the field puts it.
+        """
+        if self.phi is None:
+            return 0.0
+        alive_mask = np.asarray(alive_mask, dtype=bool)
+        em = self._elem_mean(self.phi)
+        stale0 = (em >= 0.0) & ~alive_mask & ~self.protected
+        if not stale0.any():
+            return 0.0
+        bw = self.cfg.band_width
+        phi = self.phi
+        for _ in range(_RESYNC_PASSES):
+            stale = (em >= 0.0) & ~alive_mask & ~self.protected
+            if not stale.any():
+                break
+            drop = np.zeros(self.mesh.n_nodes)
+            np.maximum.at(drop, self.mesh.conn_rows[stale].ravel(),
+                          np.repeat(em[stale] + 1e-9, 4))
+            phi = np.maximum(phi - drop, -bw)   # lower-only: the +bw clamp holds
+            em = self._elem_mean(phi)
+        self.phi = phi
+        return float(self.vol[stale0].sum())
+
     # ---- alive-set update --------------------------------------------------
     def update(self, alive_mask: np.ndarray, sens: np.ndarray,
                target_vf: float) -> np.ndarray:
@@ -218,10 +272,18 @@ class LevelSet:
 
         ``sens`` is the filtered/history-averaged per-element energy. Returns the
         new alive mask; ``self.phi`` is updated to stay consistent with it.
+
+        *alive_mask* is authoritative: whatever the loop pruned from the last
+        returned mask is first re-synced out of phi and its volume refunded to
+        this step's budget (see :meth:`_resync_phi`), so the volume controller
+        targets what the iteration actually keeps.
         """
         alive_mask = np.asarray(alive_mask, dtype=bool)
+        pruned_V = 0.0
         if self.phi is None:
             self.phi = self._init_phi(alive_mask, sens)
+        else:
+            pruned_V = self._resync_phi(alive_mask)
 
         # nodal velocity from the shape sensitivity (normalised so dt is meaningful)
         Vn = self._scatter(np.asarray(sens, dtype=float))
@@ -239,10 +301,12 @@ class LevelSet:
         # evolve + regularise (smoothing preserves constants -> see _solve_tau)
         phi_base = self._smooth(self.phi + self.cfg.dt * vel, self.cfg.smoothing_passes)
 
-        # bisect the threshold so the kept volume meets the per-iteration target
+        # bisect the threshold so the kept volume meets the per-iteration target;
+        # the refunded prune volume keeps removal-only post-passes from being
+        # charged against live interface material
         target_V = target_vf * self.V0
         protected_V = float(self.vol[self.protected].sum())
-        tau = self._solve_tau(phi_base, target_V - protected_V)
+        tau = self._solve_tau(phi_base, target_V - protected_V + pruned_V)
 
         bw = self.cfg.band_width
         self.phi = np.clip(phi_base - tau, -bw, bw)

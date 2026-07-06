@@ -1,6 +1,12 @@
 """Real-scale verification of the level-set stall on the salvaged
 elevator-linkage run artifacts (2026-07-05/06).
 
+HISTORICAL -- run this at commit 2280f86 (the analysis-era master): the leak
+it measures has since been closed (``fix/levelset-volume-leak``), and phi is
+now checkpointed, so both the replayed leak and the resume-reinit perturbation
+come out differently on fixed code. Live regression coverage is
+``tests/test_levelset_leak.py``.
+
 Complements docs/levelset_stuck_repro.py (small synthetic case, exact
 mechanism decomposition) by replaying ONE optimiser iteration on the actual
 2,272,868-element design mesh from the salvaged checkpoint, and by measuring
