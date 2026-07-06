@@ -9,10 +9,13 @@ and history-averaged by :func:`filter_history` (shared with BESO). Each iteratio
 
 * scatter the filtered per-element energy onto nodes (volume-weighted average over
   incident elements) -> a nodal "velocity" ``Vn`` (high energy -> grow, low ->
-  erode), minus a nucleation reaction term ``nucleation_rate * (1 - Vn)`` (a
-  crude topological derivative) so low-energy regions carry a *negative* speed
-  and can sink below the threshold anywhere — not only at an existing void
-  interface;
+  erode), normalised to unit speed by a robust (p99) sensitivity magnitude over
+  the alive *non-protected* elements and clipped to [-1, 1] — a global-max scale
+  let one protected load-introduction artefact squash the whole part's velocity
+  ~400x (docs/levelset_stuck_analysis.md, H2) — minus a nucleation reaction term
+  ``nucleation_rate * (1 - Vn)`` (a crude topological derivative) so low-energy
+  regions carry a *negative* speed and can sink below the threshold anywhere —
+  not only at an existing void interface;
 * evolve ``phi <- phi + dt*(Vn - lambda)`` and apply a few Laplacian/Jacobi
   smoothing passes as reaction-diffusion-style regularisation (cheap and stable
   on an unstructured tet mesh — no full Hamilton-Jacobi solve);
@@ -55,6 +58,12 @@ _SMOOTH_RELAX = 0.5
 # shrinks any clamped element's residual mean geometrically, and a residual
 # past the cap is simply reconciled again on the next update.
 _RESYNC_PASSES = 8
+
+# Percentile of the actionable |sensitivity| that defines the velocity's unit
+# speed. High enough to track the top of the credible energy range, low enough
+# that a handful of point artefacts cannot own the scale (elevator-linkage
+# load-introduction peak: max/median 417x, but max/p99 only 8.2x).
+_SPEED_PCTL = 99.0
 
 
 class LevelSet:
@@ -265,6 +274,35 @@ class LevelSet:
         self.phi = phi
         return float(self.vol[stale0].sum())
 
+    # ---- velocity normalisation ---------------------------------------------
+    def _speed_scale(self, alive_mask: np.ndarray, sens: np.ndarray) -> float:
+        """Unit speed for the nodal velocity: the p99 magnitude of the
+        sensitivity over the *actionable* material — alive elements the
+        optimiser may actually remove.
+
+        Protected elements are excluded because their energy can be a
+        modelling artefact the run deliberately ignores: on the
+        elevator-linkage run the global argmax sat in the stress-excluded,
+        protected load-introduction region (max/median 417x), so a raw-max
+        scale left 73% of alive elements moving at < 1% of dt and handed the
+        evolution to tau + smoothing instead of the mechanics
+        (docs/levelset_stuck_analysis.md, H2). Falls back to the max over the
+        actionable pool when >= 99% of it is zero, then to the max over all
+        elements; returns 0.0 only for an all-zero field (the caller then
+        skips normalising).
+        """
+        s = np.abs(np.asarray(sens, dtype=float))
+        act = alive_mask & ~self.protected
+        pool = s[act] if act.any() else s
+        if pool.size:
+            scale = float(np.percentile(pool, _SPEED_PCTL))
+            if scale > 0.0:
+                return scale
+            scale = float(pool.max())
+            if scale > 0.0:
+                return scale
+        return float(s.max()) if s.size else 0.0
+
     # ---- alive-set update --------------------------------------------------
     def update(self, alive_mask: np.ndarray, sens: np.ndarray,
                target_vf: float) -> np.ndarray:
@@ -285,11 +323,15 @@ class LevelSet:
         else:
             pruned_V = self._resync_phi(alive_mask)
 
-        # nodal velocity from the shape sensitivity (normalised so dt is meaningful)
+        # nodal velocity from the shape sensitivity, normalised so dt is
+        # meaningful: unit speed = the robust actionable sensitivity (see
+        # _speed_scale), and anything hotter — e.g. a protected
+        # load-introduction artefact — saturates at speed 1 via the clip
+        # instead of stretching the scale and squashing the rest of the part.
         Vn = self._scatter(np.asarray(sens, dtype=float))
-        scale = float(np.abs(Vn).max())
+        scale = self._speed_scale(alive_mask, sens)
         if scale > 0:
-            Vn = Vn / scale
+            Vn = np.clip(Vn / scale, -1.0, 1.0)
 
         # nucleation reaction term (crude topological derivative): low-energy
         # nodes get a negative speed instead of the >= 0 pure-energy velocity.
