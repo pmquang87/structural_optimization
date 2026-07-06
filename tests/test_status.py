@@ -48,6 +48,25 @@ def test_checkpoint_roundtrip(tmp_path):
     assert c["iteration"] == 7
     assert np.array_equal(c["alive_mask"], alive)
     assert np.allclose(c["sens_prev"], sens)
+    assert c["phi"] is None                       # no field-carrying optimiser
+
+
+def test_checkpoint_roundtrip_with_phi(tmp_path):
+    alive = np.array([True, False, True, True])
+    phi = np.linspace(-3.0, 3.0, 9)               # nodal field, not per-element
+    st.save_checkpoint(tmp_path, 3, alive, None, phi=phi)
+    c = st.load_checkpoint(tmp_path)
+    assert np.array_equal(c["phi"], phi)
+    assert c["sens_prev"] is None
+
+
+def test_checkpoint_without_phi_key_still_loads(tmp_path):
+    """Checkpoints written before phi was stored must keep resuming."""
+    np.savez(tmp_path / st.CHECKPOINT, iteration=5,
+             alive_mask=np.array([True, False]), sens_prev=np.array([1.0, 2.0]))
+    c = st.load_checkpoint(tmp_path)
+    assert c["iteration"] == 5
+    assert c["phi"] is None
 
 
 def test_write_topology(tmp_path):

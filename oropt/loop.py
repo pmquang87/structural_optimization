@@ -53,6 +53,37 @@ def build_optimizer(cfg: Config, mesh: Mesh, protected: np.ndarray,
         "(expected 'beso', 'levelset', 'tobs' or 'hca')")
 
 
+# Consecutive "gate asked to grow, the design shrank anyway" iterations before
+# the loop warns: 1-2 can be benign quantisation, 3 is a controller-defeating
+# trend (the elevator-linkage run showed 6 before its web collapse).
+GROW_STALL_ITERS = 3
+
+
+def _grow_stall(count: int, prev_target_vf: Optional[float],
+                prev_vf: Optional[float], vf: float) -> int:
+    """Update the consecutive-iteration counter for 'the volume gate requested
+    growth (target above the vf it was computed from) yet the achieved volume
+    fell'. One such iteration is noise; a run of them means removal outside the
+    volume controller's accounting is outrunning it."""
+    if prev_target_vf is None or prev_vf is None:
+        return 0
+    if prev_target_vf > prev_vf + 1e-12 and vf < prev_vf - 1e-12:
+        return count + 1
+    return 0
+
+
+def _removal_spike(removed: int, recent: list[int], factor: int = 10,
+                   floor: int = 50) -> bool:
+    """True when one update removed *factor*x more elements than any recent one
+    (and more than *floor*, so quiet phases don't trip on noise). Catches a
+    wholesale plateau/web collapse before a multi-hour solve is spent on the
+    severed design. Needs >= 3 history entries, so a legitimately large first
+    nucleation carve never fires it."""
+    if len(recent) < 3:
+        return False
+    return removed > max(factor * max(recent), floor)
+
+
 def collect_protect_nodes(deck: Deck, model, include_bc: bool = True) -> np.ndarray:
     """Seed nodes whose elements must be frozen: the BC/symmetry set (included
     unless *include_bc* is False) plus any user-defined keep-out regions
@@ -648,6 +679,17 @@ def run_optimization(cfg: Config, resume: bool = False,
                     "of resuming")
             alive = ckpt["alive_mask"]; sens_prev = ckpt["sens_prev"]
             start_iter = ckpt["iteration"]
+            # Restore the level-set's nodal field: re-initialising phi from the
+            # mask would silently perturb the design and re-order the field by
+            # the current sensitivity rank. Other optimisers carry no phi.
+            phi = ckpt["phi"]
+            if phi is not None and hasattr(opt, "phi"):
+                if phi.shape == (mesh.n_nodes,):
+                    opt.phi = phi
+                else:
+                    log(f"[oropt] checkpoint phi has {phi.size} nodes but the "
+                        f"mesh has {mesh.n_nodes} -- ignored, phi will "
+                        "re-initialise from the alive mask")
             log(f"[oropt] resumed at iteration {start_iter}, "
                 f"vf={opt.volume_fraction(alive):.3f}")
 
@@ -669,6 +711,15 @@ def run_optimization(cfg: Config, resume: bool = False,
     vfs: list[float] = []
     elapsed = 0.0
     consecutive_diverged = 0     # non-converged iterations in a row (watchdog)
+    # Controller-stall guards (warn-only): a grow request that still loses
+    # volume means something outside the volume controller is eating material
+    # (the level-set prune-leak signature), and a removal spike far above the
+    # recent per-iteration rate is the plateau-collapse signature -- both were
+    # measured on the 2026-07-05 elevator-linkage run (docs/levelset_stuck_analysis.md).
+    prev_vf: Optional[float] = None          # vf the last target was computed from
+    prev_target_vf: Optional[float] = None   # what the gate asked of the last update
+    grow_stall = 0                           # consecutive grow-yet-shrink iterations
+    removal_hist: list[int] = []             # recent per-update removal counts
     try:
         for it in range(start_iter, oc.max_iter):
             if should_stop and should_stop():
@@ -752,7 +803,10 @@ def run_optimization(cfg: Config, resume: bool = False,
                     target_vf = opt.next_target_vf(vf, False,
                                                    violation=float("inf"))
                     alive = opt.update(alive, sens_prev, target_vf)
-                st.save_checkpoint(work, it + 1, alive, sens_prev)
+                st.save_checkpoint(work, it + 1, alive, sens_prev,
+                                   phi=getattr(opt, "phi", None))
+                # the recovery step invalidates the guards' iteration pairing
+                prev_vf = prev_target_vf = None
                 continue
             if not res.ok:
                 failed = cases[len(case_results)]
@@ -806,6 +860,13 @@ def run_optimization(cfg: Config, resume: bool = False,
             d_allow = float("nan") if d_allow is None else d_allow
             vf = opt.volume_fraction(alive)
             vfs.append(vf)
+            grow_stall = _grow_stall(grow_stall, prev_target_vf, prev_vf, vf)
+            if grow_stall >= GROW_STALL_ITERS:
+                log(f"[oropt] WARNING: volume fell {grow_stall} iterations in "
+                    "a row against a GROW target -- the volume controller is "
+                    "being outrun by removal outside its accounting (see "
+                    "docs/levelset_stuck_analysis.md); the run is likely "
+                    "ratcheting away from feasibility, not converging")
 
             # ---- publish state for the GUI --------------------------------
             remaining = oc.max_iter - it - 1
@@ -887,17 +948,29 @@ def run_optimization(cfg: Config, resume: bool = False,
                     ratio[stress_excluded] = 0.0
                 ratio = opt.filter_history(ratio, None)
                 update_sens = sens * (1.0 + oc.addback_stress_bias * ratio)
+            alive_before = alive
             alive = opt.update(alive, update_sens, target_vf)
             # Manufacturing constraints (min/max member size, symmetry, casting,
             # extrusion, overhang) on the fresh alive mask; re-drop islands a
             # constraint may have created. No-op unless configured. The unbiased
             # sensitivity guides the max-member carve toward the least-useful
-            # material.
+            # material. The pruned mask is what the next opt.update() receives,
+            # so a field-carrying optimiser (level-set) re-syncs to it there.
             if manufacturing_active(cfg.manufacturing):
                 alive = apply_manufacturing(alive, mesh, cfg.manufacturing,
                                             protected, sensitivity=sens)
                 alive = mesh.keep_connected(alive, anchor)
-            st.save_checkpoint(work, it + 1, alive, sens_prev)
+            removed_now = int((alive_before & ~alive).sum())
+            if _removal_spike(removed_now, removal_hist):
+                log(f"[oropt] WARNING: this update removed {removed_now} "
+                    f"elements, far above the recent per-iteration rate "
+                    f"(last {len(removal_hist)}: {removal_hist}) -- likely a "
+                    "wholesale low-energy collapse; inspect topology_latest.vtu "
+                    "before trusting the next solve")
+            removal_hist = (removal_hist + [removed_now])[-5:]
+            prev_vf, prev_target_vf = vf, target_vf
+            st.save_checkpoint(work, it + 1, alive, sens_prev,
+                               phi=getattr(opt, "phi", None))
         else:
             status.state = "converged" if status.state == "running" else status.state
             status.message = status.message or "reached max_iter"

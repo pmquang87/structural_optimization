@@ -202,10 +202,17 @@ def is_running(work_dir: str | Path) -> bool:
 
 # ---- checkpoint (resume) ---------------------------------------------------
 def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray,
-                    sens_prev: Optional[np.ndarray] = None) -> None:
+                    sens_prev: Optional[np.ndarray] = None,
+                    phi: Optional[np.ndarray] = None) -> None:
+    """*phi* is the level-set's nodal field. Without it a resumed level-set run
+    re-initialises phi from the alive mask, which both perturbs the design (the
+    init's smoothing disagrees with the mask it was built from) and re-orders
+    the whole field by the current sensitivity rank. Optimisers without a field
+    (BESO/TOBS/HCA) simply pass None."""
     np.savez(Path(work_dir) / CHECKPOINT, iteration=iteration,
              alive_mask=alive_mask,
-             sens_prev=(sens_prev if sens_prev is not None else np.array([])))
+             sens_prev=(sens_prev if sens_prev is not None else np.array([])),
+             phi=(phi if phi is not None else np.array([])))
 
 
 def load_checkpoint(work_dir: str | Path) -> Optional[dict]:
@@ -214,5 +221,7 @@ def load_checkpoint(work_dir: str | Path) -> Optional[dict]:
         return None
     d = np.load(p)
     sp = d["sens_prev"]
+    phi = d["phi"] if "phi" in d.files else np.array([])   # pre-phi checkpoints
     return {"iteration": int(d["iteration"]), "alive_mask": d["alive_mask"],
-            "sens_prev": (sp if sp.size else None)}
+            "sens_prev": (sp if sp.size else None),
+            "phi": (phi if phi.size else None)}

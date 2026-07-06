@@ -14,6 +14,14 @@ i.e. **pre-PR #57**).
 > this analysis calls for — the back-off floor and hole nucleation — but **not
 > the primary leak**, which is still present on `master` (measured below).
 > See "Status relative to PR #57".
+>
+> **Note on the fix** (`fix/levelset-volume-leak`, 2026-07-06, after this
+> analysis): the three "still open" requirements below have landed —
+> `LevelSet.update` now re-syncs phi to the incoming (post-prune) mask and
+> refunds the pruned volume to the bisection budget, phi is checkpointed, and
+> the loop warns on grow-stall / removal-spike signatures. Regression
+> coverage: `tests/test_levelset_leak.py`. The two reproduction scripts below
+> demonstrate the *defect* and are era-pinned to commit `2280f86`.
 
 ## TL;DR
 
@@ -331,7 +339,8 @@ in progress. Mapping this analysis onto it:
   rank init carries most of the discrimination), and the normalisation peak
   still sits in the stress-excluded protected load region.
 
-**Still open on `master` (the primary defect of this run):**
+**Still open on `master` at the time of this analysis — since closed by
+`fix/levelset-volume-leak` (the primary defect of this run):**
 
 1. **The volume controller must see what the iteration actually keeps.**
    Measured post-#57: `_morph_open` still leaks 0.00144 of V0 on the real
@@ -364,7 +373,10 @@ in progress. Mapping this analysis onto it:
 
 ## Reproduction
 
-Both scripts run against current `master`. The run-era (pre-#57) semantics
+Both scripts demonstrate the defect and are era-pinned: run them at commit
+`2280f86` (the analysis-era master; on later code the leak they assert is
+fixed and their instrumented replica of `update()` diverges from the real
+one). The run-era (pre-#57) semantics
 are reproduced bit-identically by seeding the old binary-indicator phi
 through the public `opt.phi` (exactly how a resume seeds state) and zeroing
 `nucleation_rate` / `backoff_floor`; each script additionally runs a
