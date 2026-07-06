@@ -58,6 +58,12 @@ class Status:
     # case respectively (for a single-case run this is just that case). Empty until
     # the first iteration.
     cases: list = field(default_factory=list)
+    # Live "what is running right now" line, refreshed *before* each long solve so
+    # the GUI shows the current activity during the minutes a solve takes (which
+    # iteration, which load case, and whether it is the fast tied-linear screen or
+    # the full nonlinear solve). Blank between solves (the per-iteration published
+    # status carries the completed metrics, not a live activity).
+    activity: str = ""
     or_termination: str = ""
     iter_wall_s: float = 0.0
     elapsed_s: float = 0.0

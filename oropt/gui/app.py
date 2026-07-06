@@ -187,8 +187,10 @@ def render_load_cases_tab(cfg: Config, cfg_path: Path) -> None:
                      "(~35× faster) instead of the full nonlinear one. The "
                      "load/support contact patches are auto-tied so the linear "
                      "step has a real load+support path. A ranking/flagging "
-                     "screen, not a certifying stress (reads ~14% low): a blank "
-                     "σ_allow then uses the calibrated 254 MPa. Default off."),
+                     "screen, not a certifying stress — it reads ~14% below the "
+                     "nonlinear peak, so set σ_allow (used exactly as in normal "
+                     "mode) to account for that bias (≈254 MPa screened near this "
+                     "deck's 292 yield). Default off."),
         })
     cfg.load_cases = load_cases_from_records(lc_edited.to_dict("records"))
     n = len(cfg.load_cases)
@@ -1109,6 +1111,12 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
         feas = "✅ feasible" if status.feasible else "⚠️ infeasible"
         st.markdown(f"**{status.state.upper()}** · iter {status.iteration}/"
                     f"{status.max_iter} · {feas} · {status.message}")
+        # Live "what is running right now" (set before each solve): the fast-mode
+        # monitor — shows whether a fast tied-linear or full nonlinear solve is in
+        # flight during the minutes it takes.
+        activity = getattr(status, "activity", "")
+        if status.state == "running" and activity:
+            st.info(f"🔧 Now running: {activity}")
         k = st.columns(4)
         k[0].metric("Volume fraction", f"{status.volume_fraction:.3f}")
         k[1].metric("σ_max [MPa]", f"{status.sigma_max:.1f}",
@@ -1121,6 +1129,11 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
         k[3].metric("ETA [min]", "—" if eta != eta else f"{eta:.0f}",
                     f"elapsed {status.elapsed_s/60:.0f} min", delta_color="off")
         cases = getattr(status, "cases", None) or []
+        fast_names = [c["name"] for c in cases if c.get("fast_mode")]
+        if fast_names:
+            st.caption(f"⚡ **Fast mode** (tied linear screen, ~35× faster — a "
+                       f"ranking screen reading ~14% below nonlinear, not a "
+                       f"certifying stress) for: {', '.join(fast_names)}.")
         if len(cases) > 1:
             st.caption(f"σ_max and disp above are the **worst across "
                        f"{len(cases)} load cases**, each shown with that case's "
@@ -1128,6 +1141,8 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
                        "(below). Each case's animation is under `solve/case_<i>/`.")
             cdf = pd.DataFrame([{
                 "case": c["name"],
+                **({"mode": "⚡ fast" if c.get("fast_mode") else "nonlinear"}
+                   if fast_names else {}),   # mode column only when a case is fast
                 "σ_max [MPa]": c["sigma_max"],
                 "σ_allow [MPa]": _fmt_limit(c["sigma_allow"], "{:.0f}"),
                 "disp [mm]": c["disp"],

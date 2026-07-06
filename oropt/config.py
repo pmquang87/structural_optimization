@@ -644,18 +644,6 @@ class DispConstraint:
     d_allow: Optional[float] = None       # max |displacement| at node_id [mm]; blank -> unconstrained
 
 
-# Calibrated von-Mises allowable [MPa] for a fast-mode (tied linear) load case
-# that leaves ``sigma_allow`` blank. The tied linear screen reads ~14% below the
-# full nonlinear peak (the rigid load/support ties both stiffen the load
-# introduction and put an artificial concentration at the tie boundary), so the
-# raw nonlinear yield check would be over-strict against it. The elevator-linkage
-# calibration: nonlinear yield 292 MPa, and tied-linear reads the rated peak at
-# 254 vs the nonlinear 294 (≈254/294), so 292 × (254/294) ≈ 254 MPa lets the
-# fast-mode limit stand in for the 292 MPa nonlinear yield check. Fast mode is a
-# ranking/flagging screen, not a certifying stress (see :mod:`oropt.fastmode`).
-FAST_MODE_SIGMA_ALLOW = 254.0
-
-
 @dataclass
 class LoadCase:
     """One load case: a *separate* deck pair that shares the design mesh but
@@ -697,9 +685,11 @@ class LoadCase:
     # Fast mode: swap this case's full nonlinear solve for a validated TIED LINEAR
     # one (~35x faster) — the load/support contact patches are rigidly tied so the
     # linear stiffness matrix has a real load+support path (see :mod:`oropt.fastmode`).
-    # A screening tool, not a certifying stress: when left with a blank sigma_allow
-    # the calibrated FAST_MODE_SIGMA_ALLOW (254 MPa) is used. Default False -> the
-    # case solves exactly as before.
+    # ``sigma_allow`` is used exactly as in normal mode (you set the limit); fast mode
+    # never overrides it. Note it is a screening tool, not a certifying stress — the
+    # tied linear read runs ~14% below the nonlinear peak (on the elevator-linkage
+    # pull case, rated 254 vs nonlinear 294 against a 292 MPa yield) — so choose a
+    # sigma_allow that accounts for that bias. Default False -> the case solves as before.
     fast_mode: bool = False
     # Per-node displacement constraints (each {node_id, d_allow}). Stored as
     # DispConstraint but coerced from plain dicts too so YAML round-trips and the
@@ -886,23 +876,17 @@ class Config:
         out: list[ResolvedCase] = []
         for lc in self.load_cases:
             stem = lc.stem
-            fast_mode = bool(lc.fast_mode)
-            # Fast mode reads ~14% below the nonlinear peak; a blank sigma_allow
-            # falls back to the calibrated fast-mode allowable so the limit still
-            # stands in for the nonlinear yield check. An explicit sigma_allow
-            # always wins (the user overriding the calibration).
-            sigma_allow = lc.sigma_allow
-            if fast_mode and sigma_allow is None:
-                sigma_allow = FAST_MODE_SIGMA_ALLOW
+            # Fast mode uses ``sigma_allow`` exactly as normal mode does (the user
+            # sets the limit; it is never overridden) -- only the solve differs.
             out.append(ResolvedCase(
                 name=lc.name or stem,
                 stem=stem,
                 weight=float(lc.weight),
                 disp_constraints=list(lc.disp_constraints),
-                sigma_allow=sigma_allow,
+                sigma_allow=lc.sigma_allow,
                 starter=case_dir / f"{stem}_0000.rad",
                 engine=case_dir / f"{stem}_0001.rad",
-                fast_mode=fast_mode))
+                fast_mode=bool(lc.fast_mode)))
         return out
 
     def primary_case(self) -> ResolvedCase:
