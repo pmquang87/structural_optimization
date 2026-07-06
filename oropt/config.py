@@ -644,6 +644,18 @@ class DispConstraint:
     d_allow: Optional[float] = None       # max |displacement| at node_id [mm]; blank -> unconstrained
 
 
+# Calibrated von-Mises allowable [MPa] for a fast-mode (tied linear) load case
+# that leaves ``sigma_allow`` blank. The tied linear screen reads ~14% below the
+# full nonlinear peak (the rigid load/support ties both stiffen the load
+# introduction and put an artificial concentration at the tie boundary), so the
+# raw nonlinear yield check would be over-strict against it. The elevator-linkage
+# calibration: nonlinear yield 292 MPa, and tied-linear reads the rated peak at
+# 254 vs the nonlinear 294 (≈254/294), so 292 × (254/294) ≈ 254 MPa lets the
+# fast-mode limit stand in for the 292 MPa nonlinear yield check. Fast mode is a
+# ranking/flagging screen, not a certifying stress (see :mod:`oropt.fastmode`).
+FAST_MODE_SIGMA_ALLOW = 254.0
+
+
 @dataclass
 class LoadCase:
     """One load case: a *separate* deck pair that shares the design mesh but
@@ -682,6 +694,13 @@ class LoadCase:
     disp_node_id: Optional[int] = None   # LEGACY single constrained node; folded into disp_constraints
     sigma_allow: Optional[float] = None  # max von-Mises [MPa]; required
     d_allow: Optional[float] = None      # LEGACY single-node limit; folded into disp_constraints
+    # Fast mode: swap this case's full nonlinear solve for a validated TIED LINEAR
+    # one (~35x faster) — the load/support contact patches are rigidly tied so the
+    # linear stiffness matrix has a real load+support path (see :mod:`oropt.fastmode`).
+    # A screening tool, not a certifying stress: when left with a blank sigma_allow
+    # the calibrated FAST_MODE_SIGMA_ALLOW (254 MPa) is used. Default False -> the
+    # case solves exactly as before.
+    fast_mode: bool = False
     # Per-node displacement constraints (each {node_id, d_allow}). Stored as
     # DispConstraint but coerced from plain dicts too so YAML round-trips and the
     # GUI editor both work. A design is feasible for this case only when every
@@ -689,6 +708,7 @@ class LoadCase:
     disp_constraints: list = field(default_factory=list)
 
     def __post_init__(self):
+        self.fast_mode = bool(self.fast_mode)
         fields = {f.name for f in dataclasses.fields(DispConstraint)}
         self.disp_constraints = [
             c if isinstance(c, DispConstraint)
@@ -719,6 +739,7 @@ class ResolvedCase:
     sigma_allow: Optional[float]    # None only for an unvalidated config (validation requires it)
     starter: Path
     engine: Path
+    fast_mode: bool = False         # solve via the tied linear screen (oropt.fastmode)
 
 
 # Legacy keys folded into a load case by the migration shim. Older configs put the
@@ -865,14 +886,23 @@ class Config:
         out: list[ResolvedCase] = []
         for lc in self.load_cases:
             stem = lc.stem
+            fast_mode = bool(lc.fast_mode)
+            # Fast mode reads ~14% below the nonlinear peak; a blank sigma_allow
+            # falls back to the calibrated fast-mode allowable so the limit still
+            # stands in for the nonlinear yield check. An explicit sigma_allow
+            # always wins (the user overriding the calibration).
+            sigma_allow = lc.sigma_allow
+            if fast_mode and sigma_allow is None:
+                sigma_allow = FAST_MODE_SIGMA_ALLOW
             out.append(ResolvedCase(
                 name=lc.name or stem,
                 stem=stem,
                 weight=float(lc.weight),
                 disp_constraints=list(lc.disp_constraints),
-                sigma_allow=lc.sigma_allow,
+                sigma_allow=sigma_allow,
                 starter=case_dir / f"{stem}_0000.rad",
-                engine=case_dir / f"{stem}_0001.rad"))
+                engine=case_dir / f"{stem}_0001.rad",
+                fast_mode=fast_mode))
         return out
 
     def primary_case(self) -> ResolvedCase:

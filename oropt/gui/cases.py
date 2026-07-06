@@ -17,7 +17,8 @@ from __future__ import annotations
 from oropt.config import DispConstraint, LoadCase
 
 # Columns of the load-case data-editor, in display order.
-CASE_COLUMNS = ["name", "stem", "weight", "disp_constraints", "sigma_allow"]
+CASE_COLUMNS = ["name", "stem", "weight", "disp_constraints", "sigma_allow",
+                "fast_mode"]
 
 
 def _is_blank(v) -> bool:
@@ -31,6 +32,16 @@ def _is_blank(v) -> bool:
 
 def _opt_float(v):
     return None if _is_blank(v) else float(v)
+
+
+def _as_bool(v) -> bool:
+    """Checkbox cell -> bool. A blank cell (unchecked / the dynamic editor's new
+    row) is False; text is read leniently so a hand-edited YAML/CSV round-trips."""
+    if _is_blank(v):
+        return False
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 def _fmt_number(v) -> str:
@@ -88,7 +99,8 @@ def records_from_load_cases(load_cases) -> list[dict]:
     """Editor rows (one dict per case) from configured ``LoadCase`` objects."""
     return [{"name": lc.name, "stem": lc.stem, "weight": lc.weight,
              "disp_constraints": format_disp_constraints(lc.disp_constraints),
-             "sigma_allow": lc.sigma_allow} for lc in load_cases]
+             "sigma_allow": lc.sigma_allow,
+             "fast_mode": bool(lc.fast_mode)} for lc in load_cases]
 
 
 def load_cases_from_records(records) -> list[LoadCase]:
@@ -112,5 +124,6 @@ def load_cases_from_records(records) -> list[LoadCase]:
             stem=stem,
             weight=1.0 if w is None else w,
             disp_constraints=parse_disp_constraints(row.get("disp_constraints")),
-            sigma_allow=_opt_float(row.get("sigma_allow"))))
+            sigma_allow=_opt_float(row.get("sigma_allow")),
+            fast_mode=_as_bool(row.get("fast_mode"))))
     return out
