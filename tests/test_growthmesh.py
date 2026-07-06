@@ -871,3 +871,8 @@ def test_app_growth_mesh_done_panel_and_point_button(tmp_path):
     back = Config.from_yaml(cfg_path)
     assert back.model.case_dir == str(out_dir)
     assert back.model.growth_original_elem_max == 60000002
+    # the on-screen "Original part: highest element id" field reflects the
+    # recorded boundary too (not left stale/0 by the sticky session-state
+    # widget, which would otherwise re-save over it)
+    thr = [n for n in at.number_input if n.key == "growth_orig_elem_max"]
+    assert thr and thr[0].value == 60000002
