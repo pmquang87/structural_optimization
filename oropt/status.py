@@ -32,7 +32,8 @@ CHECKPOINT = "checkpoint.npz"
 RUN_LOG = "run.log"        # the loop's tee'd stdout (see oropt.run._tee_log)
 
 _HISTORY_COLS = ["iteration", "volume_fraction", "sigma_max", "disp",
-                 "elements_alive", "feasible", "iter_wall_s", "or_termination"]
+                 "elements_alive", "feasible", "iter_wall_s", "or_termination",
+                 "optimizer"]
 
 
 @dataclass
@@ -99,8 +100,19 @@ def read_status(work_dir: str | Path) -> Optional[Status]:
 def append_history(work_dir: str | Path, row: dict) -> None:
     p = Path(work_dir) / HISTORY
     new = not p.exists()
+    # A fresh file gets the current column set (incl. later-added ones like
+    # ``optimizer``); an existing file keeps *its own* header, so appending to a
+    # history written before a column existed never misaligns the CSV (the extra
+    # key is dropped by extrasaction="ignore"). This matters for a run resumed
+    # across an oropt upgrade, or one that switched optimiser mid-run.
+    cols = _HISTORY_COLS
+    if not new:
+        with open(p, newline="", encoding="utf-8") as fh:
+            header = fh.readline().strip()
+        if header:
+            cols = header.split(",")
     with open(p, "a", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=_HISTORY_COLS, extrasaction="ignore")
+        w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
         if new:
             w.writeheader()
         w.writerow(row)
@@ -229,16 +241,24 @@ def is_running(work_dir: str | Path) -> bool:
 # ---- checkpoint (resume) ---------------------------------------------------
 def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray,
                     sens_prev: Optional[np.ndarray] = None,
-                    phi: Optional[np.ndarray] = None) -> None:
-    """*phi* is the level-set's nodal field. Without it a resumed level-set run
-    re-initialises phi from the alive mask, which both perturbs the design (the
-    init's smoothing disagrees with the mask it was built from) and re-orders
-    the whole field by the current sensitivity rank. Optimisers without a field
-    (BESO/TOBS/HCA) simply pass None."""
+                    phi: Optional[np.ndarray] = None,
+                    x: Optional[np.ndarray] = None) -> None:
+    """Persist the state a ``--resume`` needs to continue *without* perturbing the
+    design: the alive mask, the history-blended sensitivity, and each field-carrying
+    optimiser's *own* continuous field.
+
+    *phi* is the level-set's nodal field and *x* is HCA's per-element virtual
+    density. Without its field a resumed run re-initialises it from the alive mask,
+    which both perturbs the design and re-orders it by the current sensitivity rank
+    (level-set), or discards the controller's sub-threshold memory (HCA). BESO/TOBS
+    are stateless and pass neither. On an optimiser *switch* the destination reloads
+    only the field that matches its own kind (see the loop), so a phi never lands in
+    HCA's ``x`` or vice versa — the mismatched field is dropped and re-initialised."""
     np.savez(Path(work_dir) / CHECKPOINT, iteration=iteration,
              alive_mask=alive_mask,
              sens_prev=(sens_prev if sens_prev is not None else np.array([])),
-             phi=(phi if phi is not None else np.array([])))
+             phi=(phi if phi is not None else np.array([])),
+             x=(x if x is not None else np.array([])))
 
 
 def checkpoint_iteration(work_dir: str | Path) -> Optional[int]:
@@ -266,6 +286,8 @@ def load_checkpoint(work_dir: str | Path) -> Optional[dict]:
     d = np.load(p)
     sp = d["sens_prev"]
     phi = d["phi"] if "phi" in d.files else np.array([])   # pre-phi checkpoints
+    x = d["x"] if "x" in d.files else np.array([])         # pre-x (no HCA field)
     return {"iteration": int(d["iteration"]), "alive_mask": d["alive_mask"],
             "sens_prev": (sp if sp.size else None),
-            "phi": (phi if phi.size else None)}
+            "phi": (phi if phi.size else None),
+            "x": (x if x.size else None)}

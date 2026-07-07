@@ -54,6 +54,58 @@ def build_optimizer(cfg: Config, mesh: Mesh, protected: np.ndarray,
         "(expected 'beso', 'levelset', 'tobs' or 'hca')")
 
 
+def snapshot_config_used(work: Path, cfg: Config, resume: bool,
+                         log: Callable[[str], None] = print) -> Optional[str]:
+    """Write ``config_used.yaml`` for this run; return the *prior* stage's optimiser.
+
+    Fresh run: just writes the snapshot. ``--resume``: preserves the existing
+    ``config_used.yaml`` as ``config_used.<timestamp>.yaml`` before overwriting, so
+    a run continued with changed parameters / a switched optimiser keeps every
+    stage's config instead of only the last, and returns the prior stage's
+    optimiser name (or ``None``) so the caller can flag a switch. Best-effort: a
+    write failure is logged, never fatal."""
+    prior_optimizer: Optional[str] = None
+    used = work / "config_used.yaml"
+    try:
+        if resume and used.is_file():
+            try:
+                prior_optimizer = Config.from_yaml(used).optimizer_name()
+            except Exception:  # noqa: BLE001
+                prior_optimizer = None
+            shutil.copy2(used, work / f"config_used.{time.strftime('%Y%m%d-%H%M%S')}.yaml")
+        cfg.to_yaml(used)
+    except Exception as exc:  # noqa: BLE001
+        log(f"[oropt] could not write config_used.yaml: {exc}")
+    return prior_optimizer
+
+
+def resume_warnings(prior_optimizer: Optional[str], optimizer: str,
+                    cur_vf: float, oc) -> list[str]:
+    """The messages a resume should log about how it silently changes the run.
+
+    Two footguns of continuing a stopped run with edits: (1) a *different*
+    optimiser swaps the whole knob block and re-inits the continuous field from
+    the alive mask; (2) a target well below the resumed volume means a big removal
+    is coming (a switched-in block can carry a different ``target_volume_fraction``
+    — e.g. beso 0.7 vs levelset 0.4). Pure function so it is unit-testable without
+    a solve; the loop just logs whatever it returns."""
+    msgs: list[str] = []
+    if prior_optimizer and prior_optimizer != optimizer:
+        msgs.append(
+            f"[oropt] resume: OPTIMISER SWITCHED {prior_optimizer} -> {optimizer}; "
+            "the alive mask carries over, the continuous field re-initialises from "
+            f"it, and ALL run knobs now come from the {optimizer} block "
+            f"(target_vf={oc.target_volume_fraction:g}, "
+            f"filter_radius={oc.filter_radius:g}, protect_layers={oc.protect_layers})")
+    if cur_vf - oc.target_volume_fraction > 0.1:
+        msgs.append(
+            f"[oropt] resume: current vf={cur_vf:.3f} is well above this stage's "
+            f"target_volume_fraction={oc.target_volume_fraction:g}; it will drive "
+            f"the volume down by ~{cur_vf - oc.target_volume_fraction:.2f} -- "
+            "confirm that's intended (a switched-in block can carry a different target)")
+    return msgs
+
+
 # Consecutive "gate asked to grow, the design shrank anyway" iterations before
 # the loop warns: 1-2 can be benign quantisation, 3 is a controller-defeating
 # trend (the elevator-linkage run showed 6 before its web collapse).
@@ -596,14 +648,10 @@ def run_optimization(cfg: Config, resume: bool = False,
     solve_root = work / "solve"
     m = cfg.model
 
-    # Snapshot the exact config this run uses into its own run folder (which is the
-    # case_dir when work_dir is blank, or the queue's per-run --work-dir folder), so
-    # every result set carries the config that produced it. Best-effort: a write
-    # failure is logged, never fatal.
-    try:
-        cfg.to_yaml(work / "config_used.yaml")
-    except Exception as exc:  # noqa: BLE001
-        log(f"[oropt] could not write config_used.yaml: {exc}")
+    # Snapshot the exact config this run uses into its own run folder so every
+    # result set carries the config that produced it; a resume also preserves the
+    # prior stage's snapshot and reports the optimiser it used (for a switch flag).
+    prior_optimizer = snapshot_config_used(work, cfg, resume, log)
 
     (work / "stop.flag").unlink(missing_ok=True)   # ignore any stale stop request
     if should_stop is None:                          # GUI "Stop" drops a stop.flag
@@ -730,8 +778,23 @@ def run_optimization(cfg: Config, resume: bool = False,
                     log(f"[oropt] checkpoint phi has {phi.size} nodes but the "
                         f"mesh has {mesh.n_nodes} -- ignored, phi will "
                         "re-initialise from the alive mask")
-            log(f"[oropt] resumed at iteration {start_iter}, "
-                f"vf={opt.volume_fraction(alive):.3f}")
+            # HCA's per-element virtual density. Restored only into an optimiser
+            # that carries one (hasattr .x) and only when the element count matches
+            # -- a nodal phi never fits here, so a level-set -> HCA switch correctly
+            # falls through to a re-init from the alive mask.
+            xfield = ckpt.get("x")
+            if xfield is not None and hasattr(opt, "x"):
+                if xfield.shape == (deck.n_design_elements,):
+                    opt.x = xfield
+                else:
+                    log(f"[oropt] checkpoint density field has {xfield.size} "
+                        f"elements but the deck has {deck.n_design_elements} -- "
+                        "ignored, density will re-initialise from the alive mask")
+            cur_vf = opt.volume_fraction(alive)
+            log(f"[oropt] resumed at iteration {start_iter}, vf={cur_vf:.3f}")
+            for msg in resume_warnings(prior_optimizer, cfg.optimizer_name(),
+                                       cur_vf, oc):
+                log(msg)
 
     pid = st.write_pid(work)
     # Placeholder headline limits until the first iteration publishes real ones:
@@ -842,7 +905,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                     "sigma_max": float("nan"), "disp": float("nan"),
                     "elements_alive": int(alive.sum()), "feasible": False,
                     "iter_wall_s": round(iter_wall, 1),
-                    "or_termination": res.message})
+                    "or_termination": res.message,
+                    "optimizer": cfg.optimizer_name()})
                 # Without a previous sensitivity (very first iteration) there is
                 # nothing to re-grow with; the mask stays put and a
                 # deterministic re-diverge fails the run via diverge_fail_after.
@@ -851,7 +915,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                                                    violation=float("inf"))
                     alive = opt.update(alive, sens_prev, target_vf)
                 st.save_checkpoint(work, it + 1, alive, sens_prev,
-                                   phi=getattr(opt, "phi", None))
+                                   phi=getattr(opt, "phi", None),
+                                   x=getattr(opt, "x", None))
                 # the recovery step invalidates the guards' iteration pairing
                 prev_vf = prev_target_vf = None
                 continue
@@ -938,7 +1003,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                 "iteration": it, "volume_fraction": round(vf, 6),
                 "sigma_max": round(sigma_max, 4), "disp": round(disp, 6),
                 "elements_alive": int(alive.sum()), "feasible": feasible,
-                "iter_wall_s": round(iter_wall, 1), "or_termination": res.message})
+                "iter_wall_s": round(iter_wall, 1), "or_termination": res.message,
+                "optimizer": cfg.optimizer_name()})
             sens = opt.filter_history(raw, sens_prev)
             vm_field = _scatter_max(case_results, deck.elem_ids)
             if n_excluded:                       # drop the ignored stress from any view
@@ -1018,7 +1084,8 @@ def run_optimization(cfg: Config, resume: bool = False,
             removal_hist = (removal_hist + [removed_now])[-5:]
             prev_vf, prev_target_vf = vf, target_vf
             st.save_checkpoint(work, it + 1, alive, sens_prev,
-                               phi=getattr(opt, "phi", None))
+                               phi=getattr(opt, "phi", None),
+                               x=getattr(opt, "x", None))
         else:
             status.state = "converged" if status.state == "running" else status.state
             status.message = status.message or "reached max_iter"
