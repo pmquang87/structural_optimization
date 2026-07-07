@@ -51,6 +51,44 @@ def test_no_pin_excludes_constrained(mini_deck_path, tmp_path):
     assert summ["free_nodes_pinned"] == 3
 
 
+# A design-range node in no element (the converter's --rigid-cog-master synthesises
+# such element-free /RBODY master nodes). It is structural, not orphaned by deletion.
+_MASTER_DECK = """\
+/NODE
+  60000001   0.0   0.0   0.0
+  60000002   1.0   0.0   0.0
+  60000003   0.0   1.0   0.0
+  60000004   0.0   0.0   1.0
+  60099999  50.0  50.0  50.0
+/TETRA4/60000000
+  60000001  60000001  60000002  60000003  60000004
+/GRNOD/NODE/60000000
+sym
+  60000001
+/BCS/90009
+bc
+#  Tra rot   skew_ID  grnod_ID
+   111 111         0     60000000
+/END
+"""
+
+
+def test_element_free_design_node_never_pinned(tmp_path):
+    """A design-range node in no element (a synthesised rigid-body master) is
+    structural, not orphaned by deletion -- it must never be pinned, even at full
+    volume. Pinning one with a full-fix /BCS double-constrains the rigid master
+    (locks a loaded master's free DOFs -> zero external work) and OpenRadioss flags
+    it as an incompatible kinematic condition -> AUTOSPC -> dead solve."""
+    p = tmp_path / "master_0000.rad"
+    p.write_text(_MASTER_DECK, encoding="utf-8")
+    d = Deck.load(p, 60000000, 60000000)
+    assert 60099999 in d.node_ids.tolist()             # present, design-range
+    out = tmp_path / "m_0000.rad"
+    summ = d.write(out, np.ones(1, bool))              # full volume, nothing deleted
+    assert summ["free_nodes_pinned"] == 0              # element-free node not pinned
+    assert "/GRNOD/NODE/91000001" not in out.read_text()   # no free-node block at all
+
+
 def test_prepare_engine_anim_dt(mini_engine_path, tmp_path):
     out = tmp_path / "eng_0001.rad"
     prepare_engine(mini_engine_path, out, anim_dt=1.0)
