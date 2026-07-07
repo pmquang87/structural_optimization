@@ -53,6 +53,25 @@ class Results:
         return {"sigma_max": self.sigma_max, "disp": self.disp,
                 "n_elem": int(self.element_ids.size)}
 
+    @property
+    def is_null_solve(self) -> bool:
+        """True when the design part carried no load at all: not one element
+        developed positive von-Mises stress *or* positive strain energy.
+
+        A loaded solid always develops stress somewhere, so an identically-zero
+        response means the load never reached the mesh -- the force landed on a
+        constrained / rigid DOF, a contact interface never engaged, or the deck
+        was mis-exported. The loop uses this to fail loudly instead of
+        "optimising" a dead model: with every field zero, ``sigma_max``/``disp``
+        read 0 and pass every feasibility limit trivially, and the BESO-family
+        energy sensitivity is uniformly zero, so the optimiser would strip the
+        part down to its protected skeleton (exactly how ``opti_run5_Ti`` lost
+        continuity). Note an empty design part (no elements) is also reported
+        null -- a degenerate state equally unfit to optimise."""
+        has_stress = bool(self.vonmises.size) and bool(np.any(self.vonmises > 0.0))
+        has_energy = bool(self.energy.size) and bool(np.any(self.energy > 0.0))
+        return not (has_stress or has_energy)
+
 
 def run_anim_to_vtk(cfg: Config, anim_file: Path, out_vtk: Path) -> Path:
     """Convert one animation file to VTK (written to *out_vtk*)."""
