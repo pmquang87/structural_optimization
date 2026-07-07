@@ -60,6 +60,7 @@ class RunOpts:
     kmp_stacksize: str = "400m"
     anim_dt: float = 1.0       # animation output interval; >= termination time -> only the final state
     reuse_iter0: bool = True   # if a matching iter_0000 is already in the run folder (e.g. copied from an earlier run of the same initial design), reuse its solve instead of re-running the expensive full-volume iteration 0. Guarded by a byte-compare of the starter deck, so a mismatched design still solves fresh.
+    solver_concurrency: int = 1  # how many load-case solves to run at once within an iteration (default 1 = sequential, unchanged). On a strong PC set >1 to solve several load cases simultaneously — each solver still uses `nt` threads (and MPI with `np`), so concurrency*nt threads / concurrency deck-copies must fit the machine. A single-case run is unaffected.
 
 
 @dataclass

@@ -41,7 +41,7 @@ from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
 from oropt.gui import growthprep
 from oropt.gui.runstate import find_active_run
 from oropt.growthmesh import GROWTH_MESH_DIRNAME, point_config_at
-from oropt.loop import preview_growth_boxes
+from oropt.loop import copy_iter0, preview_growth_boxes
 from oropt.mesh import Mesh, overlay_primitives
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
                              records_from_custom_views)
@@ -141,6 +141,44 @@ def render_input_tab(cfg: Config) -> None:
             "Threads nt", value=int(cfg.docker.nt), min_value=1, step=1))
         st.caption("Keep np × nt ≤ CPU cores. The container bind-mounts the run "
                    "folder to /data and writes results back there.")
+
+    n_cases = len(cases)
+    cfg.run.solver_concurrency = int(st.number_input(
+        "Concurrent solvers", value=min(int(cfg.run.solver_concurrency),
+                                        max(1, n_cases)),
+        min_value=1, max_value=max(1, n_cases), step=1, key="run_concurrency",
+        disabled=n_cases <= 1,
+        help="How many load-case solves to run at once each iteration (default 1 "
+             "= sequential). On a strong PC set >1 to solve several load cases "
+             "simultaneously; each solver still uses nt threads (and MPI with np), "
+             "so keep concurrency × nt ≤ cores and watch RAM. Capped at the number "
+             "of load cases; a single-case run is unaffected."))
+    if n_cases <= 1:
+        st.caption("Only one load case — concurrency has nothing to parallelise. "
+                   "Add load cases on the 🔀 tab to solve several at once.")
+
+    with st.expander("⏩ Seed iteration 0 from another run "
+                     "(skip the first full-volume solve)"):
+        cfg.run.reuse_iter0 = st.checkbox(
+            "Reuse an iter_0000 already in this run folder", value=cfg.run.reuse_iter0,
+            key="reuse_iter0",
+            help="Iteration 0 solves the initial full-volume design — the most "
+                 "expensive solve — and is identical across runs with the same "
+                 "initial deck. If a matching iter_0000 is present, reuse its solve "
+                 "instead of re-running it. Guarded by a byte-compare of the starter "
+                 "deck, so a copy from a different model is refused and solved fresh.")
+        st.caption(f"Target run folder: `{cfg.run_folder()}`")
+        src = st.text_input(
+            "Copy iter_0000 from another run's folder", key="copy_iter0_src",
+            help="Path to an old run folder that contains an iter_0000. Its whole "
+                 "iter_0000 (single- or multi-case) is copied here; the run then "
+                 "validates and reuses it at iteration 0.")
+        overwrite = st.checkbox("Overwrite an existing iter_0000 here",
+                                key="copy_iter0_overwrite")
+        if st.button("📋 Copy iter_0000 here", disabled=not src.strip(),
+                     key="copy_iter0_btn"):
+            ok, msg = copy_iter0(src.strip(), cfg.run_folder(), overwrite=overwrite)
+            (st.success if ok else st.error)(msg)
 
 
 # ---- Load cases tab --------------------------------------------------------

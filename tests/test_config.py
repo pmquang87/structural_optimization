@@ -75,6 +75,15 @@ def test_reuse_iter0_flag_default_on_and_roundtrips(tmp_path):
     assert Config.from_yaml(p).run.reuse_iter0 is False  # opt-out roundtrips
 
 
+def test_solver_concurrency_default_one_and_roundtrips(tmp_path):
+    cfg = Config()
+    assert cfg.run.solver_concurrency == 1               # sequential by default
+    cfg.run.solver_concurrency = 4
+    p = tmp_path / "cfg.yaml"
+    cfg.to_yaml(p)
+    assert Config.from_yaml(p).run.solver_concurrency == 4
+
+
 def test_archive_iterations_flag_default_on_and_roundtrips(tmp_path):
     cfg = Config()
     assert cfg.beso.archive_iterations is True          # on by default
