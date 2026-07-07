@@ -1171,6 +1171,35 @@ def run_optimization(cfg: Config, resume: bool = False,
                 break
             consecutive_diverged = 0
 
+            # ---- null-solve guard -----------------------------------------
+            # A solve can reach NORMAL TERMINATION yet carry no load: zero stress
+            # AND zero strain energy across the whole design part (the model never
+            # deformed). The load landed on a constrained / rigid DOF, a contact
+            # never engaged, or the deck was mis-exported. Every feasibility metric
+            # then reads 0 and passes trivially and the energy sensitivity is
+            # uniformly zero, so the optimiser would silently strip the part to its
+            # protected skeleton -- exactly how opti_run5_Ti lost continuity. Fail
+            # loudly instead of "optimising" a dead model. Checked every iteration;
+            # at iter 0 (full solid) a real load MUST develop stress, so it is
+            # unambiguous, but a mid-run all-zero solve is just as meaningless.
+            null_cases = [cases[i].name for i, r in enumerate(case_results)
+                          if r.is_null_solve]
+            if null_cases:
+                which = ", ".join(repr(n) for n in null_cases)
+                status.state = "failed"
+                status.iteration = it
+                status.or_termination = res.message
+                status.message = (
+                    f"null solve at iter {it}: case(s) {which} produced zero "
+                    "stress and zero strain energy over the design part -- the "
+                    "model carried no load. Check the load path (force applied to "
+                    "a constrained or rigid DOF, a contact that never engaged, or "
+                    "a mis-exported deck); refusing to optimise a model under no "
+                    "load.")
+                st.write_status(work, status)
+                log(f"[oropt] SOLVE FAILED (null solve): {status.message}")
+                break
+
             # ---- combine cases: weighted-sum sensitivity + worst-case gate -
             raws = [opt.raw_sensitivity(r, deck.elem_ids, alive)
                     for r in case_results]
