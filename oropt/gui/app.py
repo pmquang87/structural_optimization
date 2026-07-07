@@ -243,9 +243,6 @@ def render_load_cases_tab(cfg: Config, cfg_path: Path) -> None:
             f"{n} load cases: every iteration solves all of them (≈ {n}× a "
             "single-case run, each under `solve/case_<i>/`); the design is "
             "feasible only when **every** case is.")
-    if st.button("💾 Save config", key="lc_save"):
-        cfg.to_yaml(cfg_path)
-        st.success(f"Saved to {cfg_path}")
 
 
 # ---- shared evolution-animation camera/playback widgets --------------------
@@ -859,11 +856,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
              "a quick visual of the optimisation. Best-effort; never fails the run.")
 
     render_camera_settings(cfg.animate, key_prefix="con")
-    color_ok, bg_ok = render_appearance_settings(cfg.animate, key_prefix="con")
-
-    if st.button("💾 Save config", disabled=not (color_ok and bg_ok)):
-        cfg.to_yaml(cfg_path)
-        st.success(f"Saved to {cfg_path}")
+    render_appearance_settings(cfg.animate, key_prefix="con")   # shows inline colour validity
 
 
 @st.cache_resource(show_spinner=False)
@@ -1519,6 +1512,13 @@ work = Path(cfg.run_folder())          # work_dir, or the case dir when blank
 if not work.is_absolute():
     work = PROJECT_ROOT / work
 
+# 💾 Save config: captured here, written *after* the tabs render (see the deferred
+# block below) so it persists the on-screen edits, not the stale on-disk config.
+save_config_clicked = st.sidebar.button(
+    "💾 Save config", width="stretch", key="save_config",
+    help="Write the current on-screen settings to the config file. (Also done "
+         "automatically when you add to the queue or resume.)")
+
 # Run state follows whatever run is actually live — the selected config's own
 # folder, or a queued run in its (possibly de-duplicated) reserved folder — so the
 # sidebar and Monitor stay in sync with the queue instead of showing idle.
@@ -1666,3 +1666,10 @@ if resume_clicked:
         st.sidebar.success(
             f"Continuing {cfg.optimizer_name()} from iteration {resume_next_iter} "
             f"→ max_iter {target}.")
+
+# ---- deferred save action --------------------------------------------------
+# Deferred like the two above so 💾 Save writes the on-screen config (every tab has
+# now written its widgets into `cfg`), not the stale on-disk one.
+if save_config_clicked:
+    cfg.to_yaml(cfg_path)
+    st.sidebar.success(f"Saved to {cfg_path}")
