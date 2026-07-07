@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config import Config, unknown_keys
+from .deck import read_solid_geometry
 from .runner import backend_problems
 
 ERROR = "error"
@@ -358,6 +359,34 @@ def check_config(cfg: Config, *, raw: dict | None = None,
              f"evolution_rate={cfg.beso.evolution_rate}: per-iteration growth "
              "into the boxes is capped below the feasibility back-off step; "
              "consider max_add_ratio >= evolution_rate")
+
+    # --- growth keep-out deck (forbidden growth space: nearby parts) ---
+    if m.growth_keepout_rad:
+        clr = m.growth_keepout_clearance_mm
+        if isinstance(clr, bool) or not isinstance(clr, (int, float)) or clr < 0:
+            err("model.growth_keepout_clearance_mm must be >= 0: "
+                f"got {clr!r}")
+        if not boxes:
+            warn("model.growth_keepout_rad is set but no growth regions are "
+                 "configured -- the keep-out has no candidates to remove (no-op)")
+        ko_path = Path(m.growth_keepout_rad)
+        if not ko_path.is_absolute():
+            ko_path = case_dir / m.growth_keepout_rad
+        if not ko_path.exists():
+            err(f"growth keep-out deck not found: {ko_path}")
+        else:
+            try:
+                _tets, _nodes, found = read_solid_geometry(
+                    ko_path, m.growth_keepout_part_ids or None)
+            except Exception as exc:  # noqa: BLE001
+                err(f"growth keep-out deck could not be parsed ({ko_path}): {exc}")
+            else:
+                want = [int(p) for p in (m.growth_keepout_part_ids or [])]
+                missing = [p for p in want if p not in found]
+                if missing:
+                    warn("growth keep-out deck has no solid elements for part "
+                         f"id(s) {missing} (found {found}); those parts "
+                         "contribute nothing to the keep-out")
 
     return problems
 

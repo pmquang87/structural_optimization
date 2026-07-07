@@ -573,6 +573,48 @@ def test_prepare_guard_failure_writes_nothing(tmp_path):
     assert not (tmp_path / GROWTH_MESH_DIRNAME).exists()
 
 
+def _neighbour_brick(tmp_path, lo, hi, name="keepout_0000.rad"):
+    """Write a keep-out deck with one /BRICK spanning the box [lo, hi]."""
+    x0, y0, z0 = lo
+    x1, y1, z1 = hi
+    corners = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+               (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+    nodes = "".join(f"  {70000001 + i:>8}   {x}   {y}   {z}\n"
+                    for i, (x, y, z) in enumerate(corners))
+    ids = "  ".join(f"{70000001 + i:>8}" for i in range(8))
+    text = (f"/NODE\n{nodes}/BRICK/70000000\n  {70000001:>8}  {ids}\n/END\n")
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    return name
+
+
+def test_prepare_keepout_excludes_generated_candidates(tmp_path, mini_engine_path):
+    """The keep-out volume removes the generated candidate tets inside it: the
+    x < -0.2 slab catches the WING tet centred at x=-0.25 but not the one at
+    x=-0.125, so one of the two survives and is written."""
+    _write_mini(tmp_path)
+    name = _neighbour_brick(tmp_path, (-1.0, -2.0, -2.0), (-0.2, 2.0, 2.0))
+    cfg = _mini_cfg(tmp_path, [WING])
+    cfg.model.growth_keepout_rad = name
+    lines: list[str] = []
+    rep = prepare_growth_mesh(cfg, backend=_fake_backend, log=lines.append)
+    assert rep.n_new_elems == 1                      # one of two WING tets removed
+    assert rep.per_region == [("wing", 1)]
+    assert any("keep-out" in ln and "removed 1" in ln for ln in lines)
+    assert (tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad").is_file()
+
+
+def test_prepare_keepout_removing_all_raises(tmp_path, mini_engine_path):
+    """A keep-out covering the whole region leaves nothing to add -> abort,
+    writing nothing."""
+    _write_mini(tmp_path)
+    name = _neighbour_brick(tmp_path, (-1.0, -2.0, -2.0), (0.05, 2.0, 2.0))
+    cfg = _mini_cfg(tmp_path, [WING])
+    cfg.model.growth_keepout_rad = name
+    with pytest.raises(ValueError, match="no candidate elements"):
+        prepare_growth_mesh(cfg, backend=_fake_backend, log=_silent)
+    assert not (tmp_path / GROWTH_MESH_DIRNAME).exists()
+
+
 def test_prepare_mismatched_case_mesh_raises(tmp_path):
     _write_mini(tmp_path, stem="ma")
     p = tmp_path / "mb_0000.rad"

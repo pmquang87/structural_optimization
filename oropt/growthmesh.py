@@ -71,8 +71,9 @@ from scipy.spatial import cKDTree
 
 from .config import Config
 from .deck import Deck
+from .keepout import resolve_keepout
 from .loop import growth_candidate_mask, resolve_growth_boxes
-from .mesh import Mesh, box_corners, primitive_member
+from .mesh import Mesh, box_corners, points_in_tets, primitive_member
 
 #: sub-folder of ``model.case_dir`` receiving the extended deck set
 GROWTH_MESH_DIRNAME = "growth_mesh"
@@ -224,41 +225,6 @@ def region_bounds(boxes) -> tuple[np.ndarray, np.ndarray]:
     aabbs = [region_aabb(b) for b in boxes]
     return (np.min([lo for lo, _ in aabbs], axis=0),
             np.max([hi for _, hi in aabbs], axis=0))
-
-
-def points_in_tets(points: np.ndarray, tet_xyz: np.ndarray) -> np.ndarray:
-    """Boolean mask: which *points* lie inside (or on) any tet of *tet_xyz*
-    ``(M, 4, 3)``. Used to drop generated tets whose centroid falls inside the
-    part — they would duplicate existing elements.
-
-    Complete by construction: every tet containing a point has its centroid
-    within that tet's own bounding radius of the point, so the KD-tree pass
-    (over the points, per-tet radius query) can never miss a hit; candidates
-    are then confirmed with an exact barycentric test."""
-    points = np.asarray(points, dtype=float)
-    out = np.zeros(len(points), dtype=bool)
-    if len(points) == 0 or len(tet_xyz) == 0:
-        return out
-    cent = tet_xyz.mean(axis=1)
-    rad = np.linalg.norm(tet_xyz - cent[:, None, :], axis=2).max(axis=1)
-    tree = cKDTree(points)
-    chunk = 65536
-    for s in range(0, len(tet_xyz), chunk):
-        e = min(s + chunk, len(tet_xyz))
-        hits = tree.query_ball_point(cent[s:e], rad[s:e] * (1.0 + 1e-9))
-        for j, idx in enumerate(hits):
-            idx = [i for i in idx if not out[i]]
-            if not idx:
-                continue
-            t = tet_xyz[s + j]
-            m = (t[:3] - t[3]).T                       # 3x3 barycentric basis
-            try:
-                lam = np.linalg.solve(m, (points[idx] - t[3]).T).T
-            except np.linalg.LinAlgError:              # degenerate tet
-                continue
-            ok = (lam >= -1e-9).all(axis=1) & (lam.sum(axis=1) <= 1.0 + 1e-9)
-            out[np.asarray(idx)[ok]] = True
-    return out
 
 
 def signed_volumes(tet_xyz: np.ndarray) -> np.ndarray:
@@ -593,6 +559,10 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
     primary = decks[0]
     boxes = resolve_growth_boxes(primary, m.growth_boxes)
     labels = [b.name or f"#{i + 1}" for i, b in enumerate(boxes)]
+    # Resolve the keep-out geometry (if any) BEFORE the expensive TetGen run so a
+    # missing/unparsable deck fails fast; its inside test drops generated
+    # candidate tets that land in the neighbour parts (see the classify step).
+    keepout = resolve_keepout(m, m.case_dir)
 
     # ---- part exterior surface + sizing -------------------------------------
     faces = exterior_faces(primary.elem_conn)
@@ -658,11 +628,24 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
     inside_part = np.zeros(len(cent), dtype=bool)
     inside_part[in_region] = points_in_tets(cent[in_region], part_xyz)
     keep = in_region & ~inside_part
+    # Keep-out: never generate candidate tets inside the neighbour parts, so the
+    # extended deck has no growable material there (the run-time
+    # growth_candidate_mask holds any that survive void, but the clean fix is to
+    # not create them at all). ``keepout`` was resolved up front.
+    if keepout is not None:
+        blocked = keep & keepout.block_mask(cent)
+        n_blocked = int(blocked.sum())
+        if n_blocked:
+            keep = keep & ~blocked
+            log(f"[oropt] growth-mesh: keep-out ({Path(keepout.source).name}) "
+                f"removed {n_blocked} generated candidate tet(s) inside the "
+                "neighbour parts")
     if not keep.any():
         raise ValueError(
             "the generated mesh adds no candidate elements: every tet inside "
             "a growth region duplicates existing part elements (the regions "
-            "appear fully pre-meshed already) or no tet landed in a region")
+            "appear fully pre-meshed already), lands inside the keep-out, or no "
+            "tet landed in a region")
     kept = out_tets[keep]
     per_region = [(lbl, int(primitive_member(cent[keep], b).sum()))
                   for lbl, b in zip(labels, boxes)]

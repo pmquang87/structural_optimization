@@ -392,8 +392,8 @@ def test_enqueue_persists_current_optimiser_selection(tmp_path, monkeypatch):
     labels = [b.label for b in at.sidebar.button]
     assert "▶ Start" not in labels and "▶ Start queue" in labels
 
-    # pick TOBS in the optimiser selectbox (rendered in the Optimiser / Output tab)
-    sb = next(s for s in at.selectbox if s.label == "Topology optimiser")
+    # pick TOBS in the optimiser selectbox (rendered in the Optimizer / Output tab)
+    sb = next(s for s in at.selectbox if s.label == "Topology optimizer")
     sb.set_value("tobs").run()
     assert not at.exception
 

@@ -23,6 +23,7 @@ from .d3plot import convert_final
 from .deck import Deck, prepare_engine
 from .fastmode import FastModeTie, build_fast_case, discover_tie
 from .hca import Hca
+from .keepout import resolve_keepout
 from .levelset import LevelSet
 from .manufacturing import apply_manufacturing, manufacturing_active
 from .animate import make_animation
@@ -310,6 +311,14 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
     may be grown into by the optimiser's bi-directional update. All-False when
     no boxes are configured.
 
+    A configured **keep-out** deck (``model.growth_keepout_rad``) subtracts the
+    candidates inside the neighbour parts from the *growable* set: they still
+    start void (returned in the mask, so the initial deck omits them) but are
+    held void every iteration by the loop (:func:`growth_blocked_mask`), so no
+    material grows into the neighbour parts. The run-start guards below run only
+    on the growable candidates — a held-void candidate needs neither pinnable
+    nodes nor a growth path.
+
     Raises ``ValueError`` at run start — before any ~13-min solve — for the
     setup mistakes that would otherwise waste (or silently no-op) a multi-hour
     run:
@@ -327,9 +336,13 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
     boxes = resolve_growth_boxes(deck, getattr(model, "growth_boxes", []) or [])
     if not boxes:
         return np.zeros(deck.n_design_elements, dtype=bool)
+    keepout = resolve_keepout(model, getattr(model, "case_dir", "."))
+    ko = keepout.block_mask(mesh.centroids) if keepout is not None else None
 
-    candidate = np.zeros(deck.n_design_elements, dtype=bool)
-    box_masks = []
+    candidate = np.zeros(deck.n_design_elements, dtype=bool)  # void-start set
+    growable = np.zeros(deck.n_design_elements, dtype=bool)   # minus keep-out
+    blocked = np.zeros(deck.n_design_elements, dtype=bool)    # held-void keep-out
+    box_growable = []
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
         bm, kept_alive = region_candidate_mask(deck, mesh, b, model)
@@ -355,12 +368,26 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
                 "part elements stay alive (carve off)")
         elif _no_boundary(b, model):
             log(f"[oropt] growth box {label!r}: {_NO_BOUNDARY_NOTE}")
-        box_masks.append((label, bm))
+        gm = bm
+        if ko is not None:
+            blk = bm & ko
+            nb = int(blk.sum())
+            if nb:
+                gm = bm & ~ko
+                blocked |= blk
+                log(f"[oropt] growth box {label!r}: {nb} candidate(s) inside the "
+                    f"keep-out held void (never grown); {int(gm.sum())} growable")
+                if not gm.any():
+                    log(f"[oropt] growth box {label!r}: WARNING every candidate "
+                        "is inside the keep-out -- this region can grow nothing")
         candidate |= bm
+        growable |= gm
+        box_growable.append((label, gm))
 
     # Void-element nodes must be pinnable by the free-node guard, which only
-    # covers design nodes (ids >= design_node_min).
-    cand_nodes = deck.elem_conn[candidate]
+    # covers design nodes (ids >= design_node_min). Only growable candidates
+    # need pinnable nodes -- a held-void keep-out candidate is never grown.
+    cand_nodes = deck.elem_conn[growable]
     bad = cand_nodes < deck.design_node_min
     if bad.any():
         raise ValueError(
@@ -370,14 +397,16 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
             "pin them while the elements are void (singular implicit tangent). "
             "Renumber the expansion-mesh nodes to ids >= design_node_min")
 
-    # Every candidate must be connected (via shared nodes, possibly through
-    # other candidates) to the initially-alive structure, or it can never be
-    # grown: keep_connected would drop it as a floating island every iteration.
+    # Every growable candidate must be connected (via shared nodes, possibly
+    # through other growable candidates) to the initially-alive structure, or it
+    # can never be grown: keep_connected would drop it as a floating island every
+    # iteration. Held-void keep-out candidates never conduct, so they are
+    # excluded from the reachability graph.
     alive0 = ~candidate
-    reachable = mesh.keep_connected(np.ones_like(candidate), alive0)
-    unreachable = candidate & ~reachable
+    reachable = mesh.keep_connected(~blocked, alive0)
+    unreachable = growable & ~reachable
     if unreachable.any():
-        names = [label for label, bm in box_masks if (bm & unreachable).any()]
+        names = [label for label, gm in box_growable if (gm & unreachable).any()]
         raise ValueError(
             f"{int(unreachable.sum())} growth-box candidate element(s) in "
             f"box(es) {', '.join(repr(n) for n in names)} share no nodes with "
@@ -386,6 +415,29 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
             "with the part (imprint the part surface, then merge/equivalence "
             "the coincident interface nodes)")
     return candidate
+
+
+def growth_blocked_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
+    """Growth candidates that fall inside the keep-out geometry
+    (``model.growth_keepout_rad``): they start void like any candidate but are
+    **held void every iteration** so the optimiser can never place material
+    inside the neighbour parts. All-False when no growth boxes or no keep-out
+    deck is configured. The loop re-applies this after each optimiser update
+    (and the auto-mesh PREPARE step simply never generates candidate tets here),
+    so pre-meshed and auto-meshed workflows both honour the keep-out."""
+    boxes = resolve_growth_boxes(deck, getattr(model, "growth_boxes", []) or [])
+    empty = np.zeros(deck.n_design_elements, dtype=bool)
+    if not boxes:
+        return empty
+    keepout = resolve_keepout(model, getattr(model, "case_dir", "."))
+    if keepout is None:
+        return empty
+    ko = keepout.block_mask(mesh.centroids)
+    void_start = empty.copy()
+    for b in boxes:
+        bm, _ = region_candidate_mask(deck, mesh, b, model)
+        void_start |= bm
+    return void_start & ko
 
 
 @dataclasses.dataclass
@@ -406,6 +458,7 @@ class GrowthPreview:
     guard: str = ""         # run-start guard error that would abort a run, if any
     notice: str = ""        # config-level caveat (carve off with no id boundary)
     group_guard: str = ""   # /GRNOD group-id guard error (typo'd bc/freeze/stress-exclude id), if any
+    keepout: str = ""       # keep-out summary (parts / clearance / held-void count) or its error
 
 
 def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
@@ -430,6 +483,16 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
     BC group id surfaces in the preview panel instead of hours into a run.
     Never raises."""
     boxes = getattr(model, "growth_boxes", []) or []
+    # Keep-out geometry (neighbour parts) -- resolved once so each region can
+    # report how many of its candidates it would hold void. A broken keep-out
+    # deck is surfaced (never raises) so the preview stays informative.
+    keepout, keepout_note, ko_mask = None, "", None
+    if getattr(model, "growth_keepout_rad", None):
+        try:
+            keepout = resolve_keepout(model, getattr(model, "case_dir", "."))
+            ko_mask = keepout.block_mask(mesh.centroids)
+        except (ValueError, OSError) as exc:
+            keepout_note = f"keep-out error: {exc}"
     rows: list = []
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
@@ -449,6 +512,12 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
         else:
             note = ("no design elements inside -- the region volume "
                     "is not pre-meshed into the design part")
+        if ko_mask is not None and count:
+            blk = int((bm & ko_mask).sum())
+            if blk:
+                held = ("all of them" if blk == count else f"{blk} of {count}")
+                note = (f"{note}; " if note else "") + (
+                    f"{held} held void by keep-out (never grown)")
         rows.append(BoxPreview(label, resolved.shape_kind(), count, note))
     total, guard = 0, ""
     if boxes:
@@ -464,9 +533,19 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
         validate_group_ids(deck, model)
     except ValueError as exc:
         group_guard = str(exc)
+    if keepout is not None and not keepout_note:
+        held = int(growth_blocked_mask(deck, mesh, model).sum())
+        parts = ", ".join(str(p) for p in keepout.part_ids) or "all"
+        clr = f", clearance {keepout.clearance:g}" if keepout.clearance else ""
+        keepout_note = (
+            f"keep-out {Path(keepout.source).name} (part(s) {parts}{clr}): "
+            f"{held} candidate(s) held void")
+        if not held:
+            keepout_note += " -- no growth region overlaps the neighbour parts (no-op)"
     return GrowthPreview(rows=rows, total_candidates=total,
                          total_elements=deck.n_design_elements, guard=guard,
-                         notice=notice, group_guard=group_guard)
+                         notice=notice, group_guard=group_guard,
+                         keepout=keepout_note)
 
 
 def _clean_solve_dir(run_dir: Path) -> None:
@@ -867,6 +946,13 @@ def run_optimization(cfg: Config, resume: bool = False,
     # so the anchor mask above keeps its own view.)
     candidate = growth_candidate_mask(deck, mesh, m, log=log)
     n_candidate = int(candidate.sum())
+    # Keep-out: growth candidates inside the neighbour parts start void like any
+    # candidate but are held void every iteration (never grown), so the optimiser
+    # can never place material inside the neighbour parts. Re-applied after every
+    # optimiser update below via ``keep_growable``.
+    blocked = growth_blocked_mask(deck, mesh, m)
+    keep_growable = ~blocked
+    hold_void = bool(blocked.any())
     if n_candidate:
         overlap = int((protected & candidate).sum())
         if overlap:
@@ -876,6 +962,10 @@ def run_optimization(cfg: Config, resume: bool = False,
         log(f"[oropt] growth: {n_candidate} candidate elements "
             f"({100 * candidate.mean():.1f}% of the design space) start void; "
             "volume fractions are relative to the enlarged (part + boxes) space")
+        if hold_void:
+            log(f"[oropt] growth: {int(blocked.sum())} candidate(s) inside the "
+                "keep-out held void every iteration (never grown) -> no material "
+                "enters the neighbour parts")
     opt = build_optimizer(cfg, mesh, protected, anchor=anchor)
     log(f"[oropt] optimizer={cfg.optimizer_name()}; protected elements: "
         f"{int(protected.sum())} ({100*protected.mean():.1f}%); V0={opt.V0:.3f}")
@@ -936,6 +1026,10 @@ def run_optimization(cfg: Config, resume: bool = False,
             for msg in resume_warnings(prior_optimizer, cfg.optimizer_name(),
                                        cur_vf, oc):
                 log(msg)
+    if hold_void:
+        # A resumed (or pre-keep-out) checkpoint may carry material inside the
+        # neighbour parts; hold it void from the first iteration on.
+        alive = alive & keep_growable
 
     pid = st.write_pid(work)
     # Placeholder headline limits until the first iteration publishes real ones:
@@ -1047,6 +1141,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                     target_vf = opt.next_target_vf(vf, False,
                                                    violation=float("inf"))
                     alive = opt.update(alive, sens_prev, target_vf)
+                    if hold_void:
+                        alive = alive & keep_growable
                 st.save_checkpoint(work, it + 1, alive, sens_prev,
                                    phi=getattr(opt, "phi", None),
                                    x=getattr(opt, "x", None))
@@ -1207,6 +1303,10 @@ def run_optimization(cfg: Config, resume: bool = False,
                 alive = apply_manufacturing(alive, mesh, cfg.manufacturing,
                                             protected, sensitivity=sens)
                 alive = mesh.keep_connected(alive, anchor)
+            if hold_void:
+                # Hold the keep-out candidates void: neither the optimiser update
+                # nor a manufacturing mirror may place material in the neighbour.
+                alive = alive & keep_growable
             removed_now = int((alive_before & ~alive).sum())
             if _removal_spike(removed_now, removal_hist):
                 log(f"[oropt] WARNING: this update removed {removed_now} "

@@ -39,7 +39,7 @@ def test_save_button_in_sidebar_only(tmp_path, monkeypatch):
 
 def test_save_persists_onscreen_optimizer_change(tmp_path, monkeypatch):
     at, cfg_path = _boot(tmp_path, monkeypatch)
-    sel = [s for s in at.selectbox if s.label == "Topology optimiser"][0]
+    sel = [s for s in at.selectbox if s.label == "Topology optimizer"][0]
     sel.set_value("levelset").run()                          # on-screen edit
     at.button(key="save_config").click().run()
     assert not at.exception

@@ -46,6 +46,18 @@ def _parse_elem(line: str) -> tuple[int, int, int, int, int]:
     return tuple(int(line[i:i + 10]) for i in range(0, 50, 10))  # type: ignore[return-value]
 
 
+def _parse_int_row(line: str, ncols: int) -> list[int]:
+    """The first *ncols* integers of an element card (id + connectivity).
+
+    Free (whitespace) format first, falling back to Radioss fixed 10-column
+    fields — the same convention as :func:`_parse_elem`, generalised to any
+    element arity (5 for a TETRA4, 9 for an 8-node BRICK)."""
+    t = line.split()
+    if len(t) >= ncols:
+        return [int(x) for x in t[:ncols]]
+    return [int(line[i:i + 10]) for i in range(0, 10 * ncols, 10)]
+
+
 class Deck:
     """Parsed starter deck with a mutable alive-element view of the design part."""
 
@@ -436,3 +448,104 @@ def prepare_engine(src_engine: str | Path, dst_engine: str | Path,
                     lines[k] = f"{tstart} {anim_dt}"
                 break
     Path(dst_engine).write_text(nl.join(lines) + nl, encoding="utf-8", newline="")
+
+
+# --------------------------------------------------------------------------- #
+# neighbour-part geometry (keep-out decks)
+#
+# A keep-out deck (:mod:`oropt.keepout`) describes nearby parts that are never
+# solved -- only their occupied volume matters, as forbidden growth space. Unlike
+# the design :class:`Deck` (one design part, the first /NODE block), a keep-out
+# deck may carry several parts across several /NODE blocks (converter output emits
+# one /NODE block per include), so this reads ALL of them.
+# --------------------------------------------------------------------------- #
+
+#: solid element blocks read for keep-out geometry, mapped to their node count.
+_SOLID_HEADER_RE = re.compile(r"^/(TETRA4|BRICK)/(\d+)\s*$")
+
+#: 6-tet decomposition of an 8-node /BRICK (indices into its n1..n8), sharing the
+#: n1-n7 main diagonal — exact for a convex hex, which any solver brick is.
+_HEX_TO_TETS = np.array([
+    [0, 1, 2, 6], [0, 2, 3, 6], [0, 3, 7, 6],
+    [0, 7, 4, 6], [0, 4, 5, 6], [0, 5, 1, 6]], dtype=np.int64)
+
+
+def read_solid_geometry(path: str | Path, part_ids=None):
+    """Parse a Radioss deck for the solid-element geometry of the named parts.
+
+    Reads EVERY ``/NODE`` block (a converted deck emits one per include) and every
+    ``/TETRA4/<pid>`` and ``/BRICK/<pid>`` block whose part id is in *part_ids*
+    (all solid parts when *part_ids* is ``None``/empty). Returns
+    ``(tet_xyz, node_xyz, part_ids)`` where:
+
+    * ``tet_xyz`` is ``(V, 4, 3)`` — the parts' occupied volume as a set of
+      tetrahedra (each brick split into 6 tets), for a point-in-volume test;
+    * ``node_xyz`` is ``(P, 3)`` — the coordinates of every node the selected
+      elements reference (for a clearance-distance test);
+    * ``part_ids`` is the sorted list of solid part ids actually found.
+
+    Raises ``ValueError`` when the deck holds no matching solid elements or a
+    solid element references a node id absent from every ``/NODE`` block."""
+    raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines()
+    n = len(lines)
+    want = {int(p) for p in part_ids} if part_ids else None
+
+    # pass 1: every node across every /NODE block
+    node_map: dict[int, tuple[float, float, float]] = {}
+    i = 0
+    while i < n:
+        if lines[i].strip() == "/NODE":
+            i += 1
+            while i < n and not _is_section(lines[i]):
+                if not _is_comment(lines[i]):
+                    nid, x, y, z = _parse_node(lines[i])
+                    node_map[nid] = (x, y, z)
+                i += 1
+            continue
+        i += 1
+
+    # pass 2: the selected solid element blocks
+    tet_conn: list = []
+    found: set[int] = set()
+    i = 0
+    while i < n:
+        m = _SOLID_HEADER_RE.match(lines[i].strip())
+        if not m:
+            i += 1
+            continue
+        etype, pid = m.group(1), int(m.group(2))
+        ncols = 5 if etype == "TETRA4" else 9
+        selected = want is None or pid in want
+        i += 1
+        block: list = []
+        while i < n and not (_is_section(lines[i])
+                             or lines[i].lstrip()[:1] == "#"):
+            if not _is_comment(lines[i]):
+                block.append(_parse_int_row(lines[i], ncols))
+            i += 1
+        if not (selected and block):
+            continue
+        found.add(pid)
+        if etype == "TETRA4":
+            tet_conn.extend(row[1:5] for row in block)
+        else:                                          # /BRICK -> 6 tets
+            for row in block:
+                hexn = row[1:9]
+                tet_conn.extend([hexn[k] for k in t] for t in _HEX_TO_TETS)
+
+    if not tet_conn:
+        where = f" for part id(s) {sorted(want)}" if want else ""
+        raise ValueError(f"no solid (/TETRA4 or /BRICK) elements found in "
+                         f"{path}{where}")
+
+    tet_conn = np.asarray(tet_conn, dtype=np.int64)
+    uniq = np.unique(tet_conn)
+    try:
+        coords = np.array([node_map[int(v)] for v in uniq], dtype=float)
+    except KeyError as exc:
+        raise ValueError(f"keep-out solid element references node id {exc} absent "
+                         f"from every /NODE block in {path}") from exc
+    rows = np.searchsorted(uniq, tet_conn.ravel()).reshape(tet_conn.shape)
+    tet_xyz = coords[rows]                              # (V, 4, 3)
+    return tet_xyz, coords, sorted(found)

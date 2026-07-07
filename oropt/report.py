@@ -251,7 +251,7 @@ def _rows(s: Summary) -> list[tuple[str, str]]:
     else:
         verdict = "FEASIBLE" if s.feasible else "INFEASIBLE"
     return [
-        ("Optimiser", s.optimizer),
+        ("Optimizer", s.optimizer),
         ("Termination", f"{s.state or 'n/a'}"
                         + (f" — {s.message}" if s.message else "")),
         ("Iterations", str(s.iterations)),
@@ -634,7 +634,7 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
 </head>
 <body>
   <h1>oropt run report</h1>
-  <p class="meta">Optimiser <strong>{escape(s.optimizer)}</strong> &middot;
+  <p class="meta">Optimizer <strong>{escape(s.optimizer)}</strong> &middot;
      generated {escape(now)} &middot;
      <span class="badge {badge_cls}">{badge_txt}</span></p>
 {chr(10).join(parts)}
@@ -665,7 +665,7 @@ def _md(s: Summary, work: Path, charts: dict[str, Path],
     lines = [
         "# oropt run report",
         "",
-        f"Optimiser **{s.optimizer}** · generated {now}",
+        f"Optimizer **{s.optimizer}** · generated {now}",
         "",
         "## Summary",
         "",
