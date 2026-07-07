@@ -218,6 +218,44 @@ def overlay_primitives(boxes) -> list[dict]:
     return out
 
 
+def points_in_tets(points: np.ndarray, tet_xyz: np.ndarray) -> np.ndarray:
+    """Boolean mask: which *points* lie inside (or on) any tet of *tet_xyz*
+    ``(M, 4, 3)``.
+
+    Used to drop growth-mesh tets whose centroid falls inside the design part
+    (they would duplicate existing elements) and to test growth candidates
+    against keep-out geometry (a candidate inside a neighbour part is forbidden).
+
+    Complete by construction: every tet containing a point has its centroid
+    within that tet's own bounding radius of the point, so the KD-tree pass
+    (over the points, per-tet radius query) can never miss a hit; candidates are
+    then confirmed with an exact barycentric test."""
+    points = np.asarray(points, dtype=float)
+    out = np.zeros(len(points), dtype=bool)
+    if len(points) == 0 or len(tet_xyz) == 0:
+        return out
+    cent = tet_xyz.mean(axis=1)
+    rad = np.linalg.norm(tet_xyz - cent[:, None, :], axis=2).max(axis=1)
+    tree = cKDTree(points)
+    chunk = 65536
+    for s in range(0, len(tet_xyz), chunk):
+        e = min(s + chunk, len(tet_xyz))
+        hits = tree.query_ball_point(cent[s:e], rad[s:e] * (1.0 + 1e-9))
+        for j, idx in enumerate(hits):
+            idx = [i for i in idx if not out[i]]
+            if not idx:
+                continue
+            t = tet_xyz[s + j]
+            m = (t[:3] - t[3]).T                       # 3x3 barycentric basis
+            try:
+                lam = np.linalg.solve(m, (points[idx] - t[3]).T).T
+            except np.linalg.LinAlgError:              # degenerate tet
+                continue
+            ok = (lam >= -1e-9).all(axis=1) & (lam.sum(axis=1) <= 1.0 + 1e-9)
+            out[np.asarray(idx)[ok]] = True
+    return out
+
+
 @dataclass
 class Mesh:
     centroids: np.ndarray     # (N,3) element centroids

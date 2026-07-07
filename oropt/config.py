@@ -235,6 +235,19 @@ class Model:
     # carve=False region then degrades to carving (every in-region element
     # starts void), with a validation warning and a run-log note.
     growth_original_elem_max: Optional[int] = None
+    # Growth KEEP-OUT: an ADDITIONAL Radioss deck describing nearby parts that are
+    # NOT simulated (never solved). Their occupied volume is forbidden growth
+    # space: a growth-box candidate whose centroid lies inside these parts (within
+    # growth_keepout_clearance_mm) is held VOID every iteration -- it starts void
+    # like any candidate but is never grown, so the optimiser can never place
+    # material inside the neighbour parts. Path resolved relative to case_dir like
+    # the load-case decks. None (default) = feature off. growth_keepout_part_ids
+    # selects which /TETRA4 (or /BRICK) part ids in that deck form the keep-out
+    # (empty = all solid parts). growth_keepout_clearance_mm keeps a gap around the
+    # neighbour parts (0 = the parts' volume exactly).
+    growth_keepout_rad: Optional[str] = None
+    growth_keepout_part_ids: list = field(default_factory=list)
+    growth_keepout_clearance_mm: float = 0.0
 
     def __post_init__(self):
         fields = {f.name for f in dataclasses.fields(GrowthBox)}

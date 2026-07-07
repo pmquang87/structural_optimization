@@ -76,7 +76,7 @@ def test_resume_saves_onscreen_optimizer_change(tmp_path, monkeypatch):
     # the resume must persist the new optimiser, not the stale on-disk one.
     cfg_path = _make_stopped_run(tmp_path, optimizer="beso", max_iter=20, ckpt_iter=5)
     at, calls = _boot(cfg_path, monkeypatch)
-    sel = [s for s in at.selectbox if s.label == "Topology optimiser"][0]
+    sel = [s for s in at.selectbox if s.label == "Topology optimizer"][0]
     sel.set_value("levelset").run()
     at.button(key="resume_run").click().run()
     assert not at.exception

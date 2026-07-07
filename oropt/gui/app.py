@@ -249,7 +249,7 @@ def render_load_cases_tab(cfg: Config, cfg_path: Path) -> None:
 def render_camera_settings(opts: AnimateOpts, key_prefix: str) -> None:
     """Render the evolution-animation camera & playback widgets into *opts*.
 
-    Shared by the Optimiser / Output tab (settings the post-run animation will
+    Shared by the Optimizer / Output tab (settings the post-run animation will
     use) and the 🎬 Re-animate tab (settings for an on-demand re-render), so the two
     can never drift. Every widget writes straight back into the passed *opts*
     (an :class:`~oropt.config.AnimateOpts`); *key_prefix* keeps the two instances'
@@ -347,7 +347,7 @@ def render_appearance_settings(opts: AnimateOpts, key_prefix: str
                                ) -> tuple[bool, bool]:
     """Render the evolution-animation appearance & resolution widgets into *opts*.
 
-    Shared by the Optimiser / Output tab (the look the post-run animation will use)
+    Shared by the Optimizer / Output tab (the look the post-run animation will use)
     and the 🎬 Re-animate tab (an on-demand re-render), so the two can never drift — the
     same split as :func:`render_camera_settings`. Returns ``(color_ok, bg_ok)`` from
     the two colour pickers so the caller can gate its action button on valid
@@ -384,18 +384,18 @@ def render_appearance_settings(opts: AnimateOpts, key_prefix: str
     return color_ok, bg_ok
 
 
-# ---- Optimiser / Output tab ------------------------------------------------
+# ---- Optimizer / Output tab ------------------------------------------------
 def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     st.caption("Feasibility limits (σ_allow / d_allow) are now set **per load "
                "case** on the 🔀 Load cases tab.")
-    st.subheader("Optimiser")
+    st.subheader("Optimizer")
     _opts = ["beso", "levelset", "tobs", "hca"]
     _opt_labels = {"beso": "BESO — bi-directional element removal",
                    "levelset": "Level-set — smoother boundaries",
                    "tobs": "TOBS — binary ILP flips (Sivapuram & Picelli 2018)",
                    "hca": "HCA — hybrid cellular automata (LS-TaSC-style)"}
     opt_name = st.selectbox(
-        "Topology optimiser", _opts,
+        "Topology optimizer", _opts,
         index=_opts.index(cfg.optimizer_name()) if cfg.optimizer_name() in _opts else 0,
         format_func=lambda k: _opt_labels[k],
         help="Which algorithm drives the loop. All share the sensitivity pipeline "
@@ -591,6 +591,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
                 "throttled (validation warns otherwise). The Monitor's 3D view "
                 "outlines each region so you can place coordinates visually.")
+        _render_keepout(cfg)
         _render_growth_preview(cfg)
         _render_growth_mesh(cfg, cfg_path)
 
@@ -871,6 +872,50 @@ def _load_deck_mesh(starter_str: str, mtime: float, part_id: int, node_min: int)
     return deck, Mesh.from_deck(deck)
 
 
+def _render_keepout(cfg: Config) -> None:
+    """Growth keep-out: an additional Radioss deck of nearby parts (never solved)
+    whose occupied volume forbids growth. A candidate inside the neighbour parts
+    starts void but is held void every iteration, so the optimiser can never place
+    material there. The path is resolved relative to ``case_dir`` like the decks;
+    the counts show up in the 🔍 preview below.
+
+    Written straight onto ``cfg.model`` (the deferred-save pattern -- app.py
+    rebuilds cfg from YAML each rerun, so the sidebar 💾 Save persists what is on
+    screen)."""
+    with st.expander("🚧 Keep-out — forbid growth into neighbour parts"):
+        st.caption(
+            "An **additional** Radioss deck describing nearby parts that are "
+            "**not simulated** (never solved). Their occupied volume (their "
+            "actual mesh, not a bounding box) is **forbidden growth space**: a "
+            "growth candidate whose centroid falls inside those parts is held "
+            "**void** every iteration — it never becomes material, so the "
+            "optimiser cannot grow into the neighbour parts. Applied to both the "
+            "run and the ⚙️ growth-mesh step (no candidate tets are generated "
+            "there). Path is relative to the case directory, like the load-case "
+            "decks; leave blank to disable.")
+        cfg.model.growth_keepout_rad = (st.text_input(
+            "Keep-out deck (.rad, relative to case_dir)",
+            value=cfg.model.growth_keepout_rad or "",
+            placeholder="neighbour_parts_0000.rad",
+            help="A Radioss starter/deck with the nearby parts' /NODE + "
+                 "/TETRA4 (or /BRICK) blocks. Only geometry is read; it is "
+                 "never added to any solve.").strip() or None)
+        c = st.columns(2)
+        pids = c[0].text_input(
+            "Keep-out part ids (comma-sep, blank = all solid parts)",
+            value=",".join(str(x) for x in cfg.model.growth_keepout_part_ids),
+            help="Which /TETRA4 or /BRICK part ids in the keep-out deck form the "
+                 "forbidden space. Blank = every solid part in the deck.")
+        cfg.model.growth_keepout_part_ids = [
+            int(x) for x in pids.replace(" ", "").split(",") if x]
+        cfg.model.growth_keepout_clearance_mm = float(c[1].number_input(
+            "Clearance [mm]", value=float(cfg.model.growth_keepout_clearance_mm),
+            min_value=0.0, step=0.5, format="%.3f",
+            help="Keep a gap around the neighbour parts: a candidate within this "
+                 "distance of the neighbour geometry is forbidden too. 0 = the "
+                 "parts' volume exactly."))
+
+
 def _render_growth_preview(cfg: Config) -> None:
     """On-demand button: count how many design elements each growth region would
     start *void*, by loading the primary load case's starter deck in-process (pure
@@ -972,6 +1017,9 @@ def _render_growth_preview(cfg: Config) -> None:
            if preview.total_elements else 0.0)
     if preview.notice:
         st.warning(preview.notice)
+    if preview.keepout:
+        (st.error if "error" in preview.keepout else st.info)(
+            f"🚧 {preview.keepout}")
     if preview.group_guard:
         st.error(f"⚠ Run-start guard would abort: {preview.group_guard}")
     if preview.guard:
@@ -1614,7 +1662,7 @@ if qcol[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive)
 
 # ---- tabs (each body lives in a render_*_tab function above) ---------------
 tab_in, tab_lc, tab_con, tab_mon, tab_anim, tab_q = st.tabs(
-    ["📥 Input", "🔀 Load cases", "🎚 Optimiser / Output", "📊 Monitor",
+    ["📥 Input", "🔀 Load cases", "🎚 Optimizer / Output", "📊 Monitor",
      "🎬 Re-animate", "🧮 Queue"])
 with tab_in:
     render_input_tab(cfg)

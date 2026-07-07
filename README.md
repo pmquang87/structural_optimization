@@ -287,7 +287,7 @@ in progress.
   cylinder) so that local artefact can't keep the design infeasible or distort the
   loop's back-off. Unlike the keep-out set these elements are **not frozen** — they
   still take part in the optimisation; list them in `freeze_*` as well if you also
-  want to protect them from removal. Editable on the GUI's *Optimiser / Output* tab;
+  want to protect them from removal. Editable on the GUI's *Optimizer / Output* tab;
   the *Monitor* and report then note how many elements σ_max is ignoring.
   Every configured `/GRNOD/NODE` group id (`bc_group_id`, `freeze_group_ids`,
   `stress_exclude_group_ids`) is **validated at run start**: an id the deck
@@ -353,7 +353,7 @@ in progress.
   `/SKEW/FIX` on a `/BOX/RECTA` is read as the local frame); it is resolved to
   concrete geometry at run start.
 
-  Editable as a table on the GUI's *Optimiser / Output* tab (shape selector,
+  Editable as a table on the GUI's *Optimizer / Output* tab (shape selector,
   per-shape coordinate columns, a Deck /BOX id column, an *Oriented box
   frames* editor, and a *Polyhedron points* editor — one x/y/z row per node,
   matched to its region by Name); a **🔍 Preview region element counts** button loads the deck
@@ -384,7 +384,27 @@ in progress.
   wrapper; note TetGen itself is **AGPL-licensed** — fine to use, evaluate
   before redistributing a bundle). The generator only sees the design part, so
   keep regions clear of other parts (rigid bodies, shells). Full design study in
-  [`docs/add_material_boxes.md`](docs/add_material_boxes.md):
+  [`docs/add_material_boxes.md`](docs/add_material_boxes.md).
+
+  **Keep-out — forbid growth into neighbour parts** (`model.growth_keepout_rad`,
+  none by default) — a growth region may extend into space a *neighbour* part
+  occupies. Point `growth_keepout_rad` at an **additional** Radioss deck
+  describing those nearby parts (their `/NODE` + `/TETRA4`/`/BRICK` blocks) and
+  the region of any growth box that falls **inside those parts** is held **void
+  every iteration** — it starts void like any candidate but is never grown, so
+  the optimiser can never place material inside the neighbour parts. The keep-out
+  deck is **never solved** — only its geometry (the parts' actual mesh, not a
+  bounding box) is read — so it needn't be a runnable model. The path resolves
+  relative to `model.case_dir` like the load-case decks;
+  `growth_keepout_part_ids` selects which part ids form the keep-out (empty = all
+  solid parts) and `growth_keepout_clearance_mm` keeps a gap around them (a
+  candidate within that distance of the neighbour geometry is forbidden too). The
+  exclusion applies to **both** paths: the growth-mesh PREPARE step never
+  generates candidate tets inside the keep-out, and a pre-meshed run holds any
+  such candidates void. Editable in the **🚧 Keep-out** expander next to the
+  growth-region table; the 🔍 preview reports how many candidates it removes, and
+  validation errors on a missing/unparsable deck and warns on a no-op (no region
+  overlaps the neighbour parts). Example config keys below.
 
   ```yaml
   model:
@@ -416,13 +436,19 @@ in progress.
     # pointing the config at the extended decks; unset -> carve-off degrades to
     # carving, with a warning)
     growth_original_elem_max: 60123456
+    # keep-out: nearby parts (never solved) whose volume forbids growth; a
+    # candidate inside them is held void. Path relative to case_dir; part ids
+    # empty = all solid parts; clearance keeps a gap around the parts.
+    growth_keepout_rad: neighbour_parts_0000.rad
+    growth_keepout_part_ids: [70000000]
+    growth_keepout_clearance_mm: 0.0
   ```
 * `beso.protect_bc_nodes` (default `true`) — whether elements touching the BC
   node-group (`model.bc_group_id`) are frozen. Set it `false` to **allow the
   optimiser to delete material at the BC nodes** too; those nodes stay fixed via
   their own `/BCS` (so the solve is still well-posed) and continue to anchor
   connectivity, so floating islands are still dropped. Exposed as **Allow
-  deleting elements at BC nodes** on the GUI's *Optimiser / Output* tab.
+  deleting elements at BC nodes** on the GUI's *Optimizer / Output* tab.
 * `work_dir` — the run/output folder for scratch, checkpoints and status files.
   **Leave it blank to default to the input deck folder (`model.case_dir`)
   itself**, so a run writes its artefacts right next to the deck it optimises;
@@ -441,7 +467,7 @@ in progress.
   picks `tool_root/.venv` (where lasso-python/tqdm live), so oropt's own
   environment stays clean. It is best-effort: a missing tool, interpreter or
   dependency is logged and skipped, never failing the run. Also exposed as
-  **Post-processing — d3plot** on the GUI's *Optimiser / Output* tab.
+  **Post-processing — d3plot** on the GUI's *Optimizer / Output* tab.
 * `smooth` — surface smoothing of the optimised geometry, **on by default**
   (`smooth.enabled: true`). Extracts the design surface, smooths it
   (`method: taubin` volume-preserving, or `laplacian`; `iterations` passes) and
