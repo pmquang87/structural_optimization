@@ -10,6 +10,7 @@ import difflib
 import filecmp
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -569,6 +570,31 @@ def iter0_archive_dir(work: Path, stem: str, n_cases: int) -> Path:
     return d / stem if n_cases > 1 else d
 
 
+def copy_iter0(src_run: str | Path, dst_run: str | Path,
+               overwrite: bool = False) -> tuple[bool, str]:
+    """Copy an ``iter_0000`` from *src_run* into *dst_run* to seed a solve reuse.
+
+    Copies the whole ``iter_0000`` tree (so single- and multi-case layouts both
+    work), which the loop then validates and reuses at iteration 0 (see
+    :func:`reuse_iter0_solve` — the byte-compare of the starter deck means a copy
+    from a different model is refused at solve time, so this copy is safe to offer).
+    Returns ``(ok, message)``: refuses when the source has no ``iter_0000``, when
+    source and destination are the same folder, or when the destination already has
+    one and *overwrite* is False."""
+    src = Path(src_run) / "iter_0000"
+    dst = Path(dst_run) / "iter_0000"
+    if not src.is_dir():
+        return False, f"no iter_0000 folder in {src_run}"
+    if src.resolve() == dst.resolve():
+        return False, "source and destination run folders are the same"
+    if dst.exists():
+        if not overwrite:
+            return False, "this run already has an iter_0000 (enable overwrite to replace)"
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    return True, f"copied iter_0000 from {src_run}"
+
+
 def reuse_iter0_solve(reuse_dir: Path, solve_dir: Path, stem: str,
                       starter: Path, log: Callable[[str], None] = print
                       ) -> Optional[RunResult]:
@@ -649,6 +675,67 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
     return res, extract(cfg, solve_dir, stem=case.stem,
                         disp_node_ids=[dc.node_id for dc in case.disp_constraints],
                         exclude_element_ids=exclude_elem_ids)
+
+
+def _sequential_contract(results: list) -> tuple[list, list]:
+    """``(run_results, case_results)`` from per-case ``(run_result, results)`` in
+    case order, stopping at the first failed case.
+
+    Reproduces the sequential loop's shape regardless of how the solves were
+    dispatched: ``case_results`` is the successful prefix, ``run_results`` ends at
+    the first failure (``results is None``). The downstream failure handling then
+    reads ``run_results[-1]`` as the failure and ``cases[len(case_results)]`` as the
+    case that failed — unchanged whether cases ran one at a time or concurrently."""
+    run_results: list = []
+    case_results: list = []
+    for res, r in results:
+        run_results.append(res)
+        if r is None:
+            break
+        case_results.append(r)
+    return run_results, case_results
+
+
+def _solve_cases(cfg: Config, cases, case_decks, alive, no_pin, solve_root,
+                 n_cases, exclude_elem_ids, fast_ties, reuse_dirs, status, work,
+                 it, log) -> tuple[list, list]:
+    """Solve every load case for iteration *it* and return the sequential-contract
+    ``(run_results, case_results)``.
+
+    ``run.solver_concurrency`` (clamped to ``[1, n_cases]``) sets how many of the
+    iteration's independent per-case solves run at once. Each case solves in its
+    own ``solve/case_<i>/`` dir (see :func:`_case_solve_dir`) into its own
+    subprocess, so they are independent; ``concurrency == 1`` keeps the exact
+    sequential path (per-case live activity, stop at the first failure). >1 uses a
+    thread pool (the work is subprocess-bound) and reconstructs the same contract,
+    so downstream handling is identical."""
+    def solve_one(i: int):
+        return _solve_case(cfg, cases[i], case_decks[i], alive, no_pin,
+                           _case_solve_dir(solve_root, n_cases, i), cfg.run.anim_dt,
+                           exclude_elem_ids, fast_tie=fast_ties[i],
+                           reuse_dir=reuse_dirs[i], log=log)
+
+    conc = max(1, min(int(getattr(cfg.run, "solver_concurrency", 1)), n_cases))
+    if conc == 1:
+        results: list = []
+        for i in range(n_cases):
+            status.state = "running"; status.iteration = it
+            status.activity = _solve_activity(it, cases[i], i, n_cases)
+            st.write_status(work, status)
+            res, r = solve_one(i)
+            results.append((res, r))
+            if r is None:                        # stop at the first failure
+                break
+        return _sequential_contract(results)
+
+    status.state = "running"; status.iteration = it
+    status.activity = (f"iter {it}: solving {n_cases} load cases, "
+                       f"{conc} concurrently")
+    st.write_status(work, status)
+    with ThreadPoolExecutor(max_workers=conc) as ex:
+        futs = {i: ex.submit(solve_one, i) for i in range(n_cases)}
+        results = [futs[i].result() for i in range(n_cases)]   # index order; re-raises
+    return _sequential_contract(results)
 
 
 def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int,
@@ -886,30 +973,17 @@ def run_optimization(cfg: Config, resume: bool = False,
             log(f"[oropt] iter {it}: vf={opt.volume_fraction(alive):.3f} "
                 f"alive={int(alive.sum())} -> solving "
                 + (f"{n_cases} load cases ..." if n_cases > 1 else "..."))
-            # ---- solve every load case (sequentially, each in its own dir) -
+            # ---- solve every load case (up to run.solver_concurrency at once,
+            # each in its own dir). Iteration 0 only: reuse an already-present
+            # (e.g. copied) matching iter_0000 solve per case instead of re-running
+            # the full-volume solve.
             t0 = time.time()
-            run_results: list = []
-            case_results = []
-            for i, (case, cdeck) in enumerate(zip(cases, case_decks)):
-                csolve = _case_solve_dir(solve_root, n_cases, i)
-                # Publish the live activity BEFORE the solve so the GUI shows what
-                # is running during the minutes it takes (fast linear vs nonlinear).
-                status.state = "running"
-                status.iteration = it
-                status.activity = _solve_activity(it, case, i, n_cases)
-                st.write_status(work, status)
-                # Iteration 0 only: reuse an already-present (e.g. copied) matching
-                # iter_0000 solve instead of re-running the full-volume solve.
-                reuse_dir = (iter0_archive_dir(work, case.stem, n_cases)
-                             if it == 0 and cfg.run.reuse_iter0 else None)
-                res, r = _solve_case(cfg, case, cdeck, alive, no_pin,
-                                     csolve, cfg.run.anim_dt, exclude_elem_ids,
-                                     fast_tie=fast_ties[i],
-                                     reuse_dir=reuse_dir, log=log)
-                run_results.append(res)
-                if r is None:                       # this case failed -> abort iter
-                    break
-                case_results.append(r)
+            reuse_dirs = [iter0_archive_dir(work, case.stem, n_cases)
+                          if it == 0 and cfg.run.reuse_iter0 else None
+                          for case in cases]
+            run_results, case_results = _solve_cases(
+                cfg, cases, case_decks, alive, no_pin, solve_root, n_cases,
+                exclude_elem_ids, fast_ties, reuse_dirs, status, work, it, log)
             iter_wall = time.time() - t0
             elapsed += iter_wall
 

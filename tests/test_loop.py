@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import oropt.loop as loop
 from oropt.config import Config
-from oropt.loop import (_archive_iteration, _clean_solve_dir,
-                        iter0_archive_dir, resume_warnings, reuse_iter0_solve,
-                        snapshot_config_used)
+from oropt.loop import (_archive_iteration, _clean_solve_dir, _sequential_contract,
+                        _solve_cases, copy_iter0, iter0_archive_dir,
+                        resume_warnings, reuse_iter0_solve, snapshot_config_used)
+from oropt.runner import RunResult
+from oropt.status import Status
 
 # A realistic per-load-case stem (the kind that lives on a load case).
 MULTILOAD_STEM = "implicit_elevator-linkage_pull"
@@ -257,3 +260,93 @@ def test_reuse_iter0_missing_animation_solves_fresh(tmp_path):
     logs: list[str] = []
     assert reuse_iter0_solve(reuse, solve, "gp", starter, log=logs.append) is None
     assert any("no reusable" in m for m in logs)
+
+
+# ---- copy_iter0 (GUI seed tool) --------------------------------------------
+def test_copy_iter0_copies_tree(tmp_path):
+    src, dst = tmp_path / "old", tmp_path / "new"
+    (src / "iter_0000" / "pull").mkdir(parents=True)       # multi-case layout
+    (src / "iter_0000" / "pull" / "pullA001").write_bytes(b"anim")
+    dst.mkdir()
+    ok, msg = copy_iter0(src, dst)
+    assert ok and (dst / "iter_0000" / "pull" / "pullA001").is_file()
+
+
+def test_copy_iter0_refuses_missing_source(tmp_path):
+    ok, msg = copy_iter0(tmp_path / "old", tmp_path / "new")
+    assert not ok and "no iter_0000" in msg
+
+
+def test_copy_iter0_refuses_existing_without_overwrite_then_overwrites(tmp_path):
+    src, dst = tmp_path / "old", tmp_path / "new"
+    (src / "iter_0000").mkdir(parents=True)
+    (src / "iter_0000" / "gpA001").write_bytes(b"new-anim")
+    (dst / "iter_0000").mkdir(parents=True)
+    (dst / "iter_0000" / "stale").write_text("old", encoding="utf-8")
+    ok, msg = copy_iter0(src, dst)                          # exists, no overwrite
+    assert not ok and "already has an iter_0000" in msg
+    ok, _ = copy_iter0(src, dst, overwrite=True)            # overwrite replaces
+    assert ok and (dst / "iter_0000" / "gpA001").is_file()
+    assert not (dst / "iter_0000" / "stale").exists()       # stale content gone
+
+
+def test_copy_iter0_refuses_same_folder(tmp_path):
+    (tmp_path / "iter_0000").mkdir()
+    ok, msg = copy_iter0(tmp_path, tmp_path)
+    assert not ok and "same" in msg
+
+
+# ---- concurrent per-iteration solves ---------------------------------------
+def test_sequential_contract_stops_at_first_failure():
+    ok = RunResult(ok=True, stage="ok", message="")
+    bad = RunResult(ok=False, stage="engine", message="boom")
+    # case 1 failed -> case_results is the [case 0] prefix, run_results ends at the
+    # failure so run_results[-1] is it and cases[len(case_results)] == the failure.
+    run_results, case_results = _sequential_contract(
+        [(ok, "r0"), (bad, None), (ok, "r2")])
+    assert len(case_results) == 1 and case_results == ["r0"]
+    assert len(run_results) == 2 and run_results[-1] is bad
+
+
+def _fake_cases(n):
+    from types import SimpleNamespace
+    return [SimpleNamespace(name=f"c{i}", stem=f"c{i}", fast_mode=False,
+                            disp_constraints=[]) for i in range(n)]
+
+
+def test_solve_cases_concurrent_runs_all_in_order(tmp_path, monkeypatch):
+    cfg = Config(); cfg.run.solver_concurrency = 3
+    cases = _fake_cases(3)
+    calls: list[int] = []
+
+    def fake_solve(cfg, case, cdeck, alive, no_pin, solve_dir, anim_dt,
+                   exclude, fast_tie=None, reuse_dir=None, log=print):
+        calls.append(int(case.stem[1:]))
+        return RunResult(ok=True, stage="ok", message=""), f"res-{case.stem}"
+    monkeypatch.setattr(loop, "_solve_case", fake_solve)
+
+    run_results, case_results = _solve_cases(
+        cfg, cases, [None] * 3, alive=None, no_pin=set(), solve_root=tmp_path,
+        n_cases=3, exclude_elem_ids=None, fast_ties=[None] * 3,
+        reuse_dirs=[None] * 3, status=Status(), work=tmp_path, it=0, log=lambda *_: None)
+    assert sorted(calls) == [0, 1, 2]                       # every case solved
+    assert case_results == ["res-c0", "res-c1", "res-c2"]   # collected in order
+
+
+def test_solve_cases_concurrent_failure_truncates(tmp_path, monkeypatch):
+    cfg = Config(); cfg.run.solver_concurrency = 3
+    cases = _fake_cases(3)
+
+    def fake_solve(cfg, case, cdeck, alive, no_pin, solve_dir, anim_dt,
+                   exclude, fast_tie=None, reuse_dir=None, log=print):
+        if case.stem == "c1":
+            return RunResult(ok=False, stage="engine", message="boom"), None
+        return RunResult(ok=True, stage="ok", message=""), f"res-{case.stem}"
+    monkeypatch.setattr(loop, "_solve_case", fake_solve)
+
+    run_results, case_results = _solve_cases(
+        cfg, cases, [None] * 3, alive=None, no_pin=set(), solve_root=tmp_path,
+        n_cases=3, exclude_elem_ids=None, fast_ties=[None] * 3,
+        reuse_dirs=[None] * 3, status=Status(), work=tmp_path, it=0, log=lambda *_: None)
+    assert case_results == ["res-c0"]                       # prefix before failure
+    assert not run_results[-1].ok                           # ends at the failure
