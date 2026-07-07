@@ -241,6 +241,24 @@ def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray
              phi=(phi if phi is not None else np.array([])))
 
 
+def checkpoint_iteration(work_dir: str | Path) -> Optional[int]:
+    """The iteration a resume would start from (``None`` when no checkpoint).
+
+    Reads only the scalar ``iteration`` member of ``checkpoint.npz`` (not the
+    multi-MB alive-mask / phi arrays), so the GUI can cheaply show "continues
+    from iteration N" and size an "N more iterations" extension without loading
+    the whole checkpoint every rerun. This equals the loop's ``start_iter``
+    (``save_checkpoint`` stores ``it + 1`` after each completed iteration)."""
+    p = Path(work_dir) / CHECKPOINT
+    if not p.exists():
+        return None
+    try:
+        with np.load(p) as d:
+            return int(d["iteration"])
+    except (OSError, KeyError, ValueError):
+        return None
+
+
 def load_checkpoint(work_dir: str | Path) -> Optional[dict]:
     p = Path(work_dir) / CHECKPOINT
     if not p.exists():

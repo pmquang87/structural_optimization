@@ -19,6 +19,10 @@ runs/
 *_0001.out
 *.h3d
 
+# LS-PrePost session artefacts (land next to decks when viewing the d3plot)
+lspost.cfile
+lspost.msg
+
 # GUI run-queue state (disk-backed serial queue + its lock)
 run_queue.json
 run_queue.json.*

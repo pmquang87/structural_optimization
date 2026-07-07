@@ -51,6 +51,12 @@ def test_read_log_tail_returns_last_n_nonblank_lines(tmp_path):
     assert st.read_log_tail(tmp_path, n=1) == "line3"            # only the tail
 
 
+def test_checkpoint_iteration_reads_only_the_scalar(tmp_path):
+    assert st.checkpoint_iteration(tmp_path) is None          # no checkpoint yet
+    st.save_checkpoint(tmp_path, 7, np.array([True, False, True]))
+    assert st.checkpoint_iteration(tmp_path) == 7             # == loop's start_iter
+
+
 def test_checkpoint_roundtrip(tmp_path):
     alive = np.array([True, False, True, True])
     sens = np.array([1.0, 2, 3, 4])

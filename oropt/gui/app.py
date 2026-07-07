@@ -1520,9 +1520,27 @@ c1, c2 = st.sidebar.columns(2)
 if c1.button("⏸ Stop", disabled=not running, width="stretch"):
     request_stop(live_dir)
     st.sidebar.info("Stop requested (after current solve).")
-if c2.button("↻ Resume", disabled=running, width="stretch"):
-    launch_run(cfg_path, resume=True)   # resumes the selected config's run from checkpoint
-    st.sidebar.success("Resumed.")
+# ↻ Resume = continue the selected config's run from its last checkpoint. The
+# resume itself is *deferred* to after the tabs render (see below) so the loop
+# re-reads the on-screen config — you can change parameters or even the optimiser
+# and continue, instead of silently resuming the stale on-disk settings. Needs a
+# checkpoint (a run that started) and no live run.
+resume_next_iter = st_io.checkpoint_iteration(work)     # loop's start_iter, or None
+can_resume = (not running) and resume_next_iter is not None
+resume_clicked = c2.button(
+    "↻ Resume", disabled=not can_resume, width="stretch", key="resume_run",
+    help="Continue this run from its last checkpoint. On-screen parameter / "
+         "optimiser edits are saved first, so you can change settings before "
+         "continuing (switching optimiser reuses the current geometry; the "
+         "level-set field re-initialises). Set '+ more iterations' to run past "
+         "where it stopped.")
+add_iters = int(st.sidebar.number_input(
+    "↻ + more iterations", min_value=0, max_value=1000, value=0, step=10,
+    key="resume_add_iters", disabled=not can_resume,
+    help="Extend the run by this many iterations beyond where it stopped"
+         + (f" (next iteration: {resume_next_iter})." if can_resume else ".")
+         + " 0 = continue with the config's current max_iter; a run that already"
+           " reached max_iter needs this or there is nothing left to do."))
 if st.sidebar.button("⏹ Force kill", disabled=not running):
     force_kill(live_dir)
 
@@ -1587,3 +1605,26 @@ if add_to_queue_clicked:
         q, snap, resume=False,
         work_dir=qs.resolve_work_dir(snap, PROJECT_ROOT)))
     st.rerun()
+
+# ---- deferred resume/continue action ---------------------------------------
+# Also deferred to here so the loop resumes the *on-screen* config: every tab has
+# now written its widgets back into `cfg`, so a changed parameter or optimiser is
+# saved before the resume launches (the immediate-launch button used to drop
+# them). Optionally extend the active optimiser's max_iter so the run continues
+# past where it stopped — a run that already reached max_iter has an empty
+# range(start_iter, max_iter) otherwise, so nothing would happen.
+if resume_clicked:
+    oc = cfg.active_opts()
+    target = int(resume_next_iter) + add_iters if add_iters > 0 else oc.max_iter
+    if resume_next_iter >= target:
+        st.sidebar.warning(
+            f"Already at iteration {resume_next_iter} ≥ max_iter {target} — "
+            "nothing to continue. Set '↻ + more iterations' above (or raise "
+            "Max iterations on the Optimiser tab) and click ↻ Resume again.")
+    else:
+        oc.max_iter = target                        # extension (or unchanged)
+        cfg.to_yaml(cfg_path)                        # persist on-screen edits first
+        launch_run(cfg_path, resume=True)
+        st.sidebar.success(
+            f"Continuing {cfg.optimizer_name()} from iteration {resume_next_iter} "
+            f"→ max_iter {target}.")
