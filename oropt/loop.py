@@ -235,6 +235,17 @@ def stress_exclude_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
     return mesh.protected_mask(deck, nodes, contact_dist=0.0, layers=0)
 
 
+def active_growth_boxes(model) -> list:
+    """The growth boxes that take effect at run time: the configured list, or
+    none when growth is switched off (``model.growth_enabled`` False). The boxes
+    stay on ``model`` either way so the GUI preserves them across a toggle — this
+    is the single gate the run-time consumers (candidate / blocked masks) share,
+    so a disabled config can never grow material regardless of leftover boxes."""
+    if not getattr(model, "growth_enabled", True):
+        return []
+    return getattr(model, "growth_boxes", []) or []
+
+
 def resolve_growth_boxes(deck: Deck, boxes) -> list:
     """Return *boxes* with every ``deck_box_id`` reference resolved to concrete
     geometry read from the starter deck's ``/BOX/{RECTA,SPHER,CYLIN}`` cards.
@@ -333,7 +344,7 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
       even through other candidates): a non-conformal interface —
       ``keep_connected`` would drop anything grown there as a floating island.
     """
-    boxes = resolve_growth_boxes(deck, getattr(model, "growth_boxes", []) or [])
+    boxes = resolve_growth_boxes(deck, active_growth_boxes(model))
     if not boxes:
         return np.zeros(deck.n_design_elements, dtype=bool)
     keepout = resolve_keepout(model, getattr(model, "case_dir", "."))
@@ -425,7 +436,7 @@ def growth_blocked_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
     deck is configured. The loop re-applies this after each optimiser update
     (and the auto-mesh PREPARE step simply never generates candidate tets here),
     so pre-meshed and auto-meshed workflows both honour the keep-out."""
-    boxes = resolve_growth_boxes(deck, getattr(model, "growth_boxes", []) or [])
+    boxes = resolve_growth_boxes(deck, active_growth_boxes(model))
     empty = np.zeros(deck.n_design_elements, dtype=bool)
     if not boxes:
         return empty

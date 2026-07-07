@@ -439,6 +439,15 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         int(x) for x in sn.replace(" ", "").split(",") if x]
 
     st.subheader("Growth regions — add material")
+    cfg.model.growth_enabled = st.checkbox(
+        "Enable growth regions",
+        value=getattr(cfg.model, "growth_enabled", True),
+        help="On: design elements whose centroid lies in a region below "
+             "start VOID and the optimiser may add material there. Off: the "
+             "regions are kept in the config (coordinates preserved) but "
+             "ignored, so the run solves the part as-is. Leftover regions "
+             "from an earlier run stay dormant until you tick this -- they "
+             "can't silently drive a run.")
     st.caption(
         "Regions (like the LS-DYNA `*DEFINE_BOX` / Radioss `/BOX/RECTA` family) "
         "marking **candidate growth material**: design elements whose centroid "
@@ -465,135 +474,141 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "overlapped original elements start void too. A row may reference a "
         "`/BOX/{RECTA,SPHER,CYLIN}` card in the deck by **Deck /BOX id** instead of "
         "coordinates; oriented (local-frame) boxes are set below.")
-    # Capture the oriented-frame and polyhedron-point rows BEFORE the main table
-    # below overwrites cfg.model.growth_boxes (which carries the loaded frames/
-    # points): those editors are seeded from here and their results re-applied by
-    # name, so frames and points survive the main table's shape/coordinate
-    # round-trip instead of being silently dropped.
-    frame_records = records_from_frames(cfg.model.growth_boxes)
-    point_records = records_from_points(cfg.model.growth_boxes)
-    _num_cols = [c for c in BOX_COLUMNS
-                 if c not in ("name", "shape", "carve", "deck_box_id")]
-    gb_df = pd.DataFrame(records_from_growth_boxes(cfg.model.growth_boxes),
-                         columns=BOX_COLUMNS)
-    gb_edited = st.data_editor(
-        gb_df, num_rows="dynamic", width="stretch",
-        key="growth_boxes_editor", column_config={
-            "name": st.column_config.TextColumn(
-                "Name", help="Label for run-log / validation messages, and how a "
-                             "frame below is matched to a box."),
-            "shape": st.column_config.SelectboxColumn(
-                "Shape", options=["box", "sphere", "cylinder", "polyhedron"],
-                default="box",
-                help="box = two corners; sphere = centre+radius; "
-                     "cylinder = two axis end-points + radius; polyhedron = "
-                     "convex hull of the node list in the points table below."),
-            "carve": st.column_config.CheckboxColumn(
-                "Carve part", default=False,
-                help="Unchecked (default): the original part stays alive; "
-                     "only expansion elements (ids above the original-part "
-                     "boundary below) start void. Checked: original-part "
-                     "elements inside the region start void too — deliberate "
-                     "carve-and-regrow."),
-            "deck_box_id": st.column_config.NumberColumn(
-                "Deck /BOX id", format="%d", step=1,
-                help="Reference a /BOX/{RECTA,SPHER,CYLIN} card in the deck by id "
-                     "instead of coordinates; resolved at run start. Leave blank "
-                     "to use the coordinates in this row."),
-            **{k: st.column_config.NumberColumn(
-                k, format="%.3f",
-                help="Coordinate in model units (e.g. mm); fill the columns "
-                     "the row's shape needs.")
-               for k in _num_cols},
-        })
-    cfg.model.growth_boxes = growth_boxes_from_records(
-        gb_edited.to_dict("records"))
-    if cfg.model.growth_boxes:
-        # Oriented boxes (advanced): a local frame turns the box bounds into a skew
-        # system (LS-DYNA *DEFINE_BOX_LOCAL). Edited in its own name-keyed table so
-        # the 3-vectors fit; applied back onto the matching box rows.
-        with st.expander("Oriented box frames (advanced)"):
-            st.caption(
-                "Give a **box** a local frame: an origin, a local +x direction "
-                "(`ax,ay,az`) and a vector in the local +xy plane (`bx,by,bz`) — "
-                "Gram-Schmidt-orthonormalised, so the box bounds are measured in "
-                "that skew system. Match a row to a box by **Region** (its Name); "
-                "leave a row blank for an axis-aligned box. Sphere/cylinder regions "
-                "can't be oriented.")
-            fr_df = pd.DataFrame(frame_records, columns=FRAME_COLUMNS)
-            fr_edited = st.data_editor(
-                fr_df, num_rows="dynamic", width="stretch",
-                key="growth_frames_editor", column_config={
-                    "name": st.column_config.TextColumn(
-                        "Region", help="Must match a box row's Name."),
-                    **{k: st.column_config.NumberColumn(k, format="%.3f")
-                       for k in FRAME_COLUMNS[1:]},
-                })
-            cfg.model.growth_boxes = apply_frame_records(
-                cfg.model.growth_boxes, fr_edited.to_dict("records"))
-        # Polyhedron node lists: N points of 3 coordinates don't fit the fixed
-        # columns above, so each polyhedron region's nodes are edited here — one
-        # x/y/z row per node, matched to its region by Name (the frames pattern).
-        if point_records or any(b.shape_kind() == "polyhedron"
-                                for b in cfg.model.growth_boxes):
-            with st.expander("Polyhedron points (one row per node)",
-                             expanded=True):
+    if cfg.model.growth_enabled:
+        # Capture the oriented-frame and polyhedron-point rows BEFORE the main table
+        # below overwrites cfg.model.growth_boxes (which carries the loaded frames/
+        # points): those editors are seeded from here and their results re-applied by
+        # name, so frames and points survive the main table's shape/coordinate
+        # round-trip instead of being silently dropped.
+        frame_records = records_from_frames(cfg.model.growth_boxes)
+        point_records = records_from_points(cfg.model.growth_boxes)
+        _num_cols = [c for c in BOX_COLUMNS
+                     if c not in ("name", "shape", "carve", "deck_box_id")]
+        gb_df = pd.DataFrame(records_from_growth_boxes(cfg.model.growth_boxes),
+                             columns=BOX_COLUMNS)
+        gb_edited = st.data_editor(
+            gb_df, num_rows="dynamic", width="stretch",
+            key="growth_boxes_editor", column_config={
+                "name": st.column_config.TextColumn(
+                    "Name", help="Label for run-log / validation messages, and how a "
+                                 "frame below is matched to a box."),
+                "shape": st.column_config.SelectboxColumn(
+                    "Shape", options=["box", "sphere", "cylinder", "polyhedron"],
+                    default="box",
+                    help="box = two corners; sphere = centre+radius; "
+                         "cylinder = two axis end-points + radius; polyhedron = "
+                         "convex hull of the node list in the points table below."),
+                "carve": st.column_config.CheckboxColumn(
+                    "Carve part", default=False,
+                    help="Unchecked (default): the original part stays alive; "
+                         "only expansion elements (ids above the original-part "
+                         "boundary below) start void. Checked: original-part "
+                         "elements inside the region start void too — deliberate "
+                         "carve-and-regrow."),
+                "deck_box_id": st.column_config.NumberColumn(
+                    "Deck /BOX id", format="%d", step=1,
+                    help="Reference a /BOX/{RECTA,SPHER,CYLIN} card in the deck by id "
+                         "instead of coordinates; resolved at run start. Leave blank "
+                         "to use the coordinates in this row."),
+                **{k: st.column_config.NumberColumn(
+                    k, format="%.3f",
+                    help="Coordinate in model units (e.g. mm); fill the columns "
+                         "the row's shape needs.")
+                   for k in _num_cols},
+            })
+        cfg.model.growth_boxes = growth_boxes_from_records(
+            gb_edited.to_dict("records"))
+        if cfg.model.growth_boxes:
+            # Oriented boxes (advanced): a local frame turns the box bounds into a skew
+            # system (LS-DYNA *DEFINE_BOX_LOCAL). Edited in its own name-keyed table so
+            # the 3-vectors fit; applied back onto the matching box rows.
+            with st.expander("Oriented box frames (advanced)"):
                 st.caption(
-                    "Define a **polyhedron** region by its nodes: one row per "
-                    "node, **all three coordinates explicit** (a row missing "
-                    "any coordinate is dropped — nothing is defaulted or "
-                    "inferred). Match rows to a region by **Region** (its "
-                    "Name); give at least 4 non-coplanar points. The region is "
-                    "the points' **convex hull** (an arbitrary warped 8-node "
-                    "brick is the convex case; a non-convex point set is "
-                    "treated as its hull).")
-                pt_df = pd.DataFrame(point_records, columns=POINT_COLUMNS)
-                pt_edited = st.data_editor(
-                    pt_df, num_rows="dynamic", width="stretch",
-                    key="growth_points_editor", column_config={
+                    "Give a **box** a local frame: an origin, a local +x direction "
+                    "(`ax,ay,az`) and a vector in the local +xy plane (`bx,by,bz`) — "
+                    "Gram-Schmidt-orthonormalised, so the box bounds are measured in "
+                    "that skew system. Match a row to a box by **Region** (its Name); "
+                    "leave a row blank for an axis-aligned box. Sphere/cylinder regions "
+                    "can't be oriented.")
+                fr_df = pd.DataFrame(frame_records, columns=FRAME_COLUMNS)
+                fr_edited = st.data_editor(
+                    fr_df, num_rows="dynamic", width="stretch",
+                    key="growth_frames_editor", column_config={
                         "name": st.column_config.TextColumn(
-                            "Region", help="Must match a polyhedron row's Name."),
+                            "Region", help="Must match a box row's Name."),
                         **{k: st.column_config.NumberColumn(k, format="%.3f")
-                           for k in POINT_COLUMNS[1:]},
+                           for k in FRAME_COLUMNS[1:]},
                     })
-                cfg.model.growth_boxes = apply_point_records(
-                    cfg.model.growth_boxes, pt_edited.to_dict("records"))
-        if any(not b.carve for b in cfg.model.growth_boxes):
-            # Carve-off regions need the original/expansion element-id boundary;
-            # the ⚙️ growth-mesh "use these decks" button records it, the 🔍
-            # preview button auto-fills it from the deck, and this input covers
-            # hand-pre-meshed decks (and shows what was recorded/derived). The
-            # widget is session-state-driven (no value=) so the preview's
-            # auto-fill — stashed on click, because this widget is already
-            # instantiated by then — can update what it shows on its rerun.
-            _auto = st.session_state.pop("growth_orig_elem_max_autofill", None)
-            if _auto is not None:
-                st.session_state["growth_orig_elem_max"] = int(_auto)
-            elif "growth_orig_elem_max" not in st.session_state:
-                st.session_state["growth_orig_elem_max"] = int(
-                    cfg.model.growth_original_elem_max or 0)
-            _thr = st.number_input(
-                "Original part: highest element id (for carve-off regions)",
-                min_value=0, step=1, format="%d",
-                key="growth_orig_elem_max",
-                help="Elements with an id up to this are the ORIGINAL part and "
-                     "stay alive inside regions with Carve part unchecked; ids "
-                     "above are expansion material and start void. The ⚙️ "
-                     "growth-mesh step's *use these decks* button records it, "
-                     "and 🔍 *Preview region element counts* auto-fills it with "
-                     "the deck's highest design element id while it is unset. "
-                     "0 = unset: nothing is identifiable as original, so "
-                     "carve-off regions void everything inside (validation "
-                     "warns).")
-            cfg.model.growth_original_elem_max = int(_thr) or None
-        st.info(f"{len(cfg.model.growth_boxes)} growth region(s): their elements "
-                "start void and may be grown into. With BESO, keep "
-                "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
-                "throttled (validation warns otherwise). The Monitor's 3D view "
-                "outlines each region so you can place coordinates visually.")
-        _render_keepout(cfg)
-        _render_growth_preview(cfg)
-        _render_growth_mesh(cfg, cfg_path)
+                cfg.model.growth_boxes = apply_frame_records(
+                    cfg.model.growth_boxes, fr_edited.to_dict("records"))
+            # Polyhedron node lists: N points of 3 coordinates don't fit the fixed
+            # columns above, so each polyhedron region's nodes are edited here — one
+            # x/y/z row per node, matched to its region by Name (the frames pattern).
+            if point_records or any(b.shape_kind() == "polyhedron"
+                                    for b in cfg.model.growth_boxes):
+                with st.expander("Polyhedron points (one row per node)",
+                                 expanded=True):
+                    st.caption(
+                        "Define a **polyhedron** region by its nodes: one row per "
+                        "node, **all three coordinates explicit** (a row missing "
+                        "any coordinate is dropped — nothing is defaulted or "
+                        "inferred). Match rows to a region by **Region** (its "
+                        "Name); give at least 4 non-coplanar points. The region is "
+                        "the points' **convex hull** (an arbitrary warped 8-node "
+                        "brick is the convex case; a non-convex point set is "
+                        "treated as its hull).")
+                    pt_df = pd.DataFrame(point_records, columns=POINT_COLUMNS)
+                    pt_edited = st.data_editor(
+                        pt_df, num_rows="dynamic", width="stretch",
+                        key="growth_points_editor", column_config={
+                            "name": st.column_config.TextColumn(
+                                "Region", help="Must match a polyhedron row's Name."),
+                            **{k: st.column_config.NumberColumn(k, format="%.3f")
+                               for k in POINT_COLUMNS[1:]},
+                        })
+                    cfg.model.growth_boxes = apply_point_records(
+                        cfg.model.growth_boxes, pt_edited.to_dict("records"))
+            if any(not b.carve for b in cfg.model.growth_boxes):
+                # Carve-off regions need the original/expansion element-id boundary;
+                # the ⚙️ growth-mesh "use these decks" button records it, the 🔍
+                # preview button auto-fills it from the deck, and this input covers
+                # hand-pre-meshed decks (and shows what was recorded/derived). The
+                # widget is session-state-driven (no value=) so the preview's
+                # auto-fill — stashed on click, because this widget is already
+                # instantiated by then — can update what it shows on its rerun.
+                _auto = st.session_state.pop("growth_orig_elem_max_autofill", None)
+                if _auto is not None:
+                    st.session_state["growth_orig_elem_max"] = int(_auto)
+                elif "growth_orig_elem_max" not in st.session_state:
+                    st.session_state["growth_orig_elem_max"] = int(
+                        cfg.model.growth_original_elem_max or 0)
+                _thr = st.number_input(
+                    "Original part: highest element id (for carve-off regions)",
+                    min_value=0, step=1, format="%d",
+                    key="growth_orig_elem_max",
+                    help="Elements with an id up to this are the ORIGINAL part and "
+                         "stay alive inside regions with Carve part unchecked; ids "
+                         "above are expansion material and start void. The ⚙️ "
+                         "growth-mesh step's *use these decks* button records it, "
+                         "and 🔍 *Preview region element counts* auto-fills it with "
+                         "the deck's highest design element id while it is unset. "
+                         "0 = unset: nothing is identifiable as original, so "
+                         "carve-off regions void everything inside (validation "
+                         "warns).")
+                cfg.model.growth_original_elem_max = int(_thr) or None
+            st.info(f"{len(cfg.model.growth_boxes)} growth region(s): their elements "
+                    "start void and may be grown into. With BESO, keep "
+                    "`max_add_ratio` ≥ `evolution_rate` so back-off growth isn't "
+                    "throttled (validation warns otherwise). The Monitor's 3D view "
+                    "outlines each region so you can place coordinates visually.")
+            _render_keepout(cfg)
+            _render_growth_preview(cfg)
+            _render_growth_mesh(cfg, cfg_path)
+    elif cfg.model.growth_boxes:
+        st.caption(
+            f"🚫 Growth is off -- {len(cfg.model.growth_boxes)} "
+            "region(s) kept in the config but ignored this run. Tick "
+            "**Enable growth regions** above to edit or use them.")
 
     _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS",
                   "hca": "HCA"}
@@ -1334,8 +1349,11 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
             pl.add_mesh(grid, scalars=scal, cmap="viridis", show_edges=False)
             # Overlay each growth region as a red wireframe outline so regions can
             # be placed against the live topology (best-effort; only regions with
-            # resolved geometry are drawn).
-            n_overlay = _add_growth_overlay(pl, pv, cfg.model.growth_boxes)
+            # resolved geometry are drawn). Skipped when growth is switched off --
+            # the regions are dormant, so outlining them would misrepresent the run.
+            overlay_boxes = (cfg.model.growth_boxes
+                             if cfg.model.growth_enabled else [])
+            n_overlay = _add_growth_overlay(pl, pv, overlay_boxes)
             pl.view_isometric(); pl.background_color = "white"
             # backend="panel" renders in-process. The default "trame" backend
             # exports the scene from a multiprocessing.Process whose spawned child

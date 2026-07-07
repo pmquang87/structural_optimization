@@ -25,8 +25,8 @@ from oropt.gui.boxes import (apply_frame_records, apply_point_records,
                             growth_boxes_from_records, records_from_frames,
                             records_from_growth_boxes, records_from_points)
 from oropt.levelset import LevelSet
-from oropt.loop import (growth_candidate_mask, preview_growth_boxes,
-                        resolve_growth_boxes)
+from oropt.loop import (active_growth_boxes, growth_candidate_mask,
+                        preview_growth_boxes, resolve_growth_boxes)
 from oropt.mesh import Mesh, local_frame_basis, overlay_primitives
 from oropt.tobs import Tobs
 from oropt.validate import check_config
@@ -142,6 +142,45 @@ def test_candidate_mask_selects_box_elements_and_logs(tmp_path):
                                  log=lines.append)
     assert mask.tolist() == [False, True, False, False]
     assert any("'b2'" in ln and "1 candidate" in ln for ln in lines)
+
+
+def test_growth_enabled_defaults_true_and_yaml_roundtrips(tmp_path):
+    assert Model().growth_enabled is True
+    cfg = Config.from_dict({"model": {"growth_enabled": False,
+                                      "growth_boxes": [{"name": "b2",
+                                          "x_min": 0.4, "x_max": 0.6,
+                                          "y_min": 0.4, "y_max": 0.6,
+                                          "z_min": 0.4, "z_max": 0.6}]}})
+    assert cfg.model.growth_enabled is False
+    p = tmp_path / "c.yaml"
+    cfg.to_yaml(p)
+    back = Config.from_yaml(p)
+    assert back.model.growth_enabled is False
+    # the boxes are retained across the toggle, not discarded
+    assert len(back.model.growth_boxes) == 1
+
+
+def test_active_growth_boxes_gated_by_enabled():
+    m = Model(growth_boxes=[BOX_E2])
+    assert active_growth_boxes(m) == [BOX_E2]
+    m.growth_enabled = False
+    assert active_growth_boxes(m) == []
+
+
+def test_disabled_growth_yields_no_candidates(tmp_path):
+    """growth_enabled=False ignores the boxes entirely: no candidates, and the
+    run-start guard never fires -- a leftover misplaced box can't abort a run."""
+    deck, mesh = _load(tmp_path)
+    m = Model(growth_boxes=[BOX_E2], growth_enabled=False)
+    assert not growth_candidate_mask(deck, mesh, m, log=_silent).any()
+
+
+def test_disabled_growth_skips_empty_box_guard(tmp_path):
+    """A box that would raise 'no design elements' when enabled is silently
+    inert when growth is off (the exact opti_run5_Ti footgun)."""
+    deck, mesh = _load(tmp_path)
+    m = Model(growth_boxes=[BOX_EMPTY], growth_enabled=False)
+    assert not growth_candidate_mask(deck, mesh, m, log=_silent).any()
 
 
 def test_candidate_reachable_through_another_candidate(tmp_path):

@@ -219,6 +219,13 @@ class Model:
     # also want to protect them from removal.
     stress_exclude_group_ids: list = field(default_factory=list)
     stress_exclude_node_ids: list = field(default_factory=list)
+    # Master on/off switch for growth. When False the ``growth_boxes`` below are
+    # kept in the config (so the GUI preserves the coordinates and the user can
+    # toggle back on) but ignored everywhere at run time — the run solves the part
+    # as-is. Defaults True so a config that defines boxes keeps its old behaviour;
+    # the GUI's "Enable growth regions" checkbox drives it, making the state
+    # visible so leftover boxes from an earlier run can't silently drive a run.
+    growth_enabled: bool = True
     # User-defined growth boxes (add-material regions): design elements whose
     # centroid lies inside any box start VOID and may be grown into by the
     # optimiser. The box volumes must be pre-meshed into the design part; see

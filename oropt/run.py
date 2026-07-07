@@ -9,12 +9,13 @@ import argparse
 import contextlib
 import datetime as _dt
 import sys
+import traceback
 from pathlib import Path
 from typing import Callable, Iterator
 
 from .config import Config
 from .loop import run_optimization
-from .status import RUN_LOG
+from .status import RUN_LOG, Status, read_status, write_status
 from .validate import check_config, has_errors
 
 
@@ -87,10 +88,36 @@ def main(argv=None) -> int:
     # post-run step's skip reason) is lost to the GUI's DEVNULL launch. cfg.work()
     # creates the folder if needed.
     with _tee_log(cfg.work(), args.resume) as log:
-        status = run_optimization(cfg, resume=args.resume, log=log)
+        try:
+            status = run_optimization(cfg, resume=args.resume, log=log)
+        except Exception as exc:                     # noqa: BLE001
+            # A run-start guard (empty growth box, typo'd group id, mesh mismatch)
+            # or any other unhandled error would otherwise escape to stderr ->
+            # DEVNULL under the GUI launch, leaving run.log truncated mid-step with
+            # no reason. Tee the traceback and stamp a `failed` status so the GUI
+            # stops showing 'running' and shows why.
+            log("[oropt] run ABORTED -- unhandled exception:")
+            for line in traceback.format_exc().rstrip().splitlines():
+                log(line)
+            _mark_failed(cfg.work(), exc)
+            return 1
         log(f"[oropt] finished: state={status.state} iter={status.iteration} "
             f"vf={status.volume_fraction:.3f} msg={status.message!r}")
     return 0 if status.state in ("converged", "stopped") else 1
+
+
+def _mark_failed(work: Path, exc: BaseException) -> None:
+    """Persist a ``failed`` status carrying the abort reason. Best-effort: keeps
+    any metrics already published this run and never masks the original error."""
+    try:
+        prev = read_status(work)
+        st = prev or Status()
+        st.state = "failed"
+        st.activity = ""
+        st.message = f"{type(exc).__name__}: {exc}"
+        write_status(work, st)
+    except Exception:                                # noqa: BLE001
+        pass
 
 
 if __name__ == "__main__":

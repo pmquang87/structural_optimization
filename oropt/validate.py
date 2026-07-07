@@ -295,7 +295,10 @@ def check_config(cfg: Config, *, raw: dict | None = None,
                 err(f"{where}: d_allow must be > 0: got {dc.d_allow}")
 
     # --- growth regions (add-material boxes / spheres / cylinders) ---
-    boxes = m.growth_boxes or []
+    # Skipped entirely when growth is switched off: the boxes are retained in the
+    # config (so the GUI can toggle back on) but ignored at run time, so their
+    # coordinates/back-off-ratio caveats aren't relevant to this run.
+    boxes = (m.growth_boxes or []) if getattr(m, "growth_enabled", True) else []
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
         kind = b.shape_kind()
