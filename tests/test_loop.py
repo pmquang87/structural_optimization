@@ -5,7 +5,8 @@ from pathlib import Path
 
 from oropt.config import Config
 from oropt.loop import (_archive_iteration, _clean_solve_dir,
-                        resume_warnings, snapshot_config_used)
+                        iter0_archive_dir, resume_warnings, reuse_iter0_solve,
+                        snapshot_config_used)
 
 # A realistic per-load-case stem (the kind that lives on a load case).
 MULTILOAD_STEM = "implicit_elevator-linkage_pull"
@@ -207,3 +208,52 @@ def test_resume_warnings_flags_big_volume_gap_without_switch():
 def test_resume_warnings_quiet_when_aligned():
     # same optimiser, current volume within 0.1 of the target -> nothing to flag
     assert resume_warnings("beso", "beso", cur_vf=0.70, oc=_OC(target=0.68)) == []
+
+
+# ---- iteration-0 solve reuse (copied iter_0000) ----------------------------
+def test_iter0_archive_dir_single_vs_multi(tmp_path):
+    assert iter0_archive_dir(tmp_path, "gp", 1) == tmp_path / "iter_0000"
+    assert iter0_archive_dir(tmp_path, "gp", 2) == tmp_path / "iter_0000" / "gp"
+
+
+def _seed_iter0(reuse_dir: Path, starter_text: str) -> None:
+    reuse_dir.mkdir(parents=True, exist_ok=True)
+    (reuse_dir / "gp_0000.rad").write_text(starter_text, encoding="utf-8")
+    (reuse_dir / "gpA001").write_bytes(b"anim-final-state")
+    (reuse_dir / "gp_0001.out").write_text("NORMAL TERMINATION\n", encoding="utf-8")
+
+
+def test_reuse_iter0_matching_starter_copies_anim(tmp_path):
+    reuse, solve = tmp_path / "iter_0000", tmp_path / "solve"
+    solve.mkdir()
+    _seed_iter0(reuse, "STARTER-DECK\n")
+    starter = solve / "gp_0000.rad"
+    starter.write_text("STARTER-DECK\n", encoding="utf-8")     # byte-identical
+    res = reuse_iter0_solve(reuse, solve, "gp", starter, log=lambda *_: None)
+    assert res is not None and res.ok                          # reuse accepted
+    assert (solve / "gpA001").is_file()                        # animation copied in
+    assert (solve / "gp_0001.out").is_file()
+
+
+def test_reuse_iter0_starter_mismatch_solves_fresh(tmp_path):
+    reuse, solve = tmp_path / "iter_0000", tmp_path / "solve"
+    solve.mkdir()
+    _seed_iter0(reuse, "STARTER-DECK-OLD\n")
+    starter = solve / "gp_0000.rad"
+    starter.write_text("STARTER-DECK-NEW\n", encoding="utf-8")  # different design
+    logs: list[str] = []
+    assert reuse_iter0_solve(reuse, solve, "gp", starter, log=logs.append) is None
+    assert not (solve / "gpA001").exists()                     # nothing copied
+    assert any("starter differs" in m for m in logs)
+
+
+def test_reuse_iter0_missing_animation_solves_fresh(tmp_path):
+    reuse, solve = tmp_path / "iter_0000", tmp_path / "solve"
+    solve.mkdir()
+    reuse.mkdir()
+    (reuse / "gp_0000.rad").write_text("STARTER\n", encoding="utf-8")   # no anim
+    starter = solve / "gp_0000.rad"
+    starter.write_text("STARTER\n", encoding="utf-8")
+    logs: list[str] = []
+    assert reuse_iter0_solve(reuse, solve, "gp", starter, log=logs.append) is None
+    assert any("no reusable" in m for m in logs)

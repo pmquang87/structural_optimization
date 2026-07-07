@@ -66,6 +66,15 @@ def test_work_falls_back_to_case_dir_and_creates_it(tmp_path):
     assert p.is_dir()
 
 
+def test_reuse_iter0_flag_default_on_and_roundtrips(tmp_path):
+    cfg = Config()
+    assert cfg.run.reuse_iter0 is True                   # reuse a copied iter_0000
+    cfg.run.reuse_iter0 = False
+    p = tmp_path / "cfg.yaml"
+    cfg.to_yaml(p)
+    assert Config.from_yaml(p).run.reuse_iter0 is False  # opt-out roundtrips
+
+
 def test_archive_iterations_flag_default_on_and_roundtrips(tmp_path):
     cfg = Config()
     assert cfg.beso.archive_iterations is True          # on by default

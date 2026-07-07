@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+import filecmp
 import shutil
 import time
 from pathlib import Path
@@ -27,7 +28,7 @@ from .animate import make_animation
 from .mesh import Mesh
 from .report import write_report
 from .results import extract
-from .runner import run_solver
+from .runner import RunResult, run_solver
 from .smoothing import smooth_all_iterations, smooth_final
 from .tobs import Tobs
 
@@ -559,10 +560,55 @@ def _solve_activity(it: int, case: ResolvedCase, i: int, n_cases: int) -> str:
     return f"iter {it}: solving {case.name!r} — {mode}{where}"
 
 
+def iter0_archive_dir(work: Path, stem: str, n_cases: int) -> Path:
+    """Where iteration 0's archived solve for *stem* lives (or would be copied to).
+
+    Mirrors :func:`_archive_iteration`'s layout: ``work/iter_0000/`` for a
+    single-case run, ``work/iter_0000/<stem>/`` when several cases share a folder."""
+    d = work / "iter_0000"
+    return d / stem if n_cases > 1 else d
+
+
+def reuse_iter0_solve(reuse_dir: Path, solve_dir: Path, stem: str,
+                      starter: Path, log: Callable[[str], None] = print
+                      ) -> Optional[RunResult]:
+    """Reuse an already-present iteration-0 solve instead of re-running it.
+
+    Iteration 0 solves the initial full-volume design — the single most expensive
+    solve — and is identical across runs that share the same initial deck. If the
+    user drops a matching ``iter_0000`` into the run folder (copied from an earlier
+    run), this reuses its animation rather than re-solving.
+
+    Guarded so a wrong copy can never poison the run: the archived starter deck is
+    byte-compared against the one this run just wrote (``deck.write`` is
+    deterministic, so identical starters ⇒ identical solves). On a match the
+    archived ``<stem>A0*`` animation (+ listing) is copied into *solve_dir* and an
+    ok :class:`RunResult` is returned; on any mismatch / missing file it returns
+    ``None`` and the caller solves fresh. Reason is always logged."""
+    archived = reuse_dir / f"{stem}_0000.rad"
+    anims = sorted(reuse_dir.glob(f"{stem}A[0-9][0-9]*"))
+    if not archived.is_file() or not anims:
+        log(f"[oropt] iter 0: {reuse_dir.name}/ has no reusable {stem} solve "
+            "(starter/animation missing) -- solving fresh")
+        return None
+    if not filecmp.cmp(starter, archived, shallow=False):
+        log(f"[oropt] iter 0: {reuse_dir.name}/ starter differs from this run's "
+            f"initial {stem} design -- solving fresh (copied from another model?)")
+        return None
+    for src in [*anims, reuse_dir / f"{stem}_0001.out"]:
+        if src.is_file():
+            shutil.copy2(src, solve_dir / src.name)
+    log(f"[oropt] iter 0: REUSING {reuse_dir.name}/ solve for case {stem!r} "
+        "-- skipping the initial full-volume solve")
+    return RunResult(ok=True, stage="ok", message=f"reused {reuse_dir.name}")
+
+
 def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
                 no_pin: set, solve_dir: Path, anim_dt: float,
                 exclude_elem_ids: Optional[np.ndarray] = None,
-                fast_tie: Optional[FastModeTie] = None):
+                fast_tie: Optional[FastModeTie] = None,
+                reuse_dir: Optional[Path] = None,
+                log: Callable[[str], None] = print):
     """Write the alive deck for one load case, solve it, extract its results.
 
     The per-case "solve + extract" unit reused for every case each iteration. The
@@ -577,7 +623,12 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
     ``extract`` then reads the anim von-Mises exactly as usual. With ``fast_mode``
     off the path is byte-identical to before. Returns ``(run_result, results)``
     where *results* is ``None`` if the solve failed (the caller surfaces
-    *run_result*)."""
+    *run_result*).
+
+    *reuse_dir* (iteration 0 only) is an archived solve to reuse if its starter
+    matches this run's — set by :func:`reuse_iter0_solve`. The starter/engine are
+    still written first, so the reuse check compares against the exact deck that
+    would otherwise be solved (and fast-mode transforms are already applied)."""
     _clean_solve_dir(solve_dir)
     starter = solve_dir / f"{case.stem}_0000.rad"
     engine = solve_dir / f"{case.stem}_0001.rad"
@@ -589,7 +640,10 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
                         anim_dt=anim_dt)
     else:
         prepare_engine(case.engine, engine, anim_dt=anim_dt)
-    res = run_solver(cfg, solve_dir, stem=case.stem)
+    res = (reuse_iter0_solve(reuse_dir, solve_dir, case.stem, starter, log)
+           if reuse_dir is not None else None)
+    if res is None:
+        res = run_solver(cfg, solve_dir, stem=case.stem)
     if not res.ok:
         return res, None
     return res, extract(cfg, solve_dir, stem=case.stem,
@@ -844,9 +898,14 @@ def run_optimization(cfg: Config, resume: bool = False,
                 status.iteration = it
                 status.activity = _solve_activity(it, case, i, n_cases)
                 st.write_status(work, status)
+                # Iteration 0 only: reuse an already-present (e.g. copied) matching
+                # iter_0000 solve instead of re-running the full-volume solve.
+                reuse_dir = (iter0_archive_dir(work, case.stem, n_cases)
+                             if it == 0 and cfg.run.reuse_iter0 else None)
                 res, r = _solve_case(cfg, case, cdeck, alive, no_pin,
                                      csolve, cfg.run.anim_dt, exclude_elem_ids,
-                                     fast_tie=fast_ties[i])
+                                     fast_tie=fast_ties[i],
+                                     reuse_dir=reuse_dir, log=log)
                 run_results.append(res)
                 if r is None:                       # this case failed -> abort iter
                     break
