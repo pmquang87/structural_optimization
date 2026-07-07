@@ -4,7 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from oropt.config import Config
-from oropt.loop import _archive_iteration, _clean_solve_dir
+from oropt.loop import (_archive_iteration, _clean_solve_dir,
+                        resume_warnings, snapshot_config_used)
 
 # A realistic per-load-case stem (the kind that lives on a load case).
 MULTILOAD_STEM = "implicit_elevator-linkage_pull"
@@ -164,3 +165,45 @@ def test_clean_solve_dir_never_clobbers_source_deck(tmp_path):
     assert source.read_text(encoding="utf-8") == "PRISTINE SOURCE\n"
     assert not mutated.exists()                        # only solve/ was wiped
     assert solve_dir.is_dir() and not any(solve_dir.iterdir())
+
+
+# ---- optimiser-switching provenance & guards -------------------------------
+def test_snapshot_config_used_fresh_has_no_prior(tmp_path):
+    cfg = Config(); cfg.optimizer = "beso"
+    assert snapshot_config_used(tmp_path, cfg, resume=False) is None
+    assert (tmp_path / "config_used.yaml").is_file()
+
+
+def test_snapshot_config_used_resume_preserves_prior_stage(tmp_path):
+    stage1 = Config(); stage1.optimizer = "beso"
+    snapshot_config_used(tmp_path, stage1, resume=False)          # stage 1
+    stage2 = Config(); stage2.optimizer = "levelset"
+    prior = snapshot_config_used(tmp_path, stage2, resume=True)   # stage 2 (switch)
+    assert prior == "beso"                                        # prior stage reported
+    snaps = list(tmp_path.glob("config_used.2*.yaml"))           # timestamped preserve
+    assert snaps, "prior stage config was not preserved"
+    assert Config.from_yaml(snaps[0]).optimizer_name() == "beso"
+    assert Config.from_yaml(tmp_path / "config_used.yaml").optimizer_name() == "levelset"
+
+
+class _OC:                                    # minimal opts stub for resume_warnings
+    def __init__(self, target=0.4, fr=1.0, pl=2):
+        self.target_volume_fraction = target
+        self.filter_radius = fr
+        self.protect_layers = pl
+
+
+def test_resume_warnings_flags_optimiser_switch():
+    msgs = resume_warnings("beso", "levelset", cur_vf=0.45, oc=_OC(target=0.4))
+    assert any("OPTIMISER SWITCHED beso -> levelset" in m for m in msgs)
+
+
+def test_resume_warnings_flags_big_volume_gap_without_switch():
+    msgs = resume_warnings("levelset", "levelset", cur_vf=0.70, oc=_OC(target=0.4))
+    assert any("drive the volume down" in m for m in msgs)
+    assert not any("SWITCHED" in m for m in msgs)                # same optimiser
+
+
+def test_resume_warnings_quiet_when_aligned():
+    # same optimiser, current volume within 0.1 of the target -> nothing to flag
+    assert resume_warnings("beso", "beso", cur_vf=0.70, oc=_OC(target=0.68)) == []

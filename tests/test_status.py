@@ -57,6 +57,42 @@ def test_checkpoint_iteration_reads_only_the_scalar(tmp_path):
     assert st.checkpoint_iteration(tmp_path) == 7             # == loop's start_iter
 
 
+def test_checkpoint_x_field_roundtrip(tmp_path):
+    alive = np.array([True, False, True])
+    x = np.array([1.0, 0.01, 0.7])                            # HCA density field
+    st.save_checkpoint(tmp_path, 4, alive, None, x=x)
+    c = st.load_checkpoint(tmp_path)
+    assert np.allclose(c["x"], x) and c["phi"] is None        # x persists, no phi
+
+
+def test_load_checkpoint_pre_x_checkpoint_reads_none(tmp_path):
+    # a checkpoint written before the density field existed (no "x" member)
+    np.savez(tmp_path / st.CHECKPOINT, iteration=2,
+             alive_mask=np.array([True, False]), sens_prev=np.array([]),
+             phi=np.array([]))
+    c = st.load_checkpoint(tmp_path)
+    assert c is not None and c["x"] is None and c["phi"] is None
+
+
+def test_append_history_writes_optimizer_column(tmp_path):
+    st.append_history(tmp_path, {"iteration": 0, "volume_fraction": 1.0,
+                                 "optimizer": "beso"})
+    rows = st.read_history(tmp_path)
+    assert rows[0]["optimizer"] == "beso"
+
+
+def test_append_history_preserves_pre_optimizer_header(tmp_path):
+    # appending to a history.csv whose header predates the optimizer column must
+    # not shift columns: the extra key is dropped, the old header is kept.
+    p = tmp_path / st.HISTORY
+    p.write_text("iteration,volume_fraction\n0,1.0\n", encoding="utf-8")
+    st.append_history(tmp_path, {"iteration": 1, "volume_fraction": 0.9,
+                                 "optimizer": "levelset"})
+    lines = p.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "iteration,volume_fraction"           # header unchanged
+    assert lines[-1] == "1,0.9"                               # no misaligned column
+
+
 def test_checkpoint_roundtrip(tmp_path):
     alive = np.array([True, False, True, True])
     sens = np.array([1.0, 2, 3, 4])
