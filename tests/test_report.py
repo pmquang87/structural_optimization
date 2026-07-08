@@ -175,6 +175,151 @@ def test_write_report_infeasible_badge(tmp_path):
     assert "INFEASIBLE" in html
 
 
+# --- reporting the last feasible design (not the last iteration) ------------ #
+def _make_mixed_run(work, feas, sigmas, *, sigma_allow=860.0, d_allow=5.0):
+    """A finished run whose iterations mix feasible/infeasible, WITH a matching
+    per-iteration topology snapshot for each; status.json reflects the LAST
+    iteration (as a real run does). ``feas``/``sigmas`` are per-iteration lists."""
+    node_xyz = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1]],
+                        dtype=float)
+    conn = np.array([[0, 1, 2, 3], [1, 2, 3, 4]])
+    n = len(feas)
+    for i in range(n):
+        st.write_topology(work, node_xyz, conn, np.array([True, True]),
+                          fields={"sensitivity": np.array([9.0, 8.0])}, iteration=i)
+        st.append_history(work, {
+            "iteration": i, "volume_fraction": round(1.0 - i * 0.02, 6),
+            "sigma_max": sigmas[i], "disp": round(0.9 + i * 0.02, 6),
+            "elements_alive": 100 - i, "feasible": feas[i],
+            "iter_wall_s": 10.0, "or_termination": "NORMAL TERMINATION",
+            "optimizer": "beso"})
+    last = n - 1
+    st.write_status(work, st.Status(
+        state="converged", iteration=last, max_iter=n,
+        volume_fraction=1.0 - last * 0.02, sigma_max=sigmas[last],
+        sigma_allow=sigma_allow, disp=0.9 + last * 0.02, d_allow=d_allow,
+        feasible=feas[last], elements_alive=100 - last, elements_total=100,
+        message=("feasible" if feas[last] else "INFEASIBLE - backing off")))
+
+
+def test_summarise_picks_last_feasible_iteration():
+    # 0,1 feasible; 2 (last) infeasible -> the summary describes iteration 1, and
+    # records that the run actually ended (infeasibly) at iteration 2.
+    cfg = _cfg("beso")
+    history = [
+        {"iteration": 0, "volume_fraction": 1.0, "sigma_max": 700.0, "disp": 0.9,
+         "feasible": True, "iter_wall_s": 10},
+        {"iteration": 1, "volume_fraction": 0.96, "sigma_max": 731.5, "disp": 0.94,
+         "feasible": True, "iter_wall_s": 10},
+        {"iteration": 2, "volume_fraction": 0.94, "sigma_max": 863.9, "disp": 0.98,
+         "feasible": False, "iter_wall_s": 10},
+    ]
+    status = st.Status(state="converged", iteration=2, volume_fraction=0.94,
+                       sigma_max=863.9, sigma_allow=860.0, disp=0.98, d_allow=5.0,
+                       feasible=False)
+    s = _summarise(cfg, status, history)
+    assert s.reported_iteration == 1 and s.last_iteration == 2
+    assert s.feasible is True and not s.all_infeasible and s.ended_mid_oscillation
+    assert abs(s.sigma_max - 731.5) < 1e-6           # reported (iter 1), not 863.9
+    assert abs(s.final_vf - 0.96) < 1e-6
+    assert abs(s.last_sigma_max - 863.9) < 1e-6      # the run's actual last iteration
+    assert abs(s.sigma_allow - 860.0) < 1e-6         # limit still from status
+
+
+def test_reported_topology_src_prefers_snapshot(tmp_path):
+    _make_mixed_run(tmp_path, feas=[True, True, False], sigmas=[700, 731.5, 863.9])
+    # the reported (feasible) iteration's snapshot, NOT topology_latest.vtu
+    assert report._reported_topology_src(tmp_path, 1).name == "topology_iter0001.vtu"
+    # missing snapshot -> falls back to the latest file
+    assert report._reported_topology_src(tmp_path, 99).name == st.TOPOLOGY
+
+
+def test_write_report_headlines_last_feasible_design(tmp_path):
+    # Mirrors opti_run5_Ti: the last iteration is infeasible but an earlier one is
+    # feasible, so the report headlines the feasible design and notes the ending.
+    _make_mixed_run(tmp_path, feas=[True, True, False], sigmas=[700, 731.5, 863.9])
+    cfg = _cfg("beso")
+    cfg.report.render_topology = False
+    write_report(cfg, tmp_path, lambda *_: None)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    md = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert 'class="badge ok">FEASIBLE' in html         # headline design is feasible
+    assert "731.5 / 860.0 MPa" in html                 # Final σ_max = reported iter 1
+    for text in (html, md):
+        assert "Reported design" in text
+        assert "iteration 1" in text                   # the reported design
+        assert "ended mid-oscillation at iteration 2" in text
+
+
+def test_write_report_renders_reported_snapshot(tmp_path, monkeypatch):
+    # write_report must hand the reported iteration's snapshot to the renderer,
+    # not topology_latest.vtu (the possibly-infeasible last iteration).
+    _make_mixed_run(tmp_path, feas=[True, True, False], sigmas=[700, 731.5, 863.9])
+    captured = {}
+
+    def spy(work, timeout, log, boxes_spec=None, src=None):
+        captured["src"] = src
+        return None
+
+    monkeypatch.setattr(report, "_render_topology", spy)
+    write_report(_cfg("beso"), tmp_path, lambda *_: None)
+    assert captured["src"].name == "topology_iter0001.vtu"
+
+
+def test_write_report_all_infeasible_falls_back_to_last(tmp_path):
+    # No feasible iteration -> report the last one, clearly labelled infeasible.
+    _make_mixed_run(tmp_path, feas=[False, False, False], sigmas=[900, 905, 903])
+    cfg = _cfg("beso")
+    cfg.report.render_topology = False
+    write_report(cfg, tmp_path, lambda *_: None)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert 'class="badge bad">INFEASIBLE' in html
+    assert "No iteration satisfied" in html
+    assert report._reported_topology_src(tmp_path, 2).name == "topology_iter0002.vtu"
+
+
+# --- interactive convergence charts (report.html only) ---------------------- #
+def test_write_report_interactive_charts_embedded(tmp_path):
+    # report.html gets self-contained, offline hover-interactive charts (data + JS
+    # inlined), while report.md and the <noscript> fallback keep the static PNGs.
+    _make_run(tmp_path)
+    cfg = _cfg("beso")
+    cfg.report.render_topology = False
+    write_report(cfg, tmp_path, lambda *_: None)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    md = (tmp_path / "report.md").read_text(encoding="utf-8")
+    for key in ("ichart-vf", "ichart-sigma", "ichart-disp"):
+        assert f'id="{key}"' in html                   # a container per series
+    assert "<script>" in html and "addEventListener" in html
+    assert "mousemove" in html and "ichart-tip" in html   # hover tooltip wiring
+    assert '"reported"' in html and '"limitLabel"' in html  # inlined chart data
+    assert "210.5" in html                             # a per-iteration value
+    assert '<script src' not in html and 'src="http' not in html  # no external loads
+    # static PNGs still generated, kept by md and as the noscript fallback
+    assert (tmp_path / "report_sigma.png").is_file()
+    assert "report_sigma.png" in md
+    assert "<noscript>" in html
+
+
+def test_chart_payload_is_plain_json_no_nan(tmp_path):
+    # NaNs must serialise to JSON null (JSON has no NaN) so JSON.parse-free embedding
+    # is valid, and '<' is escaped so a value can't break out of the <script> tag.
+    import json
+    cfg = _cfg("beso")
+    history = [
+        {"iteration": 0, "volume_fraction": 1.0, "sigma_max": 700.0, "disp": 0.9,
+         "feasible": True},
+        {"iteration": 1, "volume_fraction": 0.9, "sigma_max": float("nan"),
+         "disp": 0.95, "feasible": True},
+    ]
+    s = _summarise(cfg, None, history)
+    payload = report._chart_payload(history, s)
+    assert "NaN" not in payload and "<" not in payload
+    data = json.loads(payload)
+    sigma = next(sr for sr in data["series"] if sr["key"] == "sigma")
+    assert sigma["values"] == [700.0, None]            # NaN -> null
+
+
 # --- evolution animation in the report -------------------------------------- #
 def _write_anim_gif(work, data=b"GIF89a-fake-bytes"):
     (work / report.ANIM_GIF).write_bytes(data)

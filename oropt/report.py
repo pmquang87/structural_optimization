@@ -3,15 +3,22 @@
 After a run finishes, the loop calls :func:`write_report` to write a
 human-readable summary of the run into the run folder:
 
-* ``report.html`` — a self-contained page (the convergence charts and a render of
-  the final design are embedded inline, so it can be e-mailed/archived as one
-  file) with the run summary table, feasibility verdict and artefact links;
-* ``report.md``   — the same numbers as lightweight Markdown (charts/render
+* ``report.html`` — a self-contained page (the hover-interactive convergence charts
+  and a render of the final design are embedded inline, so it can be
+  e-mailed/archived as one file) with the run summary table, feasibility verdict
+  and artefact links;
+* ``report.md``   — the same numbers as lightweight Markdown (static charts/render
   referenced as sibling ``report_*.png`` files).
 
+The "final design" is the **last feasible iteration**, not the last one: a gradient
+optimiser oscillates across the constraint boundary near convergence, so the last
+iteration is often infeasible (peak stress just over the allowable). The report
+headlines — and renders (``topology_iterNNNN.vtu``) — that last-feasible design, and
+notes where the run actually ended (see :func:`_pick_reported`).
+
 It only *reads* the artefacts the loop already wrote (``status.json``,
-``history.csv``, ``topology_latest.vtu``), so it never touches the run. Charts
-need matplotlib and the topology render needs an off-screen pyvista; both are
+``history.csv``, the ``topology_*.vtu`` snapshots), so it never touches the run.
+Charts need matplotlib and the topology render needs an off-screen pyvista; both are
 best-effort — a missing/failing dependency is logged and degrades to a file link.
 
 The final design is shown as an **interactive zoom/rotate viewer** (the same
@@ -149,6 +156,43 @@ def _pct(x: float, digits: int = 1) -> str:
     return "n/a" if _isnan(_f(x)) else f"{float(x):.{digits}f}%"
 
 
+def _json_num(x) -> Optional[float]:
+    """A JSON-serialisable float, or ``None`` for NaN (JSON has no NaN literal)."""
+    v = _f(x)
+    return None if _isnan(v) else float(v)
+
+
+# --------------------------------------------------------------------------- #
+# feasible-design selection
+# --------------------------------------------------------------------------- #
+def _is_feasible_row(row: dict) -> bool:
+    """Whether a ``history.csv`` row's ``feasible`` cell is truthy."""
+    return str(row.get("feasible", "")).strip().lower() in ("true", "1", "yes")
+
+
+def _iter_num(row: dict) -> int:
+    """The row's integer iteration number (``-1`` when missing/unparseable)."""
+    n = _f(row.get("iteration"))
+    return int(n) if not _isnan(n) else -1
+
+
+def _pick_reported(history: list[dict]) -> Optional[dict]:
+    """The history row for the design the report should headline: the
+    **highest-numbered feasible iteration**, or the last iteration when none is
+    feasible (``None`` only when there is no history at all).
+
+    A gradient optimiser oscillates back and forth across the constraint boundary
+    near convergence, so the *last* iteration is frequently infeasible (peak stress
+    just over the allowable) while the real deliverable is the last iteration that
+    satisfied every constraint. Reporting that one keeps the headline design — and
+    the rendered topology — feasible; the caller still notes where the run actually
+    ended."""
+    if not history:
+        return None
+    feasible = [r for r in history if _is_feasible_row(r)]
+    return max(feasible, key=_iter_num) if feasible else history[-1]
+
+
 # --------------------------------------------------------------------------- #
 # summary
 # --------------------------------------------------------------------------- #
@@ -169,49 +213,75 @@ class Summary:
     total_wall_s: float
     n_cases: int
     stress_excluded: int = 0
+    # Provenance of the reported design (see _pick_reported): the design metrics
+    # above describe iteration ``reported_iteration`` — the last *feasible* one —
+    # while the run actually ended at ``last_iteration``. They differ when the
+    # optimiser oscillated across the constraint boundary near convergence.
+    reported_iteration: int = -1
+    last_iteration: int = -1
+    all_infeasible: bool = False     # no iteration was feasible -> reported == last
+    last_sigma_max: float = float("nan")
+    last_feasible: Optional[bool] = None
 
     @property
     def multi_load(self) -> bool:
         return self.n_cases > 1
 
+    @property
+    def ended_mid_oscillation(self) -> bool:
+        """True when the run's last iteration is not the reported (feasible) one."""
+        return (self.reported_iteration >= 0
+                and self.reported_iteration != self.last_iteration)
+
 
 def _summarise(cfg: Config, status: Optional[st.Status],
                history: list[dict]) -> Summary:
-    """Reduce ``status.json`` + ``history.csv`` to the report's scalar summary."""
+    """Reduce ``status.json`` + ``history.csv`` to the report's scalar summary.
+
+    The design metrics (volume fraction, σ_max, displacement, feasibility) describe
+    the **last feasible iteration** (:func:`_pick_reported`), not the last one — the
+    last iteration is frequently infeasible when the optimiser oscillates at the
+    constraint boundary. The limits (σ_allow / d_allow are constant across
+    iterations) come from ``status.json`` (fallback: the config), and the run's very
+    last iteration is recorded too so the report can flag a mid-oscillation ending.
+    """
     vfs = [_f(r.get("volume_fraction")) for r in history]
     vfs = [v for v in vfs if not _isnan(v)]
     walls = [_f(r.get("iter_wall_s")) for r in history]
     total_wall = sum(w for w in walls if not _isnan(w))
-
     start_vf = vfs[0] if vfs else float("nan")
-    if status is not None and not _isnan(_f(status.volume_fraction)):
-        final_vf = float(status.volume_fraction)
+
+    reported = _pick_reported(history)
+    last = history[-1] if history else {}
+    all_infeasible = bool(history) and not any(_is_feasible_row(r) for r in history)
+
+    # Design metrics from the reported (last feasible) iteration's history row.
+    # With no history at all, status.json — which reflects the last iteration — is
+    # the only source, so fall back to it.
+    if reported is not None:
+        final_vf = _f(reported.get("volume_fraction"))
+        sigma_max = _f(reported.get("sigma_max"))
+        disp = _f(reported.get("disp"))
+        feasible: Optional[bool] = _is_feasible_row(reported)
+        reported_iter = _iter_num(reported)
+    elif status is not None:
+        final_vf = _f(status.volume_fraction)
+        sigma_max = _f(status.sigma_max)
+        disp = _f(status.disp)
+        feasible = bool(status.feasible)
+        reported_iter = int(status.iteration)
     else:
-        final_vf = vfs[-1] if vfs else float("nan")
+        final_vf = sigma_max = disp = float("nan")
+        feasible = None
+        reported_iter = -1
+
     if not _isnan(start_vf) and not _isnan(final_vf) and start_vf > 0:
         mass_removed = (start_vf - final_vf) / start_vf * 100.0
     else:
         mass_removed = float("nan")
 
-    last = history[-1] if history else {}
-
-    def _from(attr: str, key: str, fallback: float) -> float:
-        if status is not None and not _isnan(_f(getattr(status, attr))):
-            return float(getattr(status, attr))
-        if key in last:
-            return _f(last[key])
-        return fallback
-
-    feasible: Optional[bool]
-    if status is not None:
-        feasible = bool(status.feasible)
-    elif "feasible" in last:
-        feasible = str(last["feasible"]).strip().lower() in ("true", "1", "yes")
-    else:
-        feasible = None
-
-    # Last-resort limits (status almost always supplies them): the primary load
-    # case's limits, or NaN if none/blank.
+    # Limits are constant across iterations, so status.json is authoritative; fall
+    # back to the primary load case's limits (or NaN) only when it's absent.
     cases = cfg.load_case_list()
     primary = cases[0] if cases else None
     sig_fallback = (primary.sigma_allow if primary and primary.sigma_allow is not None
@@ -220,6 +290,11 @@ def _summarise(cfg: Config, status: Optional[st.Status],
     d_limits = ([dc.d_allow for dc in primary.disp_constraints
                  if dc.d_allow is not None] if primary else [])
     d_fallback = min(d_limits) if d_limits else float("nan")
+
+    def _limit(attr: str, fallback: float) -> float:
+        if status is not None and not _isnan(_f(getattr(status, attr))):
+            return float(getattr(status, attr))
+        return fallback
 
     return Summary(
         optimizer=cfg.optimizer_name(),
@@ -231,14 +306,19 @@ def _summarise(cfg: Config, status: Optional[st.Status],
         start_vf=start_vf,
         final_vf=final_vf,
         mass_removed_pct=mass_removed,
-        sigma_max=_from("sigma_max", "sigma_max", float("nan")),
-        sigma_allow=_from("sigma_allow", "", sig_fallback),
-        disp=_from("disp", "disp", float("nan")),
-        d_allow=_from("d_allow", "", d_fallback),
+        sigma_max=sigma_max,
+        sigma_allow=_limit("sigma_allow", sig_fallback),
+        disp=disp,
+        d_allow=_limit("d_allow", d_fallback),
         total_wall_s=total_wall,
         n_cases=len(cfg.load_cases),
         stress_excluded=(int(getattr(status, "stress_excluded_elems", 0))
                          if status is not None else 0),
+        reported_iteration=reported_iter,
+        last_iteration=(_iter_num(last) if last else reported_iter),
+        all_infeasible=all_infeasible,
+        last_sigma_max=(_f(last.get("sigma_max")) if last else sigma_max),
+        last_feasible=(_is_feasible_row(last) if last else feasible),
     )
 
 
@@ -250,11 +330,28 @@ def _rows(s: Summary) -> list[tuple[str, str]]:
         verdict = "unknown"
     else:
         verdict = "FEASIBLE" if s.feasible else "INFEASIBLE"
-    return [
+    rows = [
         ("Optimizer", s.optimizer),
         ("Termination", f"{s.state or 'n/a'}"
                         + (f" — {s.message}" if s.message else "")),
         ("Iterations", str(s.iterations)),
+    ]
+    # Which iteration the design metrics below describe. When the run ended
+    # mid-oscillation on an infeasible iteration this is an earlier feasible one, so
+    # spell it out (and where the run actually ended) rather than silently reporting
+    # a different iteration than the run's last.
+    if s.reported_iteration >= 0:
+        if s.all_infeasible:
+            rows.append(("Reported design",
+                         f"iteration {s.reported_iteration} "
+                         f"(last — no iteration was feasible)"))
+        elif s.ended_mid_oscillation:
+            rows.append(("Reported design",
+                         f"iteration {s.reported_iteration} (last feasible; run "
+                         f"ended at iteration {s.last_iteration}, infeasible)"))
+        else:
+            rows.append(("Reported design", f"iteration {s.reported_iteration}"))
+    rows += [
         ("Volume fraction", f"{_num(s.start_vf, 3)} → {_num(s.final_vf, 3)}"),
         # A growth-box run can end with net *added* material (negative removal);
         # flip the label rather than report "-x% removed".
@@ -266,6 +363,27 @@ def _rows(s: Summary) -> list[tuple[str, str]]:
         ("Feasible", verdict),
         ("Total wall time", _hms(s.total_wall_s)),
     ]
+    return rows
+
+
+def _provenance_lines(s: Summary) -> list[str]:
+    """Plain-text note(s) about the reported-vs-last iteration (empty when the
+    reported design *is* the run's last iteration and it was feasible).
+
+    Surfaces that the headline design is the last feasible iteration while the run
+    itself ended on a later, infeasible one (mid-oscillation) — or that no iteration
+    was feasible at all, so the fallback last-iteration design is over the limit."""
+    if s.all_infeasible:
+        return [f"No iteration satisfied every constraint — the reported design is "
+                f"the last iteration ({s.last_iteration}) and is INFEASIBLE "
+                f"(σ_max {_num(s.sigma_max, 1)} MPa vs the {_num(s.sigma_allow, 1)} "
+                f"MPa limit)."]
+    if s.ended_mid_oscillation:
+        return [f"The run ended mid-oscillation at iteration {s.last_iteration} "
+                f"(INFEASIBLE, σ_max {_num(s.last_sigma_max, 1)} MPa). The reported "
+                f"final design is the last feasible iteration "
+                f"({s.reported_iteration})."]
+    return []
 
 
 def _hms(seconds: float) -> str:
@@ -344,6 +462,200 @@ def _charts(history: list[dict], s: Summary, work: Path,
 
 
 # --------------------------------------------------------------------------- #
+# interactive convergence charts (self-contained inline SVG, HTML only)
+# --------------------------------------------------------------------------- #
+# Hover-interactive charts for report.html, mirroring the GUI Monitor's three
+# per-iteration line charts (volume fraction; σ_max vs limit; displacement vs
+# limit). Rather than inline a multi-MB charting library (Plotly/Chart.js), the
+# series are drawn as a compact self-contained SVG by ~120 lines of dependency-free
+# vanilla JS injected below — so report.html stays a single offline file (no CDN,
+# no network) exactly like its inlined images/GIF/VTK.js scene, and the hover
+# tooltip can show precisely the iteration number + value the Monitor exposes. The
+# data is injected as a plain-Python JSON literal at ``__OROPT_CHART_DATA__``
+# (numpy types must never leak in — cf. the numpy-intc→json.dumps GIF regression).
+_INTERACTIVE_CHART_JS = r"""
+(function () {
+  "use strict";
+  var DATA = __OROPT_CHART_DATA__;
+  var NS = "http://www.w3.org/2000/svg";
+  var C = { line: "#1f6feb", limit: "#cf222e", grid: "#e1e6eb",
+            axis: "#8c959f", text: "#57606a", reported: "#1a7f37" };
+  function el(name, attrs) {
+    var e = document.createElementNS(NS, name);
+    for (var k in attrs) { e.setAttribute(k, attrs[k]); }
+    return e;
+  }
+  function fmt(v, d) {
+    return (v === null || v === undefined || isNaN(v)) ? "n/a" : Number(v).toFixed(d);
+  }
+  function ticks(lo, hi, n) {
+    var span = hi - lo;
+    if (!(span > 0)) { return [lo]; }
+    var step = Math.pow(10, Math.floor(Math.log(span / n) / Math.LN10));
+    var err = (span / n) / step;
+    if (err >= 7.5) { step *= 10; } else if (err >= 3) { step *= 5; }
+    else if (err >= 1.5) { step *= 2; }
+    var out = [], t = Math.ceil(lo / step) * step;
+    for (; t <= hi + step * 1e-6; t += step) { out.push(Math.round(t / step) * step); }
+    return out;
+  }
+  function build(box, spec, iters, reported) {
+    var W = 480, H = 300, m = { l: 60, r: 16, t: 14, b: 40 };
+    var iw = W - m.l - m.r, ih = H - m.t - m.b, vals = spec.values, dec = spec.decimals;
+    var ys = [], i;
+    for (i = 0; i < vals.length; i++) { if (vals[i] !== null) { ys.push(vals[i]); } }
+    if (spec.limit !== null) { ys.push(spec.limit); }
+    if (!ys.length) { box.innerHTML = '<p class="note">(no data)</p>'; return; }
+    var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
+    if (ymin === ymax) { ymin -= Math.abs(ymin) * 0.1 + 1; ymax += Math.abs(ymax) * 0.1 + 1; }
+    var pad = (ymax - ymin) * 0.08; ymin -= pad; ymax += pad;
+    var xmin = Math.min.apply(null, iters), xmax = Math.max.apply(null, iters);
+    if (xmin === xmax) { xmin -= 0.5; xmax += 0.5; }
+    function X(v) { return m.l + (v - xmin) / (xmax - xmin) * iw; }
+    function Y(v) { return m.t + (1 - (v - ymin) / (ymax - ymin)) * ih; }
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: "100%",
+                          "font-family": "system-ui, -apple-system, sans-serif" });
+    var yt = ticks(ymin, ymax, 5), k, e;
+    for (k = 0; k < yt.length; k++) {
+      var yy = Y(yt[k]); if (yy < m.t - 0.5 || yy > m.t + ih + 0.5) { continue; }
+      svg.appendChild(el("line", { x1: m.l, y1: yy, x2: m.l + iw, y2: yy,
+                                   stroke: C.grid, "stroke-width": 1 }));
+      e = el("text", { x: m.l - 6, y: yy + 3, "text-anchor": "end",
+                       "font-size": 10, fill: C.text });
+      e.textContent = fmt(yt[k], dec); svg.appendChild(e);
+    }
+    var xt = ticks(xmin, xmax, 8);
+    for (k = 0; k < xt.length; k++) {
+      if (xt[k] !== Math.round(xt[k])) { continue; }
+      var xx = X(xt[k]); if (xx < m.l - 0.5 || xx > m.l + iw + 0.5) { continue; }
+      e = el("text", { x: xx, y: m.t + ih + 16, "text-anchor": "middle",
+                       "font-size": 10, fill: C.text });
+      e.textContent = String(Math.round(xt[k])); svg.appendChild(e);
+    }
+    e = el("text", { x: m.l + iw / 2, y: H - 4, "text-anchor": "middle",
+                     "font-size": 10, fill: C.text });
+    e.textContent = "iteration"; svg.appendChild(e);
+    if (spec.limit !== null) {
+      var ly = Y(spec.limit);
+      svg.appendChild(el("line", { x1: m.l, y1: ly, x2: m.l + iw, y2: ly, stroke: C.limit,
+                                   "stroke-width": 1.4, "stroke-dasharray": "5 4" }));
+      e = el("text", { x: m.l + iw - 2, y: ly - 4, "text-anchor": "end",
+                       "font-size": 10, fill: C.limit });
+      e.textContent = spec.limitLabel + " " + fmt(spec.limit, dec); svg.appendChild(e);
+    }
+    var d = "", started = false;
+    for (i = 0; i < vals.length; i++) {
+      if (vals[i] === null) { started = false; continue; }
+      d += (started ? " L" : "M") + X(iters[i]) + " " + Y(vals[i]); started = true;
+    }
+    svg.appendChild(el("path", { d: d, fill: "none", stroke: C.line, "stroke-width": 1.6 }));
+    for (i = 0; i < vals.length; i++) {
+      if (vals[i] === null) { continue; }
+      var rep = (iters[i] === reported);
+      svg.appendChild(el("circle", { cx: X(iters[i]), cy: Y(vals[i]), r: rep ? 4 : 2.4,
+        fill: rep ? C.reported : C.line, stroke: "#fff", "stroke-width": rep ? 1.5 : 0 }));
+    }
+    var vline = el("line", { x1: 0, y1: m.t, x2: 0, y2: m.t + ih, stroke: C.axis,
+                             "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0 });
+    var focus = el("circle", { r: 4, fill: "none", stroke: C.line, "stroke-width": 2, opacity: 0 });
+    svg.appendChild(vline); svg.appendChild(focus);
+    var over = el("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" });
+    svg.appendChild(over); box.appendChild(svg);
+    var tip = document.createElement("div"); tip.className = "ichart-tip"; box.appendChild(tip);
+    function nearest(px) {
+      var best = -1, bd = 1e18;
+      for (var j = 0; j < iters.length; j++) {
+        if (vals[j] === null) { continue; }
+        var dx = Math.abs(X(iters[j]) - px); if (dx < bd) { bd = dx; best = j; }
+      }
+      return best;
+    }
+    over.addEventListener("mousemove", function (ev) {
+      var r = svg.getBoundingClientRect();
+      var j = nearest((ev.clientX - r.left) / r.width * W); if (j < 0) { return; }
+      var cx = X(iters[j]), cy = Y(vals[j]);
+      vline.setAttribute("x1", cx); vline.setAttribute("x2", cx); vline.setAttribute("opacity", 1);
+      focus.setAttribute("cx", cx); focus.setAttribute("cy", cy); focus.setAttribute("opacity", 1);
+      var html = "iter " + iters[j] + "<br><b>" + fmt(vals[j], dec) + "</b>" +
+                 (spec.unit ? " " + spec.unit : "");
+      if (spec.limit !== null) {
+        var bad = vals[j] > spec.limit;
+        html += '<br><span style="color:' + (bad ? C.limit : C.reported) + '">' +
+                (bad ? "over " : "within ") + spec.limitLabel + "</span>";
+      }
+      tip.innerHTML = html; tip.style.opacity = 1;
+      tip.style.left = (cx / W * r.width) + "px";
+      tip.style.top = (cy / H * r.height) + "px";
+    });
+    over.addEventListener("mouseleave", function () {
+      vline.setAttribute("opacity", 0); focus.setAttribute("opacity", 0); tip.style.opacity = 0;
+    });
+  }
+  function boot() {
+    for (var i = 0; i < DATA.series.length; i++) {
+      var spec = DATA.series[i], box = document.getElementById("ichart-" + spec.key);
+      if (box) { build(box, spec, DATA.iter, DATA.reported); }
+    }
+  }
+  if (document.readyState !== "loading") { boot(); }
+  else { document.addEventListener("DOMContentLoaded", boot); }
+})();
+"""
+
+_ICHART_TITLES = {
+    "vf": "Volume fraction",
+    "sigma": "von-Mises σ_max vs limit",
+    "disp": "Displacement vs limit",
+}
+
+
+def _chart_payload(history: list[dict], s: Summary) -> str:
+    """The JSON literal the inline chart JS reads (all plain-Python; NaN -> null).
+
+    ``<`` is escaped so a value can never break out of the ``<script>`` tag."""
+    iters = [_iter_num(r) for r in history]
+
+    def col(key: str) -> list[Optional[float]]:
+        return [_json_num(r.get(key)) for r in history]
+
+    payload = {
+        "iter": iters,
+        "reported": int(s.reported_iteration),
+        "series": [
+            {"key": "vf", "values": col("volume_fraction"), "decimals": 3,
+             "unit": "", "limit": None, "limitLabel": None},
+            {"key": "sigma", "values": col("sigma_max"), "decimals": 1,
+             "unit": "MPa", "limit": _json_num(s.sigma_allow), "limitLabel": "σ_allow"},
+            {"key": "disp", "values": col("disp"), "decimals": 4,
+             "unit": "mm", "limit": _json_num(s.d_allow), "limitLabel": "d_allow"},
+        ],
+    }
+    return json.dumps(payload).replace("<", "\\u003c")
+
+
+def _interactive_charts_html(history: list[dict], s: Summary,
+                             png_charts: dict[str, Path]) -> str:
+    """The Convergence section's inner HTML: three hover-interactive inline-SVG
+    charts (built by :data:`_INTERACTIVE_CHART_JS`), each with the static PNG as a
+    ``<noscript>`` fallback so the report still shows charts with JS disabled."""
+    if not history:
+        return '    <p class="note">(charts unavailable)</p>'
+    figs: list[str] = []
+    for key in ("vf", "sigma", "disp"):
+        title = _ICHART_TITLES[key]
+        uri = _data_uri(png_charts[key]) if key in png_charts else None
+        noscript = (f'<noscript><img alt="{escape(title)}" src="{uri}"></noscript>'
+                    if uri else "")
+        figs.append(
+            f'    <figure class="ichart-fig"><div class="ichart" '
+            f'id="ichart-{key}"></div>{noscript}'
+            f'<figcaption>{escape(title)}</figcaption></figure>')
+    script = ("  <script>" + _INTERACTIVE_CHART_JS.replace(
+        "__OROPT_CHART_DATA__", _chart_payload(history, s)) + "</script>")
+    return "\n".join(figs) + "\n" + script
+
+
+# --------------------------------------------------------------------------- #
 # final-topology render (off-screen pyvista, best-effort)
 # --------------------------------------------------------------------------- #
 def _write_overlay_spec(work: Path, cfg: Config,
@@ -367,22 +679,43 @@ def _write_overlay_spec(work: Path, cfg: Config,
         return None
 
 
+def _reported_topology_src(work: Path, reported_iteration: int) -> Path:
+    """The VTU to render as the 'final design': the reported iteration's immutable
+    per-iteration snapshot when it exists, else ``topology_latest.vtu``.
+
+    Per-iteration snapshots are written to the run root as ``topology_iterNNNN.vtu``
+    (:func:`oropt.status.topology_snapshot_name`); a nested ``iter_NNNN/`` copy is
+    checked too for robustness. ``topology_latest.vtu`` is the *last* iteration,
+    which may be infeasible, so it is only the fallback when the chosen snapshot is
+    missing (e.g. an older run that predates per-iteration snapshots)."""
+    work = Path(work)
+    if reported_iteration >= 0:
+        name = st.topology_snapshot_name(reported_iteration)
+        for cand in (work / name,
+                     work / f"iter_{reported_iteration:04d}" / name):
+            if cand.is_file():
+                return cand
+    return work / st.TOPOLOGY
+
+
 def _render_topology(work: Path, timeout_s: float,
                      log: Callable[[str], None],
-                     boxes_spec: Optional[Path] = None) -> Optional[Path]:
+                     boxes_spec: Optional[Path] = None,
+                     src: Optional[Path] = None) -> Optional[Path]:
     """Off-screen render of the final design to ``report_topology.png``.
 
-    Renders ``topology_latest.vtu`` exactly like the GUI's off-screen pyvista
-    view, but in an *isolated subprocess* so a hard VTK/OpenGL crash on a headless
-    machine (no GL context) can never abort the run — it just shows up as a
-    non-zero exit code and we fall back to linking the topology files. When
-    *boxes_spec* is given, each growth region is overlaid as a red wireframe
-    outline. Returns the PNG path, or ``None`` (reason logged) when there is
-    nothing to render or the render subprocess fails/times out/crashes.
+    Renders *src* (the reported feasible iteration's topology snapshot; defaults to
+    ``topology_latest.vtu``) exactly like the GUI's off-screen pyvista view, but in
+    an *isolated subprocess* so a hard VTK/OpenGL crash on a headless machine (no GL
+    context) can never abort the run — it just shows up as a non-zero exit code and
+    we fall back to linking the topology files. When *boxes_spec* is given, each
+    growth region is overlaid as a red wireframe outline. Returns the PNG path, or
+    ``None`` (reason logged) when there is nothing to render or the render
+    subprocess fails/times out/crashes.
     """
-    src = Path(work) / st.TOPOLOGY
+    src = Path(src) if src is not None else Path(work) / st.TOPOLOGY
     if not src.is_file():
-        log(f"[oropt] report: no {st.TOPOLOGY} to render - topology image skipped")
+        log(f"[oropt] report: no {src.name} to render - topology image skipped")
         return None
     dest = Path(work) / TOPOLOGY_PNG
     dest.unlink(missing_ok=True)        # don't mistake a stale PNG for a fresh one
@@ -419,26 +752,28 @@ def _scene_backend_available() -> bool:
 
 def _export_topology_scene(work: Path, timeout_s: float,
                            log: Callable[[str], None],
-                           boxes_spec: Optional[Path] = None) -> Optional[Path]:
+                           boxes_spec: Optional[Path] = None,
+                           src: Optional[Path] = None) -> Optional[Path]:
     """Export an interactive (zoom/rotate) VTK.js scene to ``report_topology.html``.
 
-    Renders the same ``topology_latest.vtu`` scene as :func:`_render_topology`, but
-    via pyvista's ``export_html`` into a standalone, offline interactive viewer —
-    so the report's final design can be orbited/zoomed like the GUI's Monitor tab.
-    Runs in the *isolated subprocess* (crash containment). When *boxes_spec* is
-    given, each growth region is overlaid as a red wireframe outline. Returns the
-    scene path, or ``None`` (reason logged) when the optional trame backend is
-    missing, there is nothing to render, or the export fails/times out/crashes —
-    the caller then falls back to the static PNG. Never raises.
+    Renders the same *src* scene as :func:`_render_topology` (the reported feasible
+    iteration's snapshot; defaults to ``topology_latest.vtu``), but via pyvista's
+    ``export_html`` into a standalone, offline interactive viewer — so the report's
+    final design can be orbited/zoomed like the GUI's Monitor tab. Runs in the
+    *isolated subprocess* (crash containment). When *boxes_spec* is given, each
+    growth region is overlaid as a red wireframe outline. Returns the scene path, or
+    ``None`` (reason logged) when the optional trame backend is missing, there is
+    nothing to render, or the export fails/times out/crashes — the caller then falls
+    back to the static PNG. Never raises.
     """
     if not _scene_backend_available():
         log("[oropt] report: interactive 3D viewer needs the optional 'report3d' "
             "extra (trame-vtk) - using a static image "
             "(pip install \"oropt[report3d]\")")
         return None
-    src = Path(work) / st.TOPOLOGY
+    src = Path(src) if src is not None else Path(work) / st.TOPOLOGY
     if not src.is_file():
-        log(f"[oropt] report: no {st.TOPOLOGY} to render - interactive view skipped")
+        log(f"[oropt] report: no {src.name} to render - interactive view skipped")
         return None
     dest = Path(work) / TOPOLOGY_SCENE_HTML
     dest.unlink(missing_ok=True)        # don't mistake a stale scene for a fresh one
@@ -553,7 +888,8 @@ def _final_design_html(scene: Optional[Path], topo: Optional[Path]) -> str:
 # rendering
 # --------------------------------------------------------------------------- #
 def _html(s: Summary, work: Path, charts: dict[str, Path],
-          scene: Optional[Path], topo: Optional[Path]) -> str:
+          scene: Optional[Path], topo: Optional[Path],
+          history: list[dict]) -> str:
     now = _dt.datetime.now().isoformat(timespec="seconds")
     rows = "\n".join(
         f"    <tr><th>{escape(k)}</th><td>{escape(v)}</td></tr>"
@@ -566,6 +902,8 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
         badge_cls, badge_txt = "bad", "INFEASIBLE"
 
     parts: list[str] = []
+    for line in _provenance_lines(s):
+        parts.append(f'  <p class="note">{escape(line)}</p>')
     if s.multi_load:
         parts.append(
             f'  <p class="note">σ_max and displacement are the '
@@ -578,18 +916,9 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
             f'their von-Mises is ignored for the peak and the feasibility verdict.'
             f'</p>')
 
-    img_blocks: list[str] = []
-    for key, title in (("vf", "Volume fraction"),
-                       ("sigma", "von-Mises σ_max vs limit"),
-                       ("disp", "Displacement vs limit")):
-        png = charts.get(key)
-        uri = _data_uri(png) if png else None
-        if uri:
-            img_blocks.append(
-                f'    <figure><img alt="{escape(title)}" src="{uri}">'
-                f'<figcaption>{escape(title)}</figcaption></figure>')
-    charts_html = ("\n".join(img_blocks) if img_blocks
-                   else '    <p class="note">(charts unavailable)</p>')
+    # Hover-interactive inline-SVG charts (iteration + value on hover), like the
+    # Monitor tab; the static PNGs remain as the <noscript> fallback.
+    charts_html = _interactive_charts_html(history, s, charts)
 
     topo_html = _final_design_html(scene, topo)
 
@@ -620,10 +949,19 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
   th, td {{ text-align: left; padding: 0.4rem 0.7rem; border-bottom: 1px solid #d0d7de; }}
   th {{ width: 14rem; color: #57606a; font-weight: 600; }}
   .note {{ color: #57606a; font-size: 0.9rem; }}
-  .charts {{ display: flex; flex-wrap: wrap; gap: 0.5rem; }}
+  .charts {{ display: flex; flex-wrap: wrap; gap: 0.75rem; }}
   figure {{ margin: 0; }}
   figure img {{ max-width: 100%; border: 1px solid #d0d7de; border-radius: 6px; }}
   figcaption {{ color: #57606a; font-size: 0.8rem; text-align: center; }}
+  .ichart-fig {{ flex: 1 1 300px; max-width: 480px; }}
+  .ichart {{ position: relative; width: 100%; }}
+  .ichart svg {{ display: block; width: 100%; height: auto;
+                border: 1px solid #d0d7de; border-radius: 6px; background: #fff; }}
+  .ichart noscript img {{ max-width: 100%; }}
+  .ichart-tip {{ position: absolute; pointer-events: none; z-index: 2; opacity: 0;
+                transform: translate(-50%, -135%); white-space: nowrap;
+                background: #1f2328; color: #fff; font-size: 11px; line-height: 1.3;
+                padding: 4px 7px; border-radius: 5px; transition: opacity 0.05s; }}
   .topo img {{ max-width: 620px; }}
   .topo iframe.scene {{ width: 100%; max-width: 620px; height: 460px;
                        border: 1px solid #d0d7de; border-radius: 6px;
@@ -673,6 +1011,8 @@ def _md(s: Summary, work: Path, charts: dict[str, Path],
         "| --- | --- |",
     ]
     lines += [f"| {k} | {v} |" for k, v in _rows(s)]
+    for line in _provenance_lines(s):
+        lines += ["", f"> {line}"]
     if s.multi_load:
         lines += ["",
                   f"> σ_max and displacement are the **worst case across "
@@ -722,9 +1062,10 @@ def write_report(cfg: Config, work: Path,
                  log: Callable[[str], None] = print) -> Optional[Path]:
     """If enabled, write ``report.html`` and ``report.md`` summarising the run.
 
-    Reads ``status.json`` + ``history.csv`` (+ ``topology_latest.vtu`` for the
-    render) from *work*. Returns the path of the HTML report (or the Markdown one
-    if only that could be written), else ``None`` (reason logged). Never raises.
+    Reads ``status.json`` + ``history.csv`` (+ the last-feasible iteration's
+    ``topology_iterNNNN.vtu`` snapshot for the render) from *work*. Returns the path
+    of the HTML report (or the Markdown one if only that could be written), else
+    ``None`` (reason logged). Never raises.
     """
     opts = getattr(cfg, "report", None)
     if opts is not None and not getattr(opts, "enabled", True):
@@ -746,21 +1087,24 @@ def write_report(cfg: Config, work: Path,
         # so its render stays byte-identical). Shared by the interactive scene and
         # the static PNG.
         boxes_spec = _write_overlay_spec(work, cfg, log)
+        # Render the reported (last feasible) iteration's snapshot, not
+        # topology_latest.vtu (the last iteration, which may be infeasible).
+        render_src = _reported_topology_src(work, s.reported_iteration)
         # Final design: try the interactive viewer first; only spend a second
         # subprocess on the static PNG when it isn't available, so a report always
         # carries *some* final-design visual (the PNG also keeps report.html
         # self-contained when the scene is too big to inline).
-        scene = (_export_topology_scene(work, timeout, log, boxes_spec)
+        scene = (_export_topology_scene(work, timeout, log, boxes_spec, render_src)
                  if (opts is None or getattr(opts, "interactive_topology", True))
                  else None)
         want_png = (opts is None or getattr(opts, "render_topology", True))
-        topo = (_render_topology(work, timeout, log, boxes_spec)
+        topo = (_render_topology(work, timeout, log, boxes_spec, render_src)
                 if (scene is None and want_png) else None)
 
         written: list[Path] = []
         html_path = work / REPORT_HTML
         try:
-            html_path.write_text(_html(s, work, charts, scene, topo),
+            html_path.write_text(_html(s, work, charts, scene, topo, history),
                                  encoding="utf-8")
             written.append(html_path)
         except OSError as exc:
