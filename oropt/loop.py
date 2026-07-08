@@ -872,6 +872,38 @@ def _converged(vfs: list[float], feasible: bool, target_vf: float,
     return (max(recent) - min(recent)) / max(np.mean(recent), 1e-12) < tol
 
 
+def _reset_stale_outputs(work: Path, log: Callable[[str], None]) -> None:
+    """Clear a previous run's *accumulating* outputs before a fresh (non-resume)
+    run into the same folder, so the new run's history and evolution are not mixed
+    with the old one's.
+
+    ``history.csv`` is appended per iteration and the ``topology_iter*`` /
+    ``topology_smoothed_iter*`` snapshots accumulate, so re-running fresh into a
+    used folder would otherwise prepend the previous run's rows/frames (a killed
+    dead run's iterations showing up before the real ones). This mirrors
+    :func:`oropt.run._tee_log` truncating ``run.log`` on a fresh start.
+
+    Preserved: the ``iter_NNNN/`` archives (a seeded ``iter_0000`` is byte-checked
+    before reuse, not blindly trusted — see :func:`reuse_iter0_solve`), and
+    ``checkpoint.npz`` / ``status.json`` (overwritten in-place as the run proceeds).
+    Single-file end products (``report.*``, ``topology_evolution.gif``,
+    ``topology_latest.vtu``) are rewritten wholesale, so they never mix.
+    """
+    removed = 0
+    hist = work / st.HISTORY
+    if hist.exists():
+        hist.unlink(missing_ok=True)
+        removed += 1
+    for pat in ("topology_iter*.vtu", "topology_smoothed_iter*.stl"):
+        for p in work.glob(pat):
+            p.unlink(missing_ok=True)
+            removed += 1
+    if removed:
+        log(f"[oropt] fresh run: cleared {removed} stale output file(s) from a "
+            "previous run in this folder (history + per-iteration snapshots); "
+            "iteration archives and checkpoint are kept")
+
+
 def run_optimization(cfg: Config, resume: bool = False,
                      log: Callable[[str], None] = print,
                      should_stop: Optional[Callable[[], bool]] = None) -> st.Status:
@@ -885,6 +917,8 @@ def run_optimization(cfg: Config, resume: bool = False,
     prior_optimizer = snapshot_config_used(work, cfg, resume, log)
 
     (work / "stop.flag").unlink(missing_ok=True)   # ignore any stale stop request
+    if not resume:                                   # fresh run: don't let a prior
+        _reset_stale_outputs(work, log)              # run's history/snapshots mix in
     if should_stop is None:                          # GUI "Stop" drops a stop.flag
         def should_stop() -> bool:
             return (work / "stop.flag").exists()

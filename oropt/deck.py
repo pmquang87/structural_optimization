@@ -361,12 +361,20 @@ class Deck:
         """Write *out_path* keeping only alive design elements.
 
         Nodes are left in ``/NODE`` untouched (the contact slave node-groups and
-        ``/SURF/PART/EXT`` master stay valid). Design nodes that no surviving
+        ``/SURF/PART/EXT`` master stay valid). A design *mesh* node that no surviving
         element references would otherwise make the implicit tangent singular, so
-        they are fully constrained via an injected ``/GRNOD/NODE`` + ``/BCS``
-        before ``/END`` — the converter's free-node guard, generalised. Nodes in
-        *no_pin* (already kinematically constrained, e.g. the symmetry set) are
-        skipped to avoid conflicting constraints.
+        it is fully constrained via an injected ``/GRNOD/NODE`` + ``/BCS`` before
+        ``/END`` — the converter's free-node guard, generalised. Nodes in *no_pin*
+        (already kinematically constrained, e.g. the symmetry set) are skipped to
+        avoid conflicting constraints.
+
+        Only nodes that belong to *some* design element are pin candidates. Design-
+        range nodes that are element-free in the full mesh — e.g. the converter's
+        synthesised ``--rigid-cog-master`` /RBODY master nodes — are structural and
+        already kinematically handled by their rigid body; pinning one with a full-
+        fix /BCS double-constrains it (locking a loaded master's free DOFs -> zero
+        external work) and OpenRadioss flags it as an incompatible kinematic
+        condition (WARNING 312 -> AUTOSPC -> dead solve). They are never pinned.
 
         ``alive_mask`` is a boolean array aligned with :attr:`elem_ids`.
         """
@@ -376,7 +384,13 @@ class Deck:
 
         ref_nodes = np.unique(self.elem_conn[alive_mask]) if alive_mask.any() \
             else np.empty(0, dtype=np.int64)
-        design_nodes = self.node_ids[self.node_ids >= self.design_node_min]
+        # Only nodes carried by some design element can be orphaned by deletion;
+        # element-free design-range nodes (synthesised rigid-body masters) are
+        # structural and must not be pinned (see the docstring).
+        mesh_nodes = np.unique(self.elem_conn) if self.elem_conn.size \
+            else np.empty(0, dtype=np.int64)
+        design_nodes = np.intersect1d(
+            self.node_ids[self.node_ids >= self.design_node_min], mesh_nodes)
         free_nodes = np.setdiff1d(design_nodes, ref_nodes, assume_unique=False)
         if no_pin:
             free_nodes = free_nodes[~np.isin(free_nodes, np.fromiter(
