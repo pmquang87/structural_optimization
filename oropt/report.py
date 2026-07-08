@@ -193,6 +193,17 @@ def _pick_reported(history: list[dict]) -> Optional[dict]:
     return max(feasible, key=_iter_num) if feasible else history[-1]
 
 
+def reported_iteration(work: Path) -> int:
+    """The iteration number the report headlines/renders — the last feasible one,
+    else the last iteration, and ``-1`` when there is no ``history.csv``.
+
+    Reads the run's history from *work* and applies the same selection as
+    :func:`_pick_reported`. Public so other post-run steps (e.g. the d3plot
+    conversion) can target the **same** design the report shows."""
+    row = _pick_reported(st.read_history(work))
+    return _iter_num(row) if row is not None else -1
+
+
 # --------------------------------------------------------------------------- #
 # summary
 # --------------------------------------------------------------------------- #

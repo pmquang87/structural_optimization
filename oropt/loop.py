@@ -28,7 +28,7 @@ from .levelset import LevelSet
 from .manufacturing import apply_manufacturing, manufacturing_active
 from .animate import make_animation
 from .mesh import Mesh
-from .report import write_report
+from .report import reported_iteration, write_report
 from .results import extract
 from .runner import RunResult, run_solver
 from .smoothing import smooth_all_iterations, smooth_final
@@ -862,6 +862,33 @@ def _archive_iteration(solve_dir: Path, work: Path, stem: str, it: int,
     return dest
 
 
+def _archived_iter_dir(work: Path, it: int, stem: str, n_cases: int) -> Path:
+    """The folder :func:`_archive_iteration` wrote iteration *it*'s files into
+    (mirrors its layout): ``work/iter_NNNN/`` for a single case,
+    ``work/iter_NNNN/<stem>/`` when there are multiple load cases."""
+    d = work / f"iter_{it:04d}"
+    return d / stem if n_cases > 1 else d
+
+
+def _final_anim_dir(work: Path, feas_it: int, stem: str, n_cases: int,
+                    fallback: Path) -> tuple[Path, bool]:
+    """Which directory's ``<stem>A0*`` animation to convert to d3plot.
+
+    Returns ``(dir, used_archive)`` — the last feasible iteration's *archived*
+    animation (``work/iter_NNNN/`` via :func:`_archive_iteration`) when it exists,
+    else *fallback* (the last solved iteration's solve dir). Near convergence the
+    optimiser oscillates across the constraint boundary, so the last *solved*
+    iteration held by *fallback* is often infeasible; using the archived feasible
+    iteration makes the d3plot show the same last-feasible design the report renders.
+    The fallback keeps the old behaviour when per-iteration archiving is off or the
+    feasible iteration's animation wasn't archived (e.g. an aborted solve)."""
+    if feas_it >= 0:
+        arch = _archived_iter_dir(work, feas_it, stem, n_cases)
+        if sorted(arch.glob(f"{stem}A0*")):
+            return arch, True
+    return fallback, False
+
+
 def _converged(vfs: list[float], feasible: bool, target_vf: float,
                window: int, tol: float) -> bool:
     if not feasible or len(vfs) < window:
@@ -1400,18 +1427,32 @@ def run_optimization(cfg: Config, resume: bool = False,
         if status.state == "running":
             status.state = "stopped"
         st.write_status(work, status)
-        # Post-run: best-effort OpenRadioss anim -> LS-Dyna d3plot of the final
-        # design, for EVERY load case (each in its own solve dir). Done while the
-        # run still owns the pid (so the GUI stays 'running' and won't recycle
-        # solve/ mid-conversion); never let post-processing affect the run's
-        # result/state.
+        # Post-run: best-effort OpenRadioss anim -> LS-Dyna d3plot of the **last
+        # feasible** design, for EVERY load case (each in its own solve dir). Near
+        # convergence the optimiser oscillates across the constraint boundary, so
+        # the last *solved* iteration is often infeasible; the last feasible
+        # iteration's animation is read from its per-iteration archive
+        # (work/iter_NNNN/) so the d3plot matches the design the report renders,
+        # falling back to the live solve dir when that archive isn't available.
+        # Done while the run still owns the pid (so the GUI stays 'running' and
+        # won't recycle solve/ mid-conversion); never let post-processing affect
+        # the run's result/state.
+        feas_it = reported_iteration(work)
         for i, case in enumerate(cases):
             try:
+                solve_dir = _case_solve_dir(solve_root, n_cases, i)
                 # Pass the case's own stem so convert_final finds its <stem>A0*
                 # animation. Distinct stems -> the per-case d3plot files never
                 # collide in work/d3plot/.
-                convert_final(cfg, _case_solve_dir(solve_root, n_cases, i),
-                              work, stem=case.stem, log=log)
+                anim_dir, used_archive = _final_anim_dir(
+                    work, feas_it, case.stem, n_cases, solve_dir)
+                if used_archive:
+                    log(f"[oropt] d3plot: {case.stem}: converting the last feasible "
+                        f"design (iteration {feas_it})")
+                else:
+                    log(f"[oropt] d3plot: {case.stem}: converting the last solved "
+                        f"iteration (no archived feasible-iteration animation)")
+                convert_final(cfg, anim_dir, work, stem=case.stem, log=log)
             except Exception as exc:  # noqa: BLE001
                 log(f"[oropt] d3plot: unexpected error during conversion: {exc}")
         try:

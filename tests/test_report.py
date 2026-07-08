@@ -234,6 +234,21 @@ def test_reported_topology_src_prefers_snapshot(tmp_path):
     assert report._reported_topology_src(tmp_path, 99).name == st.TOPOLOGY
 
 
+def test_reported_iteration_from_disk(tmp_path):
+    # Public helper other post-run steps (d3plot) share: reads history.csv and
+    # returns the last feasible iteration, the last iteration when none is
+    # feasible, and -1 with no history.
+    _make_mixed_run(tmp_path, feas=[True, True, False], sigmas=[700, 731.5, 863.9])
+    assert report.reported_iteration(tmp_path) == 1
+
+    other = tmp_path / "infeasible"
+    other.mkdir()
+    _make_mixed_run(other, feas=[False, False, False], sigmas=[900, 905, 903])
+    assert report.reported_iteration(other) == 2
+
+    assert report.reported_iteration(tmp_path / "empty") == -1
+
+
 def test_write_report_headlines_last_feasible_design(tmp_path):
     # Mirrors opti_run5_Ti: the last iteration is infeasible but an earlier one is
     # feasible, so the report headlines the feasible design and notes the ending.

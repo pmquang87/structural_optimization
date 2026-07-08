@@ -350,3 +350,46 @@ def test_solve_cases_concurrent_failure_truncates(tmp_path, monkeypatch):
         reuse_dirs=[None] * 3, status=Status(), work=tmp_path, it=0, log=lambda *_: None)
     assert case_results == ["res-c0"]                       # prefix before failure
     assert not run_results[-1].ok                           # ends at the failure
+
+
+# --- d3plot animation source = last feasible iteration's archive ------------ #
+def test_archived_iter_dir_layout(tmp_path):
+    # Mirrors _archive_iteration: single case -> iter_NNNN/, multi -> iter_NNNN/<stem>/
+    assert loop._archived_iter_dir(tmp_path, 5, "s", 1) == tmp_path / "iter_0005"
+    assert (loop._archived_iter_dir(tmp_path, 28, MULTILOAD_STEM, 2)
+            == tmp_path / "iter_0028" / MULTILOAD_STEM)
+
+
+def test_final_anim_dir_prefers_archived_feasible_single_case(tmp_path):
+    solve_dir = tmp_path / "solve"
+    _fake_solve_outputs(solve_dir, MULTILOAD_STEM)
+    _archive_iteration(solve_dir, tmp_path, MULTILOAD_STEM, 3)   # single-case archive
+    got, used = loop._final_anim_dir(tmp_path, 3, MULTILOAD_STEM, 1, solve_dir)
+    assert used is True and got == tmp_path / "iter_0003"
+    assert sorted(got.glob(MULTILOAD_STEM + "A0*"))             # the archived anim
+
+
+def test_final_anim_dir_prefers_archived_feasible_multi_case(tmp_path):
+    solve_dir = tmp_path / "solve" / "case_0"
+    _fake_solve_outputs(solve_dir, MULTILOAD_STEM)
+    _archive_iteration(solve_dir, tmp_path, MULTILOAD_STEM, 7, subdir=MULTILOAD_STEM)
+    got, used = loop._final_anim_dir(tmp_path, 7, MULTILOAD_STEM, 2, solve_dir)
+    assert used is True and got == tmp_path / "iter_0007" / MULTILOAD_STEM
+
+
+def test_final_anim_dir_falls_back_without_archive(tmp_path):
+    # No iter_0003 archive -> convert the live (last-solved) solve dir instead.
+    solve_dir = tmp_path / "solve"
+    _fake_solve_outputs(solve_dir, MULTILOAD_STEM)
+    got, used = loop._final_anim_dir(tmp_path, 3, MULTILOAD_STEM, 1, solve_dir)
+    assert used is False and got == solve_dir
+
+
+def test_final_anim_dir_falls_back_when_no_feasible_iteration(tmp_path):
+    # feas_it == -1 (no feasible iteration) -> the fallback solve dir, even though
+    # an archive happens to exist for other iterations.
+    solve_dir = tmp_path / "solve"
+    _fake_solve_outputs(solve_dir, MULTILOAD_STEM)
+    _archive_iteration(solve_dir, tmp_path, MULTILOAD_STEM, 3)
+    got, used = loop._final_anim_dir(tmp_path, -1, MULTILOAD_STEM, 1, solve_dir)
+    assert used is False and got == solve_dir
