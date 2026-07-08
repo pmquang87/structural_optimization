@@ -851,17 +851,34 @@ def _animation_html(work: Path) -> str:
             f'<figcaption>Topology evolution</figcaption></figure>')
 
 
-def _final_design_html(scene: Optional[Path], topo: Optional[Path]) -> str:
+def _design_caption(s: Summary) -> str:
+    """The final-design caption, naming which iteration is rendered.
+
+    The rendered design is the reported (last feasible) iteration — see
+    :func:`_pick_reported` — so spell out that iteration number, and whether it was
+    feasible, right on the 3D view (a ``-1`` iteration, i.e. no history, drops the
+    suffix)."""
+    if s.reported_iteration < 0:
+        return "Final design"
+    if s.all_infeasible:
+        return (f"Final design — iteration {s.reported_iteration} "
+                f"(last iteration, infeasible)")
+    return f"Final design — iteration {s.reported_iteration} (last feasible)"
+
+
+def _final_design_html(scene: Optional[Path], topo: Optional[Path],
+                       label: str) -> str:
     """The 'Final design' block: interactive viewer if exported, else the static
     PNG, else a note pointing at the topology files.
 
-    The interactive scene (zoom/rotate, like the Monitor tab) is inlined via an
-    ``<iframe srcdoc>`` while it's under :data:`MAX_INLINE_SCENE_BYTES` so
-    report.html stays one self-contained, offline-viewable file; a larger scene is
-    referenced as the sibling ``report_topology.html`` instead.
+    *label* names the rendered iteration (see :func:`_design_caption`) and is used
+    as the figure caption. The interactive scene (zoom/rotate, like the Monitor tab)
+    is inlined via an ``<iframe srcdoc>`` while it's under
+    :data:`MAX_INLINE_SCENE_BYTES` so report.html stays one self-contained,
+    offline-viewable file; a larger scene is referenced as the sibling
+    ``report_topology.html`` instead.
     """
-    cap = ('<figcaption>Final design — drag to rotate, scroll to zoom'
-           '</figcaption>')
+    label = escape(label)
     if scene is not None and scene.is_file():
         try:
             inline = scene.stat().st_size <= MAX_INLINE_SCENE_BYTES
@@ -874,12 +891,13 @@ def _final_design_html(scene: Optional[Path], topo: Optional[Path]) -> str:
             attr = f'src="{escape(scene.name)}"'           # too big -> sibling file
         return (f'  <figure class="topo"><iframe class="scene" {attr} '
                 f'title="Final design (interactive)" loading="lazy"></iframe>'
-                f'{cap}</figure>')
+                f'<figcaption>{label} — drag to rotate, scroll to zoom'
+                f'</figcaption></figure>')
 
     topo_uri = _data_uri(topo) if topo else None
     if topo_uri:
         return (f'  <figure class="topo"><img alt="Final design" src="{topo_uri}">'
-                f'<figcaption>Final design</figcaption></figure>')
+                f'<figcaption>{label}</figcaption></figure>')
     return ('  <p class="note">(no rendered image — see the topology files under '
             '<em>Artefacts</em>)</p>')
 
@@ -920,7 +938,7 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
     # Monitor tab; the static PNGs remain as the <noscript> fallback.
     charts_html = _interactive_charts_html(history, s, charts)
 
-    topo_html = _final_design_html(scene, topo)
+    topo_html = _final_design_html(scene, topo, _design_caption(s))
 
     anim_html = _animation_html(work)
 
