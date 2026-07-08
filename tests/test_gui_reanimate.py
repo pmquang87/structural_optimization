@@ -1,6 +1,7 @@
-"""The dashboard's 🎬 Re-animate tab: a smoke test that the script renders the
-new tab end-to-end, and that pointing it at a folder with enough per-iteration
-snapshots enables the Generate button (no real GL render is triggered)."""
+"""The dashboard's 🛠 Re-postprocessing tab: a smoke test that the script renders
+the tab end-to-end, that pointing it at a folder with enough per-iteration
+snapshots enables the Generate button, and that the Re-generate report button is
+gated on a valid run folder (no real GL render is triggered)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,15 +25,15 @@ def _write_cfg(tmp_path) -> Path:
     return cfg_path
 
 
-def test_app_renders_reanimate_tab(tmp_path):
-    """The Streamlit script renders with the new Re-animate tab present."""
+def test_app_renders_repostprocess_tab(tmp_path):
+    """The Streamlit script renders with the Re-postprocessing tab present."""
     AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
     _write_cfg(tmp_path)
     # Cold-process import of streamlit/pyvista is slow on first run (>3s).
     at = AppTest.from_file(_app_file(), default_timeout=30)
     at.run()
     assert not at.exception
-    assert any("Re-animate" in t.label for t in at.tabs)
+    assert any("Re-postprocessing" in t.label for t in at.tabs)
 
 
 def test_reanimate_tab_detects_frames_and_enables_generate(tmp_path):
@@ -65,6 +66,30 @@ def test_reanimate_tab_detects_frames_and_enables_generate(tmp_path):
     assert any("3 frames found" in m.value for m in at.success)
     gen = next(b for b in at.button if b.label == "🎬 Generate animation")
     assert not gen.disabled                   # ≥2 frames + valid .gif name -> enabled
+
+
+def test_repostprocess_tab_report_button_gated_on_folder(tmp_path):
+    """The Re-postprocessing tab exposes a 📝 Re-generate report button, disabled
+    for a nonexistent run folder and enabled once it points at an existing one."""
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+    cfg_path = _write_cfg(tmp_path)
+    run_dir = tmp_path / "oldrun"
+    run_dir.mkdir()
+
+    at = AppTest.from_file(_app_file(), default_timeout=30)
+    at.run()
+    at.sidebar.text_input[0].set_value(str(cfg_path)).run()
+
+    folder = next(t for t in at.text_input if t.label == "Run folder")
+    folder.set_value(str(tmp_path / "empty")).run()
+    btn = next(b for b in at.button if b.label == "📝 Re-generate report")
+    assert btn.disabled                          # nonexistent folder -> disabled
+
+    folder = next(t for t in at.text_input if t.label == "Run folder")
+    folder.set_value(str(run_dir)).run()
+    assert not at.exception
+    btn = next(b for b in at.button if b.label == "📝 Re-generate report")
+    assert not btn.disabled                      # existing folder -> enabled
 
 
 def test_reanimate_surface_colour_is_a_dropdown_with_named_colours(tmp_path):

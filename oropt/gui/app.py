@@ -43,6 +43,7 @@ from oropt.gui.runstate import find_active_run
 from oropt.growthmesh import GROWTH_MESH_DIRNAME, point_config_at
 from oropt.loop import copy_iter0, preview_growth_boxes
 from oropt.mesh import Mesh, overlay_primitives
+from oropt.report import write_report
 from oropt.gui.views import (VIEW_COLUMNS, custom_views_from_records,
                              records_from_custom_views)
 from oropt.validate import ERROR, check_config, has_errors
@@ -250,8 +251,8 @@ def render_camera_settings(opts: AnimateOpts, key_prefix: str) -> None:
     """Render the evolution-animation camera & playback widgets into *opts*.
 
     Shared by the Optimizer / Output tab (settings the post-run animation will
-    use) and the 🎬 Re-animate tab (settings for an on-demand re-render), so the two
-    can never drift. Every widget writes straight back into the passed *opts*
+    use) and the 🛠 Re-postprocessing tab (settings for an on-demand re-render), so
+    the two can never drift. Every widget writes straight back into the passed *opts*
     (an :class:`~oropt.config.AnimateOpts`); *key_prefix* keeps the two instances'
     Streamlit widget keys distinct so both can live on the page at once.
     """
@@ -348,8 +349,9 @@ def render_appearance_settings(opts: AnimateOpts, key_prefix: str
     """Render the evolution-animation appearance & resolution widgets into *opts*.
 
     Shared by the Optimizer / Output tab (the look the post-run animation will use)
-    and the 🎬 Re-animate tab (an on-demand re-render), so the two can never drift — the
-    same split as :func:`render_camera_settings`. Returns ``(color_ok, bg_ok)`` from
+    and the 🛠 Re-postprocessing tab (an on-demand re-render), so the two can never
+    drift — the same split as :func:`render_camera_settings`. Returns ``(color_ok,
+    bg_ok)`` from
     the two colour pickers so the caller can gate its action button on valid
     colours. *key_prefix* namespaces the widgets so both instances coexist.
     """
@@ -1392,32 +1394,37 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
     queue_monitor()
 
 
-# ---- Re-animate tab --------------------------------------------------------
-def render_reanimate_tab(cfg: Config, default_folder: Path) -> None:
-    """Re-render the topology-evolution GIF for an *existing* run with fresh
-    camera / resolution / playback settings — no re-solving.
+# ---- Re-postprocessing tab -------------------------------------------------
+def render_postprocess_tab(cfg: Config, default_folder: Path) -> None:
+    """Re-run post-processing on an *existing* finished run — without re-solving.
 
-    A spin-off of the post-run animation: it reads the same per-iteration
-    ``topology_smoothed_iter*`` (or raw ``topology_iter*.vtu``) snapshots a finished
-    run already wrote and re-encodes them via :func:`oropt.animate.make_animation`,
-    writing a **new** GIF into the run folder so the run's original is preserved
-    unless its name is reused. The render runs in :mod:`oropt.animate`'s isolated
-    off-screen subprocess (crash containment), so it is safe to drive synchronously
-    from here.
+    Groups the on-demand post-run tools that act on a run folder the loop already
+    wrote: re-render the topology-evolution GIF (fresh camera / resolution /
+    playback, via :func:`oropt.animate.make_animation`) and re-generate the report
+    (:func:`oropt.report.write_report`). Both only *read* the run's per-iteration
+    artefacts and re-write their own outputs, so they never touch the run; the
+    heavy renders run in isolated off-screen subprocesses (crash containment), safe
+    to drive synchronously from here. More tools can be added below over time.
     """
-    st.subheader("Re-animate a finished run")
+    st.subheader("Re-post-process a finished run")
     st.caption(
-        "Re-render the topology-evolution GIF from an **existing** run's "
-        "per-iteration surfaces with new settings (camera angle, resolution, "
-        "colours, playback) — without re-running the optimisation. Writes a new "
-        "GIF into the run folder, leaving the original `topology_evolution.gif` "
-        "untouched unless you reuse its name.")
+        "Re-run post-processing on an **existing** finished run — without "
+        "re-solving. Set the run folder, then use the tools below (re-render the "
+        "evolution animation, or re-generate the report). More tools may be added "
+        "here over time.")
 
     folder = Path(st.text_input(
         "Run folder", str(default_folder), key="reanim_folder",
-        help="A finished run's output folder — the one holding the per-iteration "
-             "topology_smoothed_iter*/topology_iter* snapshots. Defaults to the "
+        help="A finished run's output folder — the one holding its status.json / "
+             "history.csv and the per-iteration topology snapshots. Defaults to the "
              "currently selected run."))
+
+    st.markdown("#### 🎬 Evolution animation")
+    st.caption(
+        "Re-render the topology-evolution GIF from the run's per-iteration surfaces "
+        "with new settings (camera angle, resolution, colours, playback). Writes a "
+        "new GIF into the run folder, leaving the original `topology_evolution.gif` "
+        "untouched unless you reuse its name.")
     n_frames, src = frame_count(folder) if str(folder).strip() else (0, "")
     ready = bool(str(folder).strip()) and folder.exists() and n_frames >= 2
     if not str(folder).strip() or not folder.exists():
@@ -1469,6 +1476,42 @@ def render_reanimate_tab(cfg: Config, default_folder: Path) -> None:
                 pass
         else:
             st.error("No GIF produced — see the render log above.")
+
+    # ---- re-generate the report ------------------------------------------
+    st.markdown("---")
+    st.markdown("#### 📝 Report")
+    st.caption(
+        "Re-generate `report.html` / `report.md` for this run from its "
+        "`status.json` + `history.csv` — the summary, the interactive convergence "
+        "charts, and a render of the **last feasible** design. Handy to refresh a "
+        "run whose report predates an oropt update.")
+    report_ready = bool(str(folder).strip()) and folder.exists()
+    if not report_ready:
+        st.caption("Set a valid run folder above to enable this.")
+    if st.button("📝 Re-generate report", key="repost_report",
+                 disabled=not report_ready):
+        # Prefer the run's own frozen config (config_used.yaml — what it actually
+        # ran with) so the report's optimiser/limits match the run, not the config
+        # currently loaded in the GUI; fall back to the loaded one if it's absent.
+        rcfg = cfg
+        run_cfg = folder / "config_used.yaml"
+        if run_cfg.is_file():
+            try:
+                rcfg = Config.from_yaml(str(run_cfg))
+            except Exception:  # noqa: BLE001 - fall back to the loaded config
+                rcfg = cfg
+        logs: list[str] = []
+        with st.spinner("Regenerating report (rendering the 3D view may take a "
+                        "moment)…"):
+            out = write_report(rcfg, folder, logs.append)
+        if logs:
+            with st.expander("Report log", expanded=out is None):
+                for line in logs:
+                    st.text(line)
+        if out is not None and out.is_file():
+            st.success(f"Wrote `{out.name}` (+ `report.md`) in {folder}")
+        else:
+            st.warning("No report written — see the log above.")
 
 
 # ---- Queue tab -------------------------------------------------------------
@@ -1681,7 +1724,7 @@ if qcol[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive)
 # ---- tabs (each body lives in a render_*_tab function above) ---------------
 tab_in, tab_lc, tab_con, tab_mon, tab_anim, tab_q = st.tabs(
     ["📥 Input", "🔀 Load cases", "🎚 Optimizer / Output", "📊 Monitor",
-     "🎬 Re-animate", "🧮 Queue"])
+     "🛠 Re-postprocessing", "🧮 Queue"])
 with tab_in:
     render_input_tab(cfg)
 with tab_lc:
@@ -1691,7 +1734,7 @@ with tab_con:
 with tab_mon:
     render_monitor_tab(cfg, live_dir, refresh_s)   # follow the live run's folder
 with tab_anim:
-    render_reanimate_tab(cfg, live_dir)            # re-render an existing run's GIF
+    render_postprocess_tab(cfg, live_dir)          # re-run post-processing on a run
 with tab_q:
     render_queue_tab(cfg_path)
 
