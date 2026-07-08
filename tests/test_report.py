@@ -392,6 +392,38 @@ def test_write_report_embeds_interactive_scene(tmp_path, monkeypatch):
     assert "report_topology.html" in md                      # md links the viewer
 
 
+def test_report_3d_view_caption_names_iteration(tmp_path, monkeypatch):
+    # The final-design 3D view caption names the rendered (last feasible) iteration:
+    # here iterations 0,1 are feasible and 2 is not, so it renders iteration 1.
+    _make_mixed_run(tmp_path, feas=[True, True, False], sigmas=[700, 731.5, 863.9])
+    _force_scene_export(monkeypatch)
+    write_report(_cfg("beso"), tmp_path, lambda *_: None)
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert '<iframe class="scene"' in html
+    assert "Final design — iteration 1 (last feasible)" in html
+
+
+def test_design_caption_variants():
+    # The caption names the reported iteration + its feasibility (no disk/GL).
+    cfg = _cfg("beso")
+    feas = _summarise(cfg, None, [
+        {"iteration": 0, "volume_fraction": 1.0, "sigma_max": 700, "disp": 0.9,
+         "feasible": True},
+        {"iteration": 1, "volume_fraction": 0.9, "sigma_max": 731, "disp": 0.94,
+         "feasible": True},
+        {"iteration": 2, "volume_fraction": 0.88, "sigma_max": 863, "disp": 0.98,
+         "feasible": False}])
+    assert report._design_caption(feas) == "Final design — iteration 1 (last feasible)"
+    infeasible = _summarise(cfg, None, [
+        {"iteration": 0, "volume_fraction": 1.0, "sigma_max": 900, "disp": 0.9,
+         "feasible": False},
+        {"iteration": 1, "volume_fraction": 0.9, "sigma_max": 905, "disp": 0.94,
+         "feasible": False}])
+    assert (report._design_caption(infeasible)
+            == "Final design — iteration 1 (last iteration, infeasible)")
+    assert report._design_caption(_summarise(cfg, None, [])) == "Final design"
+
+
 def test_write_report_large_scene_is_linked_not_inlined(tmp_path, monkeypatch):
     # A scene over the inline cap is referenced as the sibling file (src=) so
     # report.html stays light instead of inlining megabytes of vtk.js.
