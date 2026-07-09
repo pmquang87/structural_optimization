@@ -497,3 +497,49 @@ def test_render_failure_falls_back_to_link(tmp_path, monkeypatch):
     assert any("render failed" in m for m in logs)
     html = (tmp_path / "report.html").read_text(encoding="utf-8")
     assert "topology_latest.vtu" in html
+
+
+# --- CLI (oropt-report) ------------------------------------------------------ #
+def test_cli_regenerates_report(tmp_path, capsys):
+    _make_run(tmp_path)
+    rc = report.main([str(tmp_path), "--no-render", "--no-charts"])
+    assert rc == 0
+    assert (tmp_path / "report.html").is_file()
+    assert (tmp_path / "report.md").is_file()
+
+
+def test_cli_missing_folder_fails(tmp_path):
+    assert report.main([str(tmp_path / "nope"), "--no-render"]) == 1
+
+
+def test_cli_prefers_frozen_config_and_forces_enabled(tmp_path, capsys):
+    # The run's frozen config_used.yaml names the optimiser the run really used
+    # (levelset, not the default beso) AND disabled the automatic report — the
+    # explicit CLI invocation must still write one, summarised as levelset.
+    _make_run(tmp_path)
+    cfg = Config()
+    cfg.optimizer = "levelset"
+    cfg.report.enabled = False
+    cfg.to_yaml(tmp_path / "config_used.yaml")
+    rc = report.main([str(tmp_path), "--no-render", "--no-charts"])
+    assert rc == 0
+    assert "levelset" in (tmp_path / "report.md").read_text(encoding="utf-8")
+
+
+def test_cli_explicit_config_wins(tmp_path):
+    _make_run(tmp_path)
+    cfg = Config()
+    cfg.optimizer = "tobs"
+    cfg.to_yaml(tmp_path / "other.yaml")
+    rc = report.main([str(tmp_path), "--config", str(tmp_path / "other.yaml"),
+                      "--no-render", "--no-charts"])
+    assert rc == 0
+    assert "tobs" in (tmp_path / "report.md").read_text(encoding="utf-8")
+
+
+def test_cli_bad_explicit_config_fails(tmp_path):
+    _make_run(tmp_path)
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("optimizer: [unclosed", encoding="utf-8")
+    assert report.main([str(tmp_path), "--config", str(bad),
+                        "--no-render", "--no-charts"]) == 1

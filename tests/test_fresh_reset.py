@@ -106,3 +106,41 @@ def test_fresh_run_truncates_prior_history(tmp_path, mini_deck_path,
     assert len(rows) == 1
     assert rows[0]["iteration"] == "0"
     assert float(rows[0]["sigma_max"]) == 100.0
+
+
+def test_resume_without_checkpoint_falls_back_to_fresh(tmp_path, mini_deck_path,
+                                                       mini_engine_path,
+                                                       monkeypatch):
+    """--resume with no checkpoint.npz (e.g. the prior run crashed during
+    iteration 0, before the first save) used to start from scratch silently
+    while KEEPING the old history/snapshots -- duplicate iteration numbers, and
+    the post-run last-feasible selection could pick the old run's design. It
+    must downgrade to a fresh run, stale outputs cleared."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "lc_a_0000.rad").write_text(
+        mini_deck_path.read_text(encoding="utf-8"), encoding="utf-8")
+    (case_dir / "lc_a_0001.rad").write_text(
+        mini_engine_path.read_text(encoding="utf-8"), encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / st.HISTORY).write_text(
+        "iteration,volume_fraction,sigma_max,disp,elements_alive,feasible,"
+        "iter_wall_s,or_termination,optimizer\n"
+        "0,1.0,50.0,0.0,2,True,1.0,NORMAL,beso\n", encoding="utf-8")
+    assert not (out / st.CHECKPOINT).exists()
+
+    monkeypatch.setattr(loop_mod, "run_solver",
+                        lambda cfg, run_dir, stem=None:
+                        RunResult(True, "ok", "NORMAL TERMINATION"))
+    monkeypatch.setattr(loop_mod, "extract",
+                        lambda *a, **k: _results(100.0, 0.1, [2.0, 1.0]))
+
+    cfg = _cfg(case_dir, out, [LoadCase(name="a", stem="lc_a")], max_iter=1)
+    logs: list[str] = []
+    loop_mod.run_optimization(cfg, resume=True, log=logs.append)
+
+    rows = st.read_history(cfg.work())
+    assert len(rows) == 1                        # old row cleared, not appended-to
+    assert float(rows[0]["sigma_max"]) == 100.0  # ... and it is the NEW run's row
+    assert any("starting FRESH" in m for m in logs)

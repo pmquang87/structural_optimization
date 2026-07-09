@@ -216,7 +216,12 @@ class Deck:
         while j < n and not _is_section(self.lines[j]):
             s = self.lines[j].lstrip()
             if s[:1].isdigit():                      # node-id line (skip title/comments)
-                ids.extend(int(t) for t in self.lines[j].split())
+                try:
+                    vals = [int(t) for t in self.lines[j].split()]
+                except ValueError:
+                    pass    # a digit-leading TITLE (e.g. "2nd_symmetry_set"), not data
+                else:
+                    ids.extend(vals)
             j += 1
         return np.asarray(ids, dtype=np.int64)
 
@@ -243,13 +248,23 @@ class Deck:
         diam: Optional[float] = None
         n = len(self.lines)
         j = start + 1
+        title_skipped = False
         while j < n and not _is_section(self.lines[j]):
             if not _is_comment(self.lines[j]):
+                if not title_skipped:
+                    # The card's mandatory title line. Skipped unconditionally:
+                    # a purely NUMERIC title (e.g. "1234") would otherwise be
+                    # consumed as the skew_ID [Diam] line, dropping the real one
+                    # (box() then reports the card missing -- or worse, attaches
+                    # an unrelated /SKEW frame to the box).
+                    title_skipped = True
+                    j += 1
+                    continue
                 toks = self.lines[j].split()
                 try:
                     vals = [float(t) for t in toks]
                 except ValueError:
-                    vals = []                        # non-numeric -> the title
+                    vals = []                        # non-numeric junk line
                 if len(vals) >= 3:
                     pts.append((vals[0], vals[1], vals[2]))
                 elif vals and skew_id is None:       # 1-2 tokens: skew_ID [Diam]

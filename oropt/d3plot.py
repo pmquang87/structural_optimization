@@ -50,8 +50,15 @@ def _resolve_python(opts: D3plotOpts) -> str:
     if opts.python_exe.strip():
         return opts.python_exe.strip()
     tool_root = _resolve_tool_root(opts)
-    venv = Path(tool_root) / ".venv" / "Scripts" / "python.exe" if tool_root else None
-    return str(venv) if venv and venv.is_file() else sys.executable
+    if tool_root:
+        # Probe both venv layouts -- Scripts/python.exe is Windows-only; a
+        # provisioned POSIX venv (bin/python) was silently skipped, dropping
+        # to sys.executable, which by design lacks the converter's deps.
+        for rel in (("Scripts", "python.exe"), ("bin", "python")):
+            venv = Path(tool_root, ".venv", *rel)
+            if venv.is_file():
+                return str(venv)
+    return sys.executable
 
 
 def convert_stem(stem_path: Path, opts: D3plotOpts,

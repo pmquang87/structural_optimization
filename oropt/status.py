@@ -18,6 +18,7 @@ import csv
 import json
 import os
 import sys
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -230,6 +231,12 @@ def pid_alive(pid: Optional[int]) -> bool:
     try:
         os.kill(int(pid), 0)
         return True
+    except PermissionError:
+        # EPERM: the process EXISTS but belongs to another user (e.g. the GUI /
+        # queue runner probing a run launched under a different account). It
+        # must read as alive, or the double-launch guard lets a second run
+        # corrupt the live one's work dir.
+        return True
     except (OSError, ProcessLookupError):
         return False
 
@@ -254,11 +261,18 @@ def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray
     are stateless and pass neither. On an optimiser *switch* the destination reloads
     only the field that matches its own kind (see the loop), so a phi never lands in
     HCA's ``x`` or vice versa — the mismatched field is dropped and re-initialised."""
-    np.savez(Path(work_dir) / CHECKPOINT, iteration=iteration,
+    # Atomic like status.json: the checkpoint is the run's ONLY resume state and
+    # the GUI polls it every rerun, so an in-place rewrite risks (a) a reader
+    # catching a half-written zip and (b) a crash mid-write destroying the
+    # resume state of every completed iteration. Write aside, then replace.
+    final = Path(work_dir) / CHECKPOINT
+    tmp = final.with_name(final.stem + ".tmp.npz")   # keep .npz so savez doesn't append one
+    np.savez(tmp, iteration=iteration,
              alive_mask=alive_mask,
              sens_prev=(sens_prev if sens_prev is not None else np.array([])),
              phi=(phi if phi is not None else np.array([])),
              x=(x if x is not None else np.array([])))
+    os.replace(tmp, final)
 
 
 def checkpoint_iteration(work_dir: str | Path) -> Optional[int]:
@@ -275,7 +289,10 @@ def checkpoint_iteration(work_dir: str | Path) -> Optional[int]:
     try:
         with np.load(p) as d:
             return int(d["iteration"])
-    except (OSError, KeyError, ValueError):
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        # BadZipFile: a truncated/corrupt checkpoint (e.g. from a crash before
+        # writes became atomic) must degrade to "no checkpoint", not crash the
+        # GUI poller.
         return None
 
 

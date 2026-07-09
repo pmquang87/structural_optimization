@@ -98,3 +98,13 @@ def test_convert_final_defaults_to_primary_case_stem(tmp_path):
     logs: list[str] = []
     assert convert_final(cfg, solve_dir, tmp_path, log=logs.append) is None
     assert any("deck_pullA0*" in m for m in logs)
+
+
+def test_resolve_python_finds_posix_venv(tmp_path):
+    """A provisioned POSIX venv (.venv/bin/python) was silently skipped --
+    only the Windows Scripts/python.exe layout was probed, so on Linux the
+    converter ran under sys.executable, which by design lacks its deps."""
+    py = tmp_path / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("", encoding="utf-8")
+    assert _resolve_python(D3plotOpts(tool_root=str(tmp_path))) == str(py)

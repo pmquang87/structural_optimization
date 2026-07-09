@@ -162,3 +162,44 @@ def test_next_target_vf_damps_removal_near_the_limit():
     at_limit = b.next_target_vf(0.8, feasible=True, violation=1.0)
     assert at_limit == 0.8
     assert full < half < at_limit            # closer to the limit -> less removal
+
+
+# ---- id mapping: card order + empty overlap ----------------------------------
+def test_map_sensitivity_unsorted_deck_ids():
+    """deck.elem_ids is raw card order -- Radioss does not require id-ascending
+    element cards. searchsorted on unsorted ids silently mapped most elements
+    to 0 and some to ANOTHER element's energy."""
+    from oropt.beso import map_sensitivity
+    elem_ids = np.array([3, 1, 2])                    # card order, not ascending
+    res = Results(element_ids=np.array([1, 2, 3]),
+                  energy=np.array([10.0, 20.0, 30.0]),
+                  vonmises=np.array([1.0, 2.0, 3.0]),
+                  sigma_max=3.0, disp=0.1, disp_node_id=None)
+    assert map_sensitivity(res, elem_ids, "energy").tolist() == [30, 10, 20]
+    assert map_sensitivity(res, elem_ids, "vonmises").tolist() == [3, 1, 2]
+
+
+def test_map_sensitivity_blend_no_overlap_returns_zeros():
+    """A result set with no design-part ids (e.g. a misconfigured
+    design_part_id) must degrade to all-zero like the energy path -- the blend
+    path used to crash on empty .max()."""
+    from oropt.beso import map_sensitivity
+    elem_ids = np.array([1, 2, 3])
+    res = Results(element_ids=np.array([100, 101]),
+                  energy=np.array([1.0, 2.0]),
+                  vonmises=np.array([1.0, 2.0]),
+                  sigma_max=2.0, disp=0.1, disp_node_id=None)
+    for mode in ("energy", "vonmises", "blend"):
+        assert map_sensitivity(res, elem_ids, mode).tolist() == [0, 0, 0]
+
+
+def test_scatter_unsorted_deck_ids():
+    """loop._scatter (the von-Mises view / stress-ratio field) shares the
+    id-mapping and must be card-order-agnostic too."""
+    from oropt.loop import _scatter
+    elem_ids = np.array([3, 1, 2])
+    res = Results(element_ids=np.array([1, 3]),
+                  energy=np.array([0.0, 0.0]),
+                  vonmises=np.array([11.0, 33.0]),
+                  sigma_max=33.0, disp=0.1, disp_node_id=None)
+    assert _scatter(res, elem_ids).tolist() == [33, 11, 0]

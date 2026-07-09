@@ -17,7 +17,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from . import status as st
-from .beso import Beso, combine_sensitivity
+from .beso import Beso, combine_sensitivity, id_positions
 from .config import Config, ResolvedCase
 from .d3plot import convert_final
 from .deck import Deck, prepare_engine
@@ -938,6 +938,16 @@ def run_optimization(cfg: Config, resume: bool = False,
     solve_root = work / "solve"
     m = cfg.model
 
+    # A resume without a checkpoint (e.g. the prior run crashed during iteration
+    # 0, before the first save) would silently start from scratch *while keeping*
+    # the old history/snapshots -- duplicated iteration numbers, and the post-run
+    # last-feasible selection could pick the OLD run's design. Downgrade to a
+    # fresh run loudly, so the stale-output reset below applies.
+    if resume and not (work / st.CHECKPOINT).exists():
+        log(f"[oropt] resume requested but no {st.CHECKPOINT} in {work} -- "
+            "starting FRESH instead (previous history/snapshots are cleared)")
+        resume = False
+
     # Snapshot the exact config this run uses into its own run folder so every
     # result set carries the config that produced it; a resume also preserves the
     # prior stage's snapshot and reports the optimiser it used (for a switch flag).
@@ -946,6 +956,11 @@ def run_optimization(cfg: Config, resume: bool = False,
     (work / "stop.flag").unlink(missing_ok=True)   # ignore any stale stop request
     if not resume:                                   # fresh run: don't let a prior
         _reset_stale_outputs(work, log)              # run's history/snapshots mix in
+    # Claim the run dir NOW, not after setup: deck parsing + mesh/filter building
+    # take minutes on production meshes, and until run.pid exists `is_running` is
+    # False -- the whole window the GUI's Start button and the queue runner's
+    # busy-wait use to decide a second launch into this folder is safe.
+    pid = st.write_pid(work)
     if should_stop is None:                          # GUI "Stop" drops a stop.flag
         def should_stop() -> bool:
             return (work / "stop.flag").exists()
@@ -1103,7 +1118,6 @@ def run_optimization(cfg: Config, resume: bool = False,
         # neighbour parts; hold it void from the first iteration on.
         alive = alive & keep_growable
 
-    pid = st.write_pid(work)
     # Placeholder headline limits until the first iteration publishes real ones:
     # the primary case's stress limit and its tightest displacement limit.
     primary_d_limits = [dc.d_allow for dc in primary.disp_constraints
@@ -1120,6 +1134,13 @@ def run_optimization(cfg: Config, resume: bool = False,
 
     vfs: list[float] = []
     elapsed = 0.0
+    # Whole-run wall-clock budget (run.max_wall_hours, 0 = off). Measured from
+    # here — setup included — so it tracks what a cluster/session limit would
+    # see. Checked only at iteration boundaries: a solve in flight is never
+    # killed, and the checkpoint written at the end of each iteration makes the
+    # stop cleanly resumable.
+    run_t0 = time.time()
+    budget_s = max(0.0, float(cfg.run.max_wall_hours)) * 3600.0
     consecutive_diverged = 0     # non-converged iterations in a row (watchdog)
     # Controller-stall guards (warn-only): a grow request that still loses
     # volume means something outside the volume controller is eating material
@@ -1134,6 +1155,15 @@ def run_optimization(cfg: Config, resume: bool = False,
         for it in range(start_iter, oc.max_iter):
             if should_stop and should_stop():
                 status.state = "stopped"; status.message = "stop requested"
+                break
+            if budget_s > 0.0 and (time.time() - run_t0) >= budget_s:
+                wall_h = (time.time() - run_t0) / 3600.0
+                status.state = "stopped"
+                status.message = (
+                    f"wall-clock budget reached ({wall_h:.2f} h >= "
+                    f"run.max_wall_hours={cfg.run.max_wall_hours:g} h)")
+                log(f"[oropt] {status.message} -- stopping cleanly "
+                    "(continue later with --resume)")
                 break
 
             log(f"[oropt] iter {it}: vf={opt.volume_fraction(alive):.3f} "
@@ -1368,6 +1398,14 @@ def run_optimization(cfg: Config, resume: bool = False,
                 status.state = "converged"
                 status.message = "converged at target volume, feasible"
                 st.write_status(work, status)
+                # Keep the checkpoint's `it + 1` invariant on this exit too:
+                # iteration `it` fully completed (solved, published, archived),
+                # so an extend-max_iter resume must start AFTER it -- not
+                # re-solve the identical converged design and append a
+                # duplicate history row.
+                st.save_checkpoint(work, it + 1, alive, sens,
+                                   phi=getattr(opt, "phi", None),
+                                   x=getattr(opt, "x", None))
                 log("[oropt] CONVERGED")
                 break
 
@@ -1486,10 +1524,8 @@ def run_optimization(cfg: Config, resume: bool = False,
 def _scatter(results, elem_ids: np.ndarray) -> np.ndarray:
     """von-Mises mapped onto the full element array (0 where no result)."""
     out = np.zeros(elem_ids.size, dtype=float)
-    pos = np.searchsorted(elem_ids, results.element_ids)
-    valid = (pos < elem_ids.size) & \
-        (elem_ids[np.clip(pos, 0, elem_ids.size - 1)] == results.element_ids)
-    out[pos[valid]] = results.vonmises[valid]
+    pos, valid = id_positions(elem_ids, results.element_ids)
+    out[pos] = results.vonmises[valid]
     return out
 
 

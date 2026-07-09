@@ -349,3 +349,24 @@ def test_validate_config_returns_severity_prefixed_strings(tmp_path):
 
 def test_problem_str_is_severity_prefixed():
     assert str(Problem(ERROR, "boom")) == "error: boom"
+
+
+def test_duplicate_stems_is_error(tmp_path):
+    """The whole multi-case file layout (per-case solve dirs, iter archives,
+    iter-0 reuse, d3plots) is keyed by stem: two cases sharing one silently
+    overwrite each other's artefacts every iteration."""
+    cfg = _good_cfg(tmp_path)
+    case = Path(cfg.model.case_dir)
+    (case / "pull_0000.rad").write_text("starter", encoding="utf-8")
+    (case / "pull_0001.rad").write_text("engine", encoding="utf-8")
+    cfg.load_cases = [
+        LoadCase(name="a", stem="pull", sigma_allow=250.0, d_allow=1.0),
+        LoadCase(name="b", stem="pull", sigma_allow=250.0, d_allow=1.0)]
+    errs = _errors(cfg)
+    assert any("distinct deck stems" in e and "'pull'" in e for e in errs)
+
+
+def test_negative_wall_budget_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.run.max_wall_hours = -2.0
+    assert any("max_wall_hours" in e for e in _errors(cfg))

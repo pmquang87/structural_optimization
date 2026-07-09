@@ -59,3 +59,50 @@ def test_parse_no_disp_nodes_leaves_disps_empty(tmp_path):
     r = parse_vtk(vtk, design_part_id=60000000)   # no node requested
     assert r.disps == {} and r.disp_node_id is None
     assert np.isnan(r.disp)
+
+
+def test_run_anim_to_vtk_accepts_small_valid_output(tmp_path, monkeypatch):
+    """A clean conversion of a SMALL validation mesh is well under the old
+    1024-byte floor and was reported as 'anim_to_vtk failed'. Success is now a
+    clean exit + a VTK header, size-independent."""
+    import subprocess
+    from oropt.config import Config
+    from oropt.results import run_anim_to_vtk
+
+    exe = tmp_path / "or" / "exec" / "anim_to_vtk_win64.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("x", encoding="utf-8")
+    cfg = Config()
+    cfg.or_paths.root = str(tmp_path / "or")
+
+    def fake_run(cmd, stdout=None, stderr=None, env=None, check=False):
+        stdout.write("# vtk DataFile Version 2.0\ntiny but valid\n")
+        return subprocess.CompletedProcess(cmd, 0, stderr=b"")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    out = tmp_path / "out.vtk"
+    got = run_anim_to_vtk(cfg, tmp_path / "mA001", out)
+    assert got == out and out.stat().st_size < 1024      # small yet accepted
+
+
+def test_run_anim_to_vtk_rejects_non_vtk_output(tmp_path, monkeypatch):
+    import subprocess
+
+    import pytest
+
+    from oropt.config import Config
+    from oropt.results import run_anim_to_vtk
+
+    exe = tmp_path / "or" / "exec" / "anim_to_vtk_win64.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("x", encoding="utf-8")
+    cfg = Config()
+    cfg.or_paths.root = str(tmp_path / "or")
+
+    def fake_run(cmd, stdout=None, stderr=None, env=None, check=False):
+        stdout.write("ERROR: could not read animation\n")
+        return subprocess.CompletedProcess(cmd, 0, stderr=b"bad anim")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="anim_to_vtk failed"):
+        run_anim_to_vtk(cfg, tmp_path / "mA001", tmp_path / "out.vtk")

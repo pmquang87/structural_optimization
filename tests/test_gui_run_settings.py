@@ -65,3 +65,12 @@ def test_copy_iter0_button_copies_into_run_folder(tmp_path, monkeypatch):
     assert not at.exception
     assert (work / "iter_0000" / "c0A001").is_file()        # seeded into this run
     assert any("copied iter_0000" in s.value for s in at.success)
+
+def test_wall_budget_input_roundtrips(tmp_path, monkeypatch):
+    cfg_path, _ = _cfg(tmp_path, n_cases=1)
+    at = _boot(cfg_path, monkeypatch)
+    assert not at.exception
+    budget = at.number_input(key="run_wall_budget")
+    assert budget.value == 0.0                              # default: unlimited
+    budget.set_value(12.0).run()
+    assert not at.exception

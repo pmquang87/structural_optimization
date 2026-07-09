@@ -181,3 +181,32 @@ def test_pid_alive_exited_child():
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait()
     assert not st.pid_alive(child.pid)
+
+
+def test_pid_alive_eperm_means_alive(monkeypatch):
+    """POSIX: os.kill(pid, 0) raising EPERM means the process EXISTS (owned by
+    another user, e.g. a run launched under a different account). It must read
+    as alive, or the double-launch guard lets a second run corrupt the first's
+    work dir. Skipped on Windows (different liveness path)."""
+    if sys.platform == "win32":
+        return
+    def fake_kill(pid, sig):
+        raise PermissionError("Operation not permitted")
+    monkeypatch.setattr(os, "kill", fake_kill)
+    assert st.pid_alive(12345) is True
+
+
+def test_checkpoint_iteration_tolerates_corrupt_file(tmp_path):
+    """A truncated/corrupt checkpoint.npz (crash mid-write on a pre-atomic
+    version) must read as 'no checkpoint', not raise BadZipFile into the GUI."""
+    (tmp_path / st.CHECKPOINT).write_bytes(b"PK\x03\x04 garbage not a zip")
+    assert st.checkpoint_iteration(tmp_path) is None
+
+
+def test_checkpoint_write_leaves_no_tmp(tmp_path):
+    st.save_checkpoint(tmp_path, 3, np.array([True, False]))
+    assert (tmp_path / st.CHECKPOINT).is_file()
+    leftovers = [p.name for p in tmp_path.iterdir()
+                 if p.name != st.CHECKPOINT]
+    assert leftovers == []                      # atomic: tmp file replaced away
+    assert st.checkpoint_iteration(tmp_path) == 3

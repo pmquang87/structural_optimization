@@ -199,6 +199,16 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             err(f"load case {c.name!r}: starter deck not found: {c.starter}")
         if not c.engine.exists():
             err(f"load case {c.name!r}: engine deck not found: {c.engine}")
+    # The whole multi-case file layout is keyed by stem (per-case solve dirs,
+    # iter_NNNN/<stem>/ archives, iter-0 reuse, d3plot names): two cases sharing
+    # one would silently overwrite each other's artefacts every iteration.
+    stems = [c.stem.strip() for c in cases if (c.stem or "").strip()]
+    dup_stems = sorted({s for s in stems if stems.count(s) > 1})
+    if dup_stems:
+        err("load cases must have distinct deck stems -- duplicated: "
+            + ", ".join(repr(s) for s in dup_stems)
+            + " (their per-iteration archives / iter-0 reuse / d3plots would "
+              "overwrite each other)")
 
     # --- run / output folder ---
     run_folder = Path(cfg.run_folder())
@@ -222,6 +232,9 @@ def check_config(cfg: Config, *, raw: dict | None = None,
              f"engine_timeout_s={cfg.run.engine_timeout_s:g}: the hard kill "
              "fires first (and fails the run), so the soft budget never "
              "triggers the treat-as-infeasible back-off")
+    if cfg.run.max_wall_hours < 0:
+        err(f"run.max_wall_hours must be >= 0 (0 = unlimited): got "
+            f"{cfg.run.max_wall_hours}")
     if cfg.run.diverge_fail_after < 1:
         err(f"run.diverge_fail_after must be >= 1: got "
             f"{cfg.run.diverge_fail_after}")
