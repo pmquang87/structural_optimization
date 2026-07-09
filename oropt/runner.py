@@ -92,28 +92,66 @@ def backend_problems(cfg: Config) -> list[str]:
     return problems
 
 
-def _docker_base(cfg: Config, run_dir: Path) -> list[str]:
+def _docker_base(cfg: Config, run_dir: Path,
+                 cidfile: Optional[Path] = None) -> list[str]:
     """``docker run`` prefix that bind-mounts *run_dir* to ``/data`` (forward-slash
-    path so Docker Desktop accepts the Windows drive), up to the image name."""
+    path so Docker Desktop accepts the Windows drive), up to the image name.
+
+    *cidfile* records the container id on the host: killing the docker CLI
+    client only detaches it — the container keeps solving (``--rm`` reaps only
+    after the container *exits* on its own) — so every kill path needs the id to
+    ``docker kill`` the container itself (see :func:`_kill_container`)."""
     d = cfg.docker
     data = str(Path(run_dir).resolve()).replace("\\", "/")
-    return [d.docker_exe, "run", "--rm", f"--shm-size={d.shm_size}",
+    cid = ["--cidfile", str(cidfile)] if cidfile is not None else []
+    return [d.docker_exe, "run", "--rm", f"--shm-size={d.shm_size}", *cid,
             "-v", f"{data}:/data", "-w", "/data", *list(d.extra_args), d.image]
 
 
-def _starter_cmd(cfg: Config, run_dir: Path, stem: str) -> list[str]:
+def _kill_container(cfg: Config, cidfile: Path) -> None:
+    """Best-effort ``docker kill`` of the container recorded in *cidfile*.
+
+    Without this, every diverged / soft-timeout "kill" leaves a zombie container
+    grinding at full thread count: a few diverged iterations in a row saturate
+    the machine, slow the *live* solve past its soft budget, and cascade into
+    ``diverge_fail_after`` failing the whole run."""
+    try:
+        cid = cidfile.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if cid:
+        try:
+            subprocess.run([cfg.docker.docker_exe, "kill", cid],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    cidfile.unlink(missing_ok=True)
+
+
+def _cidfile(run_dir: Path, stem: str, stage: str) -> Optional[Path]:
+    """Host path recording the *stage* container's id (fresh per launch: docker
+    refuses to start when the cidfile already exists)."""
+    p = Path(run_dir) / f"{stem}_{stage}.cid"
+    p.unlink(missing_ok=True)
+    return p
+
+
+def _starter_cmd(cfg: Config, run_dir: Path, stem: str,
+                 cidfile: Optional[Path] = None) -> list[str]:
     if cfg.docker.enabled:
         d = cfg.docker
-        return _docker_base(cfg, run_dir) + [
+        return _docker_base(cfg, run_dir, cidfile) + [
             "starter", "-i", f"{stem}_0000.rad", "-np", str(d.np), "-nt", str(d.nt)]
     return [str(cfg.or_paths.abs("starter")), "-i", f"{stem}_0000.rad",
             "-np", str(cfg.run.np)]
 
 
-def _engine_cmd(cfg: Config, run_dir: Path, stem: str) -> list[str]:
+def _engine_cmd(cfg: Config, run_dir: Path, stem: str,
+                cidfile: Optional[Path] = None) -> list[str]:
     if cfg.docker.enabled:
         d = cfg.docker
-        return _docker_base(cfg, run_dir) + [
+        return _docker_base(cfg, run_dir, cidfile) + [
             "engine", str(d.np), "-i", f"{stem}_0001.rad", "-nt", str(d.nt)]
     engine = cfg.or_paths.abs("engine")
     if cfg.run.use_mpi:        # np=1 via mpiexec; the bare engine cannot load its MPI DLLs
@@ -234,7 +272,8 @@ def _read_new(path: Path, offset: list) -> str:
 
 
 def _run_engine(cfg: Config, cmd, cwd: Path, env: dict, log: Path,
-                listing: Path) -> tuple[Optional[int], Optional[str]]:
+                listing: Path, cidfile: Optional[Path] = None
+                ) -> tuple[Optional[int], Optional[str]]:
     """Run the engine under the non-convergence watchdog.
 
     Like :func:`_run` but polls the growing listing (and the console log)
@@ -243,8 +282,9 @@ def _run_engine(cfg: Config, cmd, cwd: Path, env: dict, log: Path,
     None)`` when the engine exits on its own, or ``(None, reason)`` after
     killing a solve judged non-converging. ``run.engine_timeout_s`` stays the
     hard kill and raises :class:`subprocess.TimeoutExpired`, exactly like the
-    plain runner. (Killing the docker CLI leaves the container to be reaped by
-    ``--rm``, the same semantics the hard timeout always had.)"""
+    plain runner. On the docker backend killing the CLI client only detaches
+    the container, so every kill path also ``docker kill``s the container via
+    *cidfile* (see :func:`_kill_container`)."""
     soft = cfg.run.engine_soft_timeout_s
     hard = cfg.run.engine_timeout_s
     # Fresh watch state; drop a stale listing from a previous solve in the same
@@ -276,10 +316,14 @@ def _run_engine(cfg: Config, cmd, cwd: Path, env: dict, log: Path,
         finally:
             if proc.poll() is None:
                 proc.kill()
+                if cidfile is not None:      # the container outlives its client
+                    _kill_container(cfg, cidfile)
                 try:
                     proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     pass
+            elif cidfile is not None:        # clean exit: just drop the id file
+                cidfile.unlink(missing_ok=True)
 
 
 def _parse_engine_stats(out_file: Path) -> tuple[Optional[int], Optional[float]]:
@@ -312,11 +356,16 @@ def run_solver(cfg: Config, run_dir: str | Path,
 
     # --- starter ---
     starter_log = run_dir / f"{stem}_starter.log"
+    starter_cid = _cidfile(run_dir, stem, "starter") if cfg.docker.enabled else None
     try:
-        cp = _run(_starter_cmd(cfg, run_dir, stem), run_dir, env,
+        cp = _run(_starter_cmd(cfg, run_dir, stem, starter_cid), run_dir, env,
                   starter_log, cfg.run.starter_timeout_s)
     except subprocess.TimeoutExpired:
+        if starter_cid is not None:          # the container outlives its client
+            _kill_container(cfg, starter_cid)
         return RunResult(False, "starter", "starter timed out", cycles=None)
+    if starter_cid is not None:
+        starter_cid.unlink(missing_ok=True)
     ok, msg = _starter_ok(run_dir / f"{stem}_0000.out")
     if not ok:
         if cfg.docker.enabled and cp.returncode != 0:   # surface docker/daemon errors
@@ -326,9 +375,11 @@ def run_solver(cfg: Config, run_dir: str | Path,
     # --- engine (under the non-convergence watchdog) ---
     engine_log = run_dir / f"{stem}_engine.log"
     listing = run_dir / f"{stem}_0001.out"
+    engine_cid = _cidfile(run_dir, stem, "engine") if cfg.docker.enabled else None
     try:
-        rc, diverged = _run_engine(cfg, _engine_cmd(cfg, run_dir, stem),
-                                   run_dir, env, engine_log, listing)
+        rc, diverged = _run_engine(cfg, _engine_cmd(cfg, run_dir, stem, engine_cid),
+                                   run_dir, env, engine_log, listing,
+                                   cidfile=engine_cid)
     except subprocess.TimeoutExpired:
         return RunResult(False, "engine", "engine timed out")
     cycles, elapsed = _parse_engine_stats(listing)

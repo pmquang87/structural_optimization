@@ -216,3 +216,22 @@ def test_start_to_done_real_subprocess(tmp_path):
     assert Path(s.report.out_dir) == tmp_path / GROWTH_MESH_DIRNAME
     assert (Path(s.report.out_dir) / "mini_0000.rad").is_file()
     assert "guards passed" in s.log_tail
+
+
+def test_prepare_dir_anchors_relative_run_folder(tmp_path):
+    """A relative work_dir must resolve against the anchor (PROJECT_ROOT — the
+    cwd the PREPARE child is launched with), not the GUI process's own cwd,
+    or the parent reads status files where the child never writes them."""
+    from oropt.config import Config
+
+    cfg = Config()
+    cfg.work_dir = "runs/r1"                                # relative
+    anchored = growthprep.prepare_dir(cfg, tmp_path)
+    assert anchored == tmp_path / "runs" / "r1" / growthprep.PREPARE_DIRNAME
+    # absolute work_dir: the anchor must not touch it
+    cfg.work_dir = str(tmp_path / "abs_run")
+    assert growthprep.prepare_dir(cfg, tmp_path) == \
+        tmp_path / "abs_run" / growthprep.PREPARE_DIRNAME
+    # no anchor: unchanged legacy behaviour
+    cfg.work_dir = "runs/r1"
+    assert not growthprep.prepare_dir(cfg).is_absolute()

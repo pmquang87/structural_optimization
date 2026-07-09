@@ -97,6 +97,45 @@ def force_kill(work: Path) -> None:
             pass
 
 
+def _seed_widget(key: str, value) -> None:
+    """Re-seed the keyed widget *key* whenever the CONFIG value beneath it changes.
+
+    Keyed widgets persist their state across reruns and ignore a changed
+    ``value=``/``index=`` default — exactly right while editing ONE config, but
+    loading a *different* config in the sidebar then leaves every keyed widget
+    showing the previous config's values, which 💾 Save / ➕ enqueue write back
+    over the new config. Track the last config value seen under ``<key>__seed``:
+    when it changes underneath us (config switch, or an on-disk edit + reload)
+    the widget state resets to it; while it is unchanged, in-session edits stay
+    untouched. This generalises the pattern :func:`color_picker` pioneered.
+    Seeded widgets must NOT also pass ``value=``/``index=`` (Streamlit warns).
+    """
+    seed_key = key + "__seed"
+    if seed_key not in st.session_state or st.session_state[seed_key] != value:
+        st.session_state[seed_key] = value
+        st.session_state[key] = value
+
+
+def _editor_key(name: str) -> str:
+    """A data-editor key namespaced by the loaded config, so switching configs
+    gets a virgin editor. A data editor's session state is a *diff* (edited /
+    added / deleted rows) against the data it was first rendered with — under a
+    fixed key, a config switch replays the previous config's diff onto the new
+    config's rows (wrong rows edited, phantom additions), which Save would then
+    persist. The token is set once per rerun in the sidebar."""
+    return f"{name}::{st.session_state.get('cfg_token', '')}"
+
+
+def _anchored_run_folder(cfg: Config) -> Path:
+    """The config's run folder, RELATIVE paths resolved against PROJECT_ROOT --
+    the cwd runs (and the growth-mesh PREPARE child) are launched with, and the
+    convention qs.resolve_work_dir uses. Resolving against the GUI process's
+    own cwd instead silently pointed file reads/writes somewhere else whenever
+    the dashboard was started from another directory."""
+    w = Path(cfg.run_folder())
+    return w if w.is_absolute() else PROJECT_ROOT / w
+
+
 def _int_ids(text: str, label: str) -> list[int]:
     """Tolerant comma-separated id parse for the free-text id fields.
 
@@ -168,9 +207,10 @@ def render_input_tab(cfg: Config) -> None:
                    "folder to /data and writes results back there.")
 
     n_cases = len(cases)
+    _seed_widget("run_concurrency",
+                 min(int(cfg.run.solver_concurrency), max(1, n_cases)))
     cfg.run.solver_concurrency = int(st.number_input(
-        "Concurrent solvers", value=min(int(cfg.run.solver_concurrency),
-                                        max(1, n_cases)),
+        "Concurrent solvers",
         min_value=1, max_value=max(1, n_cases), step=1, key="run_concurrency",
         disabled=n_cases <= 1,
         help="How many load-case solves to run at once each iteration (default 1 "
@@ -182,9 +222,10 @@ def render_input_tab(cfg: Config) -> None:
         st.caption("Only one load case — concurrency has nothing to parallelise. "
                    "Add load cases on the 🔀 tab to solve several at once.")
 
+    _seed_widget("run_wall_budget", float(cfg.run.max_wall_hours))
     cfg.run.max_wall_hours = float(st.number_input(
         "Wall-clock budget [h] (0 = unlimited)",
-        value=float(cfg.run.max_wall_hours), min_value=0.0, step=0.5,
+        min_value=0.0, step=0.5,
         key="run_wall_budget",
         help="Whole-run wall-clock budget. Checked between iterations (a solve "
              "in flight is never cut short): once exceeded the run stops "
@@ -195,15 +236,16 @@ def render_input_tab(cfg: Config) -> None:
 
     with st.expander("⏩ Seed iteration 0 from another run "
                      "(skip the first full-volume solve)"):
+        _seed_widget("reuse_iter0", bool(cfg.run.reuse_iter0))
         cfg.run.reuse_iter0 = st.checkbox(
-            "Reuse an iter_0000 already in this run folder", value=cfg.run.reuse_iter0,
+            "Reuse an iter_0000 already in this run folder",
             key="reuse_iter0",
             help="Iteration 0 solves the initial full-volume design — the most "
                  "expensive solve — and is identical across runs with the same "
                  "initial deck. If a matching iter_0000 is present, reuse its solve "
                  "instead of re-running it. Guarded by a byte-compare of the starter "
                  "deck, so a copy from a different model is refused and solved fresh.")
-        st.caption(f"Target run folder: `{cfg.run_folder()}`")
+        st.caption(f"Target run folder: `{_anchored_run_folder(cfg)}`")
         src = st.text_input(
             "Copy iter_0000 from another run's folder", key="copy_iter0_src",
             help="Path to an old run folder that contains an iter_0000. Its whole "
@@ -213,7 +255,8 @@ def render_input_tab(cfg: Config) -> None:
                                 key="copy_iter0_overwrite")
         if st.button("📋 Copy iter_0000 here", disabled=not src.strip(),
                      key="copy_iter0_btn"):
-            ok, msg = copy_iter0(src.strip(), cfg.run_folder(), overwrite=overwrite)
+            ok, msg = copy_iter0(src.strip(), _anchored_run_folder(cfg),
+                                 overwrite=overwrite)
             (st.success if ok else st.error)(msg)
 
 
@@ -238,7 +281,7 @@ def render_load_cases_tab(cfg: Config, cfg_path: Path) -> None:
                          columns=CASE_COLUMNS)
     lc_edited = st.data_editor(
         lc_df, num_rows="dynamic", width="stretch",
-        key="load_cases_editor", column_config={
+        key=_editor_key("load_cases_editor"), column_config={
             "name": st.column_config.TextColumn(
                 "Name", help="Label for the load case, e.g. pull_z."),
             "stem": st.column_config.TextColumn(
@@ -297,7 +340,7 @@ def render_camera_settings(opts: AnimateOpts, key_prefix: str) -> None:
                          columns=VIEW_COLUMNS)
     cv_edited = st.data_editor(
         cv_df, num_rows="dynamic", width="stretch",
-        key=f"{key_prefix}_custom_views_editor", column_config={
+        key=_editor_key(f"{key_prefix}_custom_views_editor"), column_config={
             "name": st.column_config.TextColumn(
                 "name", help="Pick this angle by name in 'Camera angle'."),
             "base": st.column_config.SelectboxColumn(
@@ -312,31 +355,37 @@ def render_camera_settings(opts: AnimateOpts, key_prefix: str) -> None:
 
     ac = st.columns(3)
     _views = selectable_views(opts)                # custom names + built-in presets
+    _seed_widget(f"{key_prefix}_view",
+                 opts.view if opts.view in _views else _views[0])
     opts.view = ac[0].selectbox(
         "Camera angle", _views,
-        index=_views.index(opts.view) if opts.view in _views else 0,
         key=f"{key_prefix}_view",
         help="Viewpoint for every frame: a custom angle (above), iso (3D), or a "
              "straight-on front/back/left/right/top/bottom. The azimuth/elevation "
              "here are added on top as a final nudge.")
+    _seed_widget(f"{key_prefix}_azimuth", float(opts.azimuth))
     opts.azimuth = float(ac[1].number_input(
-        "Azimuth [°]", value=float(opts.azimuth), step=15.0,
+        "Azimuth [°]", step=15.0,
         key=f"{key_prefix}_azimuth",
         help="Extra camera rotation about the vertical, applied after the preset."))
+    _seed_widget(f"{key_prefix}_elevation", float(opts.elevation))
     opts.elevation = float(ac[2].number_input(
-        "Elevation [°]", value=float(opts.elevation), step=15.0,
+        "Elevation [°]", step=15.0,
         key=f"{key_prefix}_elevation",
         help="Extra camera tilt up/down, applied after the preset."))
     ac2 = st.columns(2)
+    _seed_widget(f"{key_prefix}_fps", float(opts.fps))
     opts.fps = float(ac2[0].number_input(
-        "Frames per second", value=float(opts.fps), min_value=0.5, step=1.0,
+        "Frames per second", min_value=0.5, step=1.0,
         key=f"{key_prefix}_fps"))
+    _seed_widget(f"{key_prefix}_show_labels", bool(opts.show_labels))
     opts.show_labels = ac2[1].checkbox(
-        "Stamp 'iter N' on each frame", value=opts.show_labels,
+        "Stamp 'iter N' on each frame",
         key=f"{key_prefix}_show_labels")
+    _seed_widget(f"{key_prefix}_opacity", float(opts.opacity))
     opts.opacity = float(st.slider(
         "Surface opacity", min_value=0.0, max_value=1.0,
-        value=float(opts.opacity), step=0.05, key=f"{key_prefix}_opacity",
+        step=0.05, key=f"{key_prefix}_opacity",
         help="1.0 = solid; lower makes the design see-through so internal "
              "structure shows. Transparency uses depth peeling when available."))
 
@@ -399,22 +448,27 @@ def render_appearance_settings(opts: AnimateOpts, key_prefix: str
                                         f"{key_prefix}_color")
     opts.background, bg_ok = color_picker(rc[1], "Background", opts.background,
                                           f"{key_prefix}_bg")
-    opts.show_edges = rc[2].checkbox("Show mesh edges", value=opts.show_edges,
+    _seed_widget(f"{key_prefix}_edges", bool(opts.show_edges))
+    opts.show_edges = rc[2].checkbox("Show mesh edges",
                                      key=f"{key_prefix}_edges")
     rc2 = st.columns(3)
+    _seed_widget(f"{key_prefix}_w", int(opts.window_w))
     opts.window_w = int(rc2[0].number_input(
-        "Width [px]", value=int(opts.window_w), min_value=160, step=80,
+        "Width [px]", min_value=160, step=80,
         key=f"{key_prefix}_w",
         help="Render width — higher = sharper but slower/larger."))
+    _seed_widget(f"{key_prefix}_h", int(opts.window_h))
     opts.window_h = int(rc2[1].number_input(
-        "Height [px]", value=int(opts.window_h), min_value=120, step=80,
+        "Height [px]", min_value=120, step=80,
         key=f"{key_prefix}_h"))
+    _seed_widget(f"{key_prefix}_hold", int(opts.hold_last))
     opts.hold_last = int(rc2[2].number_input(
-        "Hold last frame (×)", value=int(opts.hold_last), min_value=1, step=1,
+        "Hold last frame (×)", min_value=1, step=1,
         key=f"{key_prefix}_hold",
         help="Linger on the final design, in multiples of one frame's duration."))
+    _seed_widget(f"{key_prefix}_timeout", float(opts.render_timeout_s))
     opts.render_timeout_s = float(st.number_input(
-        "Render timeout [s]", value=float(opts.render_timeout_s),
+        "Render timeout [s]",
         min_value=10.0, step=30.0, key=f"{key_prefix}_timeout",
         help="Cap on the off-screen render subprocess (all frames). Raise it for "
              "many high-resolution frames."))
@@ -523,7 +577,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                              columns=BOX_COLUMNS)
         gb_edited = st.data_editor(
             gb_df, num_rows="dynamic", width="stretch",
-            key="growth_boxes_editor", column_config={
+            key=_editor_key("growth_boxes_editor"), column_config={
                 "name": st.column_config.TextColumn(
                     "Name", help="Label for run-log / validation messages, and how a "
                                  "frame below is matched to a box."),
@@ -568,7 +622,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 fr_df = pd.DataFrame(frame_records, columns=FRAME_COLUMNS)
                 fr_edited = st.data_editor(
                     fr_df, num_rows="dynamic", width="stretch",
-                    key="growth_frames_editor", column_config={
+                    key=_editor_key("growth_frames_editor"), column_config={
                         "name": st.column_config.TextColumn(
                             "Region", help="Must match a box row's Name."),
                         **{k: st.column_config.NumberColumn(k, format="%.3f")
@@ -595,7 +649,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                     pt_df = pd.DataFrame(point_records, columns=POINT_COLUMNS)
                     pt_edited = st.data_editor(
                         pt_df, num_rows="dynamic", width="stretch",
-                        key="growth_points_editor", column_config={
+                        key=_editor_key("growth_points_editor"), column_config={
                             "name": st.column_config.TextColumn(
                                 "Region", help="Must match a polyhedron row's Name."),
                             **{k: st.column_config.NumberColumn(k, format="%.3f")
@@ -611,12 +665,16 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 # widget is session-state-driven (no value=) so the preview's
                 # auto-fill — stashed on click, because this widget is already
                 # instantiated by then — can update what it shows on its rerun.
+                # Seed from the loaded config FIRST (so switching configs shows
+                # the new config's boundary, not the previous model's -- which
+                # Save would then write into it); the preview's autofill (stashed
+                # on click, this widget is already instantiated by then) still
+                # wins the rerun that follows the click.
+                _seed_widget("growth_orig_elem_max",
+                             int(cfg.model.growth_original_elem_max or 0))
                 _auto = st.session_state.pop("growth_orig_elem_max_autofill", None)
                 if _auto is not None:
                     st.session_state["growth_orig_elem_max"] = int(_auto)
-                elif "growth_orig_elem_max" not in st.session_state:
-                    st.session_state["growth_orig_elem_max"] = int(
-                        cfg.model.growth_original_elem_max or 0)
                 _thr = st.number_input(
                     "Original part: highest element id (for carve-off regions)",
                     min_value=0, step=1, format="%d",
@@ -649,23 +707,28 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                   "hca": "HCA"}
     st.subheader(f"{_opt_short[opt_name]} parameters")
     g = st.columns(3)
+    _seed_widget(f"evo_{opt_name}", float(aopt.evolution_rate))
     aopt.evolution_rate = g[0].number_input(
-        "Evolution rate (vol/iter)", value=float(aopt.evolution_rate),
+        "Evolution rate (vol/iter)",
         step=0.005, format="%.3f", key=f"evo_{opt_name}")
+    _seed_widget(f"tvf_{opt_name}", float(aopt.target_volume_fraction))
     aopt.target_volume_fraction = g[1].number_input(
-        "Target volume fraction", value=float(aopt.target_volume_fraction),
+        "Target volume fraction",
         min_value=0.05, max_value=1.0, step=0.05, key=f"tvf_{opt_name}")
+    _seed_widget(f"fr_{opt_name}", float(aopt.filter_radius))
     aopt.filter_radius = g[2].number_input(
-        "Filter radius [mm]", value=float(aopt.filter_radius), step=0.5,
+        "Filter radius [mm]", step=0.5,
         key=f"fr_{opt_name}")
     h = st.columns(3)
+    _seed_widget(f"hw_{opt_name}", float(aopt.history_weight))
     aopt.history_weight = h[0].slider(
-        "History weight", 0.0, 1.0, float(aopt.history_weight), key=f"hw_{opt_name}")
+        "History weight", 0.0, 1.0, key=f"hw_{opt_name}")
+    _seed_widget(f"mi_{opt_name}", int(aopt.max_iter))
     aopt.max_iter = int(h[1].number_input(
-        "Max iterations", value=int(aopt.max_iter), step=10, key=f"mi_{opt_name}"))
+        "Max iterations", step=10, key=f"mi_{opt_name}"))
+    _seed_widget(f"sens_{opt_name}", aopt.sensitivity)
     aopt.sensitivity = h[2].selectbox(
         "Sensitivity", ["energy", "vonmises", "blend"],
-        index=["energy", "vonmises", "blend"].index(aopt.sensitivity),
         key=f"sens_{opt_name}")
 
     st.markdown("**Feasibility back-off** — how the volume target reacts to the "
@@ -674,37 +737,42 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "= the classic binary gate (fixed ±ER step from feasible/"
                 "infeasible alone), which is known to ping-pong across the limit.")
     b = st.columns(5)
+    _seed_widget(f"bogain_{opt_name}", float(aopt.backoff_gain))
     aopt.backoff_gain = b[0].number_input(
-        "Back-off gain", value=float(aopt.backoff_gain), min_value=0.0,
+        "Back-off gain", min_value=0.0,
         step=0.5, format="%.2f", key=f"bogain_{opt_name}",
         help="0 = classic gate: any violation grows the target by one full "
              "evolution-rate step. > 0 = proportional: the growth step is "
              "ER·max(floor, min(gain·(v−1), cap)), so a 1 % violation triggers "
              "a nudge and a large one a capped surge. Size it so "
              "gain·(typical overshoot) ≈ 1, e.g. 10–20.")
+    _seed_widget(f"bocap_{opt_name}", float(aopt.backoff_cap))
     aopt.backoff_cap = b[1].number_input(
-        "Back-off cap (×ER)", value=float(aopt.backoff_cap), min_value=0.1,
+        "Back-off cap (×ER)", min_value=0.1,
         step=0.5, format="%.1f", key=f"bocap_{opt_name}",
         help="Cap on the proportional growth step, in multiples of the "
              "evolution rate. Only used when the gain is > 0.")
+    _seed_widget(f"boflr_{opt_name}", float(aopt.backoff_floor))
     aopt.backoff_floor = b[2].number_input(
-        "Back-off floor (×ER)", value=float(aopt.backoff_floor), min_value=0.0,
+        "Back-off floor (×ER)", min_value=0.0,
         step=0.05, format="%.2f", key=f"boflr_{opt_name}",
         help="Floor on the proportional back-step, in fractions of the "
              "evolution rate: a persistent hair-above-the-limit violation "
              "still backs off by at least floor·ER instead of sitting in a "
              "limit cycle pinned just above the allowable. Only used when the "
              "gain is > 0.")
+    _seed_widget(f"damp_{opt_name}", float(aopt.damping_threshold))
     aopt.damping_threshold = b[3].number_input(
-        "Damping threshold", value=float(aopt.damping_threshold),
+        "Damping threshold",
         min_value=0.05, max_value=1.0, step=0.01, format="%.2f",
         key=f"damp_{opt_name}",
         help="While feasible with v above this, removal slows by "
              "(1−v)/(1−threshold) so the design glides into the limit instead "
              "of overshooting and oscillating. 1.0 = off (full rate until "
              "infeasible); 0.9–0.95 is typical.")
+    _seed_widget(f"abbias_{opt_name}", float(aopt.addback_stress_bias))
     aopt.addback_stress_bias = b[4].number_input(
-        "Add-back stress bias", value=float(aopt.addback_stress_bias),
+        "Add-back stress bias",
         min_value=0.0, step=0.5, format="%.2f", key=f"abbias_{opt_name}",
         help="When a stress limit is violated, scale the sensitivity driving "
              "the update by (1 + bias·σ_vm/σ_allow), spatially filtered, so "
@@ -766,13 +834,15 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                  "iterations.")
 
     arch = st.columns(2)
+    _seed_widget(f"arch_{opt_name}", bool(aopt.archive_iterations))
     aopt.archive_iterations = arch[0].checkbox(
-        "Archive each iteration", value=aopt.archive_iterations,
+        "Archive each iteration",
         key=f"arch_{opt_name}",
         help="Copy each iteration's deck, animation and listing into "
              "<run_folder>/iter_NNNN/ before solve/ is recycled.")
+    _seed_widget(f"archr_{opt_name}", bool(aopt.archive_restart))
     aopt.archive_restart = arch[1].checkbox(
-        "…incl. restart (~345 MB/iter)", value=aopt.archive_restart,
+        "…incl. restart (~345 MB/iter)",
         key=f"archr_{opt_name}",
         help="Also copy the restart file, preserving the full solver state for "
              "every iteration. Applies only when 'Archive each iteration' is on.")
@@ -816,10 +886,10 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                     for p in (mfg.symmetry_planes or [])}
     planes: list[dict] = []
     for col, ax in zip(st.columns(3), ("x", "y", "z")):
-        on = col.checkbox(f"Mirror {ax.upper()}", value=ax in existing_sym,
-                          key=f"sym_{ax}")
-        off = col.number_input(f"{ax.upper()} plane offset",
-                               value=existing_sym.get(ax, 0.0), step=0.5,
+        _seed_widget(f"sym_{ax}", ax in existing_sym)
+        on = col.checkbox(f"Mirror {ax.upper()}", key=f"sym_{ax}")
+        _seed_widget(f"sym_off_{ax}", float(existing_sym.get(ax, 0.0)))
+        off = col.number_input(f"{ax.upper()} plane offset", step=0.5,
                                key=f"sym_off_{ax}", disabled=not on)
         if on:
             planes.append({"axis": ax, "offset": float(off)})
@@ -829,17 +899,18 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "slide out along the draw axis.")
     cast = st.columns(2)
     _cur_draw = _axis_name(mfg.draw_direction)
+    _seed_widget("draw_dir", _cur_draw)
     _sel_draw = cast[0].selectbox(
         "Draw direction", _axis_opts(_cur_draw),
-        index=_axis_opts(_cur_draw).index(_cur_draw),
         key="draw_dir",
         help="Axis the die is pulled along. Single-sided keeps a solid bottom "
              "prefix (no material above a void); 'off' disables casting. "
              "'custom' = the config's own (non-axis) vector, kept as-is.")
     if _sel_draw != "custom":
         mfg.draw_direction = None if _sel_draw == "off" else _axis_vec[_sel_draw]
+    _seed_widget("draw_two", bool(mfg.draw_two_sided))
     mfg.draw_two_sided = cast[1].checkbox(
-        "Two-sided (parting surface)", value=mfg.draw_two_sided, key="draw_two",
+        "Two-sided (parting surface)", key="draw_two",
         disabled=_sel_draw == "off",
         help="Keep one contiguous run around a parting surface instead of a "
              "single-sided bottom prefix.")
@@ -847,9 +918,9 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     st.markdown("**Extrusion** — constant cross-section along an axis (each prism "
                 "made uniform by a majority vote).")
     _cur_ext = _axis_name(mfg.extrusion_axis)
+    _seed_widget("ext_axis", _cur_ext)
     _sel_ext = st.selectbox(
         "Extrusion axis", _axis_opts(_cur_ext),
-        index=_axis_opts(_cur_ext).index(_cur_ext),
         key="ext_axis",
         help="Elements are binned into prisms by their footprint; a prism is solid "
              "iff ≥ half of it is alive. 'off' disables extrusion. "
@@ -861,9 +932,9 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                 "the critical angle along the build direction (applied last).")
     ov = st.columns(2)
     _cur_bld = _axis_name(mfg.build_direction)
+    _seed_widget("build_dir", _cur_bld)
     _sel = ov[0].selectbox(
         "Build direction", _axis_opts(_cur_bld),
-        index=_axis_opts(_cur_bld).index(_cur_bld),
         key="build_dir",
         help="Up/growth axis of the print. 'off' disables the overhang "
              "constraint. 'custom' = the config's own (non-axis) vector, kept "
@@ -1174,7 +1245,7 @@ def _render_growth_mesh(cfg: Config, cfg_path: Path) -> None:
             format="%.2f", key="growth_mesh_minratio",
             help="Radius-edge quality bound; lower = better-shaped tets, more "
                  "elements.")
-        prep = growthprep.prepare_dir(cfg)
+        prep = growthprep.prepare_dir(cfg, PROJECT_ROOT)
         status = growthprep.read_status(prep)
         if st.button("⚙️ Generate & write extended decks",
                      key="growth_mesh_generate",
@@ -1674,6 +1745,10 @@ if not cfg_path.exists():
     st.stop()
 cfg_raw = Config.read_yaml_dict(cfg_path)   # kept for unrecognised-key validation
 cfg = Config.from_dict(cfg_raw)
+# Config identity for the data editors (_editor_key): their session state is a
+# DIFF against the data they first rendered with, so a config switch must hand
+# them fresh keys or the previous config's edits replay onto the new one's rows.
+st.session_state["cfg_token"] = str(cfg_path.resolve())
 work = Path(cfg.run_folder())          # work_dir, or the case dir when blank
 if not work.is_absolute():
     work = PROJECT_ROOT / work

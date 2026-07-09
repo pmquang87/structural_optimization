@@ -61,10 +61,21 @@ class PrepareStatus:
     pid: int                              # live child pid when RUNNING
 
 
-def prepare_dir(cfg: Config) -> Path:
+def prepare_dir(cfg: Config, anchor: str | Path | None = None) -> Path:
     """The PREPARE scratch folder for *cfg* — inside the run folder, following
-    the run-folder model (blank ``work_dir`` → the case directory itself)."""
-    return Path(cfg.run_folder()) / PREPARE_DIRNAME
+    the run-folder model (blank ``work_dir`` → the case directory itself).
+
+    A *relative* run folder is resolved against *anchor* (the GUI passes its
+    PROJECT_ROOT — the cwd it launches the PREPARE child with). Without the
+    anchor, the parent resolved the scratch folder against the *GUI process's*
+    cwd while the child resolved ``--config``/``--json`` against PROJECT_ROOT:
+    with the two cwds differing, the child couldn't find the frozen config (or
+    wrote its report where :func:`read_status` never looks) and the panel
+    reported "ended without writing a report"."""
+    p = Path(cfg.run_folder()) / PREPARE_DIRNAME
+    if anchor is not None and not p.is_absolute():
+        p = Path(anchor) / p
+    return p
 
 
 def _read_pid(prep: Path) -> int:
