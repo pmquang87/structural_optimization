@@ -104,7 +104,7 @@ def _silent(_msg):
 # ---- neighbour-deck parsing (read_solid_geometry) ---------------------------
 def test_read_solid_geometry_tets(tmp_path):
     _write_neighbour(tmp_path)
-    tet_xyz, node_xyz, parts = read_solid_geometry(
+    tet_xyz, node_xyz, surf_xyz, parts = read_solid_geometry(
         tmp_path / "neighbour_0000.rad")
     assert tet_xyz.shape == (1, 4, 3)
     assert parts == [70000000]
@@ -130,7 +130,7 @@ p
 /END
 """
     (tmp_path / "n.rad").write_text(text, encoding="utf-8")
-    tet_xyz, node_xyz, parts = read_solid_geometry(tmp_path / "n.rad")
+    tet_xyz, node_xyz, surf_xyz, parts = read_solid_geometry(tmp_path / "n.rad")
     assert tet_xyz.shape == (1, 4, 3)          # nodes from both blocks resolved
     assert len(node_xyz) == 4
 
@@ -153,9 +153,9 @@ def test_read_solid_geometry_part_filter(tmp_path):
 /END
 """
     (tmp_path / "n.rad").write_text(text, encoding="utf-8")
-    _, _, parts_all = read_solid_geometry(tmp_path / "n.rad")
+    _, _, _, parts_all = read_solid_geometry(tmp_path / "n.rad")
     assert parts_all == [70000000, 70000001]
-    tets, _, parts = read_solid_geometry(tmp_path / "n.rad", part_ids=[70000001])
+    tets, _, _, parts = read_solid_geometry(tmp_path / "n.rad", part_ids=[70000001])
     assert parts == [70000001]
     # only the far tet survived the filter
     assert np.allclose(tets.mean(axis=1)[0], [9.5, 9.5, 9.5], atol=0.6)
@@ -178,10 +178,10 @@ def test_read_solid_geometry_brick_decomposition(tmp_path):
 /END
 """
     (tmp_path / "b.rad").write_text(text, encoding="utf-8")
-    tet_xyz, node_xyz, parts = read_solid_geometry(tmp_path / "b.rad")
+    tet_xyz, node_xyz, surf_xyz, parts = read_solid_geometry(tmp_path / "b.rad")
     assert tet_xyz.shape == (6, 4, 3)          # 1 brick -> 6 tets
     assert len(node_xyz) == 8
-    ko = KeepOut(tet_xyz, node_xyz, parts, 0.0, "b.rad")
+    ko = KeepOut(tet_xyz, node_xyz, surf_xyz, parts, 0.0, "b.rad")
     probe = np.array([[.5, .5, .5], [.1, .9, .1], [2., 2., 2.]])
     assert ko.block_mask(probe).tolist() == [True, True, False]
 
@@ -203,16 +203,16 @@ def test_read_solid_geometry_missing_node_raises(tmp_path):
 
 # ---- KeepOut.block_mask (inside + clearance) --------------------------------
 def test_keepout_block_mask_inside_and_clearance(tmp_path):
-    tet_xyz, node_xyz, parts = read_solid_geometry(
+    tet_xyz, node_xyz, surf_xyz, parts = read_solid_geometry(
         tmp_path / _write_neighbour(tmp_path))
     pts = np.array([[.5, .5, .5],             # inside the tet
                     [1.5, 1.75, 1.5]])         # outside (e3 centroid, ~2.14 away)
-    assert KeepOut(tet_xyz, node_xyz, parts, 0.0, "x").block_mask(pts).tolist() \
+    assert KeepOut(tet_xyz, node_xyz, surf_xyz, parts, 0.0, "x").block_mask(pts).tolist() \
         == [True, False]
     # a clearance band wide enough reaches the second point
-    assert KeepOut(tet_xyz, node_xyz, parts, 2.2, "x").block_mask(pts).tolist() \
+    assert KeepOut(tet_xyz, node_xyz, surf_xyz, parts, 2.2, "x").block_mask(pts).tolist() \
         == [True, True]
-    assert KeepOut(tet_xyz, node_xyz, parts, 2.0, "x").block_mask(pts).tolist() \
+    assert KeepOut(tet_xyz, node_xyz, surf_xyz, parts, 2.0, "x").block_mask(pts).tolist() \
         == [True, False]
 
 
@@ -406,11 +406,25 @@ def test_validate_keepout_partially_absent_part_id_warns(tmp_path):
                in p and "99999999" in p for p in _problems(cfg))
 
 
-def test_validate_negative_clearance_errors(tmp_path):
+def test_validate_negative_clearance_warns_not_errors(tmp_path):
+    """Negative clearance = allowed penetration depth (a real feature now):
+    validation flags it as a WARNING (guarding against a sign typo) but must
+    not block the launch."""
     name = _write_neighbour(tmp_path)
     cfg = _cfg(tmp_path, [BOX_E2], growth_keepout_rad=name,
                growth_keepout_clearance_mm=-1.0)
-    assert any(p.startswith("error") and "clearance" in p for p in _problems(cfg))
+    probs = _problems(cfg)
+    assert any(p.startswith("warning") and "penetrate" in p for p in probs)
+    assert not any(p.startswith("error") and "clearance" in p for p in probs)
+
+
+def test_validate_nan_clearance_is_error(tmp_path):
+    """NaN slipped through the old `< 0` check (NaN comparisons are all False)
+    and silently disabled the clearance band downstream."""
+    name = _write_neighbour(tmp_path)
+    cfg = _cfg(tmp_path, [BOX_E2], growth_keepout_rad=name,
+               growth_keepout_clearance_mm=float("nan"))
+    assert any(p.startswith("error") and "finite" in p for p in _problems(cfg))
 
 
 def test_validate_valid_keepout_clean(tmp_path):
@@ -448,3 +462,115 @@ def test_gui_keepout_inputs_roundtrip(tmp_path, monkeypatch):
     # the keep-out deck path input shows the configured value
     ko = [t for t in at.text_input if t.value == "neighbour_0000.rad"]
     assert ko, "keep-out deck text input not rendered with its configured value"
+
+
+# ---- negative clearance: allowed penetration band ---------------------------
+def _brick_grid_deck(n=3):
+    """An n x n x n /BRICK grid over [0,n]^3 -- has ((n-1)^3) interior nodes, so
+    surface extraction is actually exercised (a tiny all-surface mesh can't
+    tell the surface cloud from the full node cloud)."""
+    def nid(i, j, k):
+        return 70000001 + i + j * (n + 1) + k * (n + 1) ** 2
+    lines = ["/NODE"]
+    for k in range(n + 1):
+        for j in range(n + 1):
+            for i in range(n + 1):
+                lines.append(f"  {nid(i, j, k)}   {i}.0   {j}.0   {k}.0")
+    lines.append("/BRICK/70000000")
+    eid = 1
+    for k in range(n):
+        for j in range(n):
+            for i in range(n):
+                c = [nid(i, j, k), nid(i + 1, j, k), nid(i + 1, j + 1, k),
+                     nid(i, j + 1, k), nid(i, j, k + 1), nid(i + 1, j, k + 1),
+                     nid(i + 1, j + 1, k + 1), nid(i, j + 1, k + 1)]
+                lines.append("  " + "  ".join(str(v) for v in [eid] + c))
+                eid += 1
+    lines.append("/END")
+    return "\n".join(lines) + "\n"
+
+
+def test_surface_nodes_exclude_interior_and_brick_interfaces(tmp_path):
+    """The 3x3x3 brick grid has 64 nodes, 8 of them interior. The surface set
+    must hold exactly the 56 shell nodes: interior nodes excluded, and the
+    interior brick-brick interfaces (whose 6-tet split diagonals need not
+    match across elements) must not read as surface."""
+    (tmp_path / "grid.rad").write_text(_brick_grid_deck(3), encoding="utf-8")
+    tet_xyz, node_xyz, surf_xyz, parts = read_solid_geometry(tmp_path / "grid.rad")
+    assert tet_xyz.shape == (27 * 6, 4, 3)
+    assert len(node_xyz) == 64
+    assert len(surf_xyz) == 56                       # 64 - 8 interior
+    # every surface node really is on the shell of [0,3]^3
+    on_shell = ((surf_xyz == 0.0) | (surf_xyz == 3.0)).any(axis=1)
+    assert on_shell.all()
+
+
+def test_negative_clearance_allows_shallow_penetration(tmp_path):
+    """clearance < 0 = allowed penetration depth: only candidates DEEPER than
+    |clearance| below the neighbour surface stay blocked."""
+    (tmp_path / "grid.rad").write_text(_brick_grid_deck(3), encoding="utf-8")
+    tet_xyz, node_xyz, surf_xyz, parts = read_solid_geometry(tmp_path / "grid.rad")
+    pts = np.array([[1.5, 1.5, 0.2],     # 0.2 below the bottom face (shallow)
+                    [1.5, 1.5, 1.5],     # dead centre (deep)
+                    [1.5, 1.5, -0.5]])   # outside
+    ko0 = KeepOut(tet_xyz, node_xyz, surf_xyz, parts, 0.0, "x")
+    assert ko0.block_mask(pts).tolist() == [True, True, False]
+    ko = KeepOut(tet_xyz, node_xyz, surf_xyz, parts, -1.0, "x")
+    # nearest surface NODE: 0.735 for the shallow point (allowed), 1.658 for
+    # the centre (still blocked). The centre also proves interior nodes are
+    # not in the surface cloud: (1,1,1) sits only 0.866 away and would
+    # otherwise wrongly free it.
+    assert ko.block_mask(pts).tolist() == [False, True, False]
+    # a tighter band keeps both blocked
+    tight = KeepOut(tet_xyz, node_xyz, surf_xyz, parts, -0.5, "x")
+    assert tight.block_mask(pts).tolist() == [True, True, False]
+
+
+def test_negative_clearance_through_blocked_mask(tmp_path):
+    """End-to-end: e2's candidate sits 0.866 deep in the neighbour tet -- an
+    allowed penetration of 1.0 frees it, 0.5 does not."""
+    deck, mesh = _load(tmp_path)
+    name = _write_neighbour(tmp_path)
+    deep = _model(tmp_path, [BOX_E2], growth_keepout_rad=name,
+                  growth_keepout_clearance_mm=-1.0)
+    assert not growth_blocked_mask(deck, mesh, deep).any()
+    shallow = _model(tmp_path, [BOX_E2], growth_keepout_rad=name,
+                     growth_keepout_clearance_mm=-0.5)
+    assert growth_blocked_mask(deck, mesh, shallow).tolist() \
+        == [False, True, False, False]
+
+
+def test_preview_notes_allowed_penetration(tmp_path):
+    deck, mesh = _load(tmp_path)
+    m = _model(tmp_path, [BOX_E2], growth_keepout_rad=_write_neighbour(tmp_path),
+               growth_keepout_clearance_mm=-0.5)
+    prev = preview_growth_boxes(deck, mesh, m)
+    assert "allowed penetration 0.5" in prev.keepout
+
+
+def test_resolve_keepout_nan_clearance_raises(tmp_path):
+    m = _model(tmp_path, [BOX_E2], growth_keepout_rad=_write_neighbour(tmp_path),
+               growth_keepout_clearance_mm=float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        resolve_keepout(m)
+
+
+# ---- resolve_keepout memo ----------------------------------------------------
+def test_resolve_keepout_memo_reuses_and_invalidates(tmp_path):
+    name = _write_neighbour(tmp_path)
+    m = _model(tmp_path, [BOX_E2], growth_keepout_rad=name)
+    a = resolve_keepout(m)
+    b = resolve_keepout(m)
+    assert b is a                                    # same inputs -> same object
+    # a different clearance is a different keep-out
+    m2 = _model(tmp_path, [BOX_E2], growth_keepout_rad=name,
+                growth_keepout_clearance_mm=-1.0)
+    c = resolve_keepout(m2)
+    assert c is not a and c.clearance == -1.0
+    # a changed deck on disk invalidates (content/size/mtime signature)
+    (tmp_path / name).write_text(
+        NEIGHBOUR_TET_DECK.replace("2.0   0.0   0.0", "3.0   0.0   0.0"),
+        encoding="utf-8")
+    d = resolve_keepout(m)
+    assert d is not a
+    assert float(d.node_xyz[:, 0].max()) == 3.0      # the NEW geometry was read

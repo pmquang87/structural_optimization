@@ -498,6 +498,31 @@ _HEX_TO_TETS = np.array([
     [0, 1, 2, 6], [0, 2, 3, 6], [0, 3, 7, 6],
     [0, 7, 4, 6], [0, 4, 5, 6], [0, 5, 1, 6]], dtype=np.int64)
 
+#: the four triangular faces of a TETRA4 (indices into its n1..n4)
+_TET4_FACES = np.array(
+    [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], dtype=np.int64)
+#: the six quad faces of an 8-node /BRICK (Radioss n1-n4 bottom, n5-n8 top).
+#: Boundary detection runs on these PRE-SPLIT quads: after the 6-tet split, two
+#: adjacent bricks can triangulate their shared quad along different diagonals,
+#: so the split triangles would not cancel and an interior brick-brick interface
+#: would read as "surface". A shared quad always cancels as a quad.
+_HEX_FACES = np.array([
+    [0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4],
+    [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]], dtype=np.int64)
+
+
+def _boundary_node_ids(conn: np.ndarray, face_idx: np.ndarray) -> np.ndarray:
+    """Node ids on the boundary of a conforming solid mesh *conn*: the nodes of
+    every face (per *face_idx*) used by exactly ONE element. Same face-counting
+    idea as :func:`oropt.growthmesh.exterior_faces`, generalised to quads."""
+    if not len(conn):
+        return np.empty(0, dtype=np.int64)
+    faces = conn[:, face_idx].reshape(-1, face_idx.shape[1])
+    key = np.sort(faces, axis=1)
+    _, inverse, counts = np.unique(key, axis=0, return_inverse=True,
+                                   return_counts=True)
+    return np.unique(faces[counts[inverse] == 1])
+
 
 def read_solid_geometry(path: str | Path, part_ids=None):
     """Parse a Radioss deck for the solid-element geometry of the named parts.
@@ -505,12 +530,21 @@ def read_solid_geometry(path: str | Path, part_ids=None):
     Reads EVERY ``/NODE`` block (a converted deck emits one per include) and every
     ``/TETRA4/<pid>`` and ``/BRICK/<pid>`` block whose part id is in *part_ids*
     (all solid parts when *part_ids* is ``None``/empty). Returns
-    ``(tet_xyz, node_xyz, part_ids)`` where:
+    ``(tet_xyz, node_xyz, surf_xyz, part_ids)`` where:
 
     * ``tet_xyz`` is ``(V, 4, 3)`` — the parts' occupied volume as a set of
       tetrahedra (each brick split into 6 tets), for a point-in-volume test;
     * ``node_xyz`` is ``(P, 3)`` — the coordinates of every node the selected
-      elements reference (for a clearance-distance test);
+      elements reference (for the positive-clearance distance test);
+    * ``surf_xyz`` is ``(S, 3)`` — the coordinates of the nodes on the parts'
+      boundary SURFACE only (faces used by exactly one element; brick faces are
+      matched as pre-split quads so adjacent bricks' mismatched split diagonals
+      cannot fake a surface). The negative-clearance (allowed-penetration)
+      depth test needs these: the full node cloud includes interior nodes,
+      whose small distances would masquerade as "near the surface" deep inside
+      the volume. At a mixed tet↔brick part interface the (unmatchable)
+      tri-vs-quad faces both read as surface — such interface nodes are rare
+      and only shrink the measured depth there;
     * ``part_ids`` is the sorted list of solid part ids actually found.
 
     Raises ``ValueError`` when the deck holds no matching solid elements or a
@@ -534,8 +568,11 @@ def read_solid_geometry(path: str | Path, part_ids=None):
             continue
         i += 1
 
-    # pass 2: the selected solid element blocks
-    tet_conn: list = []
+    # pass 2: the selected solid element blocks. Raw (pre-split) connectivity is
+    # kept per element type so the surface can be detected on real element
+    # faces; bricks are split to tets only for the volume test.
+    tet4_conn: list = []
+    hex_conn: list = []
     found: set[int] = set()
     i = 0
     while i < n:
@@ -557,18 +594,20 @@ def read_solid_geometry(path: str | Path, part_ids=None):
             continue
         found.add(pid)
         if etype == "TETRA4":
-            tet_conn.extend(row[1:5] for row in block)
-        else:                                          # /BRICK -> 6 tets
-            for row in block:
-                hexn = row[1:9]
-                tet_conn.extend([hexn[k] for k in t] for t in _HEX_TO_TETS)
+            tet4_conn.extend(row[1:5] for row in block)
+        else:
+            hex_conn.extend(row[1:9] for row in block)
 
-    if not tet_conn:
+    if not (tet4_conn or hex_conn):
         where = f" for part id(s) {sorted(want)}" if want else ""
         raise ValueError(f"no solid (/TETRA4 or /BRICK) elements found in "
                          f"{path}{where}")
 
-    tet_conn = np.asarray(tet_conn, dtype=np.int64)
+    tet4 = np.asarray(tet4_conn, dtype=np.int64).reshape(-1, 4)
+    hexes = np.asarray(hex_conn, dtype=np.int64).reshape(-1, 8)
+    tet_conn = (np.concatenate([tet4, hexes[:, _HEX_TO_TETS].reshape(-1, 4)])
+                if len(hexes) else tet4)               # bricks -> 6 tets each
+
     uniq = np.unique(tet_conn)
     try:
         coords = np.array([node_map[int(v)] for v in uniq], dtype=float)
@@ -577,4 +616,8 @@ def read_solid_geometry(path: str | Path, part_ids=None):
                          f"from every /NODE block in {path}") from exc
     rows = np.searchsorted(uniq, tet_conn.ravel()).reshape(tet_conn.shape)
     tet_xyz = coords[rows]                              # (V, 4, 3)
-    return tet_xyz, coords, sorted(found)
+
+    surf_ids = np.union1d(_boundary_node_ids(tet4, _TET4_FACES),
+                          _boundary_node_ids(hexes, _HEX_FACES))
+    surf_xyz = coords[np.searchsorted(uniq, surf_ids)]  # (S, 3)
+    return tet_xyz, coords, surf_xyz, sorted(found)

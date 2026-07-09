@@ -397,8 +397,17 @@ in progress.
   bounding box) is read — so it needn't be a runnable model. The path resolves
   relative to `model.case_dir` like the load-case decks;
   `growth_keepout_part_ids` selects which part ids form the keep-out (empty = all
-  solid parts) and `growth_keepout_clearance_mm` keeps a gap around them (a
-  candidate within that distance of the neighbour geometry is forbidden too). The
+  solid parts) and `growth_keepout_clearance_mm` shifts the forbidden boundary:
+  **positive** keeps a gap around the neighbour parts (a candidate within that
+  distance of the neighbour geometry is forbidden too), 0 = the parts' volume
+  exactly, and **negative** allows a deliberate penetration of up to
+  `|clearance|` into the neighbour volume — an interference/overlap band (e.g. a
+  weld/bond allowance, or compensating a neighbour envelope meshed oversize);
+  only material deeper than that below the neighbour *surface* stays forbidden
+  (depth is measured to the nearest neighbour surface node, which
+  over-estimates it by up to the neighbour's facet size, so the band errs on
+  the side of *less* penetration than asked — mesh the neighbour finer than
+  `|clearance|` for a tight band). The
   exclusion applies to **both** paths: the growth-mesh PREPARE step never
   generates candidate tets inside the keep-out, and a pre-meshed run holds any
   such candidates void. Editable in the **🚧 Keep-out** expander next to the
@@ -438,7 +447,8 @@ in progress.
     growth_original_elem_max: 60123456
     # keep-out: nearby parts (never solved) whose volume forbids growth; a
     # candidate inside them is held void. Path relative to case_dir; part ids
-    # empty = all solid parts; clearance keeps a gap around the parts.
+    # empty = all solid parts; clearance > 0 keeps a gap around the parts,
+    # < 0 allows growth to penetrate up to |clearance| into them.
     growth_keepout_rad: neighbour_parts_0000.rad
     growth_keepout_part_ids: [70000000]
     growth_keepout_clearance_mm: 0.0

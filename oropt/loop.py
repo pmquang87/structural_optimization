@@ -547,7 +547,9 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
     if keepout is not None and not keepout_note:
         held = int(growth_blocked_mask(deck, mesh, model).sum())
         parts = ", ".join(str(p) for p in keepout.part_ids) or "all"
-        clr = f", clearance {keepout.clearance:g}" if keepout.clearance else ""
+        clr = (f", clearance {keepout.clearance:g}" if keepout.clearance > 0
+               else f", allowed penetration {-keepout.clearance:g}"
+               if keepout.clearance < 0 else "")
         keepout_note = (
             f"keep-out {Path(keepout.source).name} (part(s) {parts}{clr}): "
             f"{held} candidate(s) held void")
