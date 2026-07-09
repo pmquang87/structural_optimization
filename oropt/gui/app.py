@@ -1050,10 +1050,14 @@ def _render_keepout(cfg: Config) -> None:
         cfg.model.growth_keepout_part_ids = _int_ids(pids, "keep-out part ids")
         cfg.model.growth_keepout_clearance_mm = float(c[1].number_input(
             "Clearance [mm]", value=float(cfg.model.growth_keepout_clearance_mm),
-            min_value=0.0, step=0.5, format="%.3f",
-            help="Keep a gap around the neighbour parts: a candidate within this "
-                 "distance of the neighbour geometry is forbidden too. 0 = the "
-                 "parts' volume exactly."))
+            step=0.5, format="%.3f",
+            help="Positive: keep a gap around the neighbour parts — a candidate "
+                 "within this distance of the neighbour geometry is forbidden "
+                 "too. 0 = the parts' volume exactly. NEGATIVE: allow growth to "
+                 "deliberately penetrate up to |clearance| into the neighbour "
+                 "volume (an interference/overlap band, e.g. a weld/bond "
+                 "allowance); only material deeper than that stays forbidden. "
+                 "Mesh the neighbour finer than |clearance| for a tight band."))
 
 
 def _render_growth_preview(cfg: Config) -> None:

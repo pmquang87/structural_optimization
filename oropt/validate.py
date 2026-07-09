@@ -379,9 +379,17 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     # --- growth keep-out deck (forbidden growth space: nearby parts) ---
     if m.growth_keepout_rad:
         clr = m.growth_keepout_clearance_mm
-        if isinstance(clr, bool) or not isinstance(clr, (int, float)) or clr < 0:
-            err("model.growth_keepout_clearance_mm must be >= 0: "
-                f"got {clr!r}")
+        if isinstance(clr, bool) or not isinstance(clr, (int, float)) \
+                or not math.isfinite(clr):
+            # NaN passed the old `< 0` check (every comparison with NaN is
+            # False) and then silently disabled the clearance band downstream.
+            err("model.growth_keepout_clearance_mm must be a finite number "
+                f"(negative = allowed penetration depth): got {clr!r}")
+        elif clr < 0:
+            warn(f"growth_keepout_clearance_mm={clr:g}: NEGATIVE clearance -- "
+                 f"growth may deliberately penetrate up to {-clr:g} into the "
+                 "neighbour parts (an interference/overlap band). If a gap was "
+                 "intended, use a positive value")
         if not boxes:
             warn("model.growth_keepout_rad is set but no growth regions are "
                  "configured -- the keep-out has no candidates to remove (no-op)")
@@ -392,7 +400,7 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             err(f"growth keep-out deck not found: {ko_path}")
         else:
             try:
-                _tets, _nodes, found = read_solid_geometry(
+                _tets, _nodes, _surf, found = read_solid_geometry(
                     ko_path, m.growth_keepout_part_ids or None)
             except Exception as exc:  # noqa: BLE001
                 err(f"growth keep-out deck could not be parsed ({ko_path}): {exc}")

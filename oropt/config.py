@@ -251,8 +251,11 @@ class Model:
     # material inside the neighbour parts. Path resolved relative to case_dir like
     # the load-case decks. None (default) = feature off. growth_keepout_part_ids
     # selects which /TETRA4 (or /BRICK) part ids in that deck form the keep-out
-    # (empty = all solid parts). growth_keepout_clearance_mm keeps a gap around the
-    # neighbour parts (0 = the parts' volume exactly).
+    # (empty = all solid parts). growth_keepout_clearance_mm shifts the forbidden
+    # boundary: positive keeps a gap around the neighbour parts, 0 = the parts'
+    # volume exactly, NEGATIVE allows a deliberate penetration of up to |value|
+    # into the neighbour volume (an interference/overlap band -- e.g. a weld/bond
+    # allowance); only material deeper than that stays forbidden.
     growth_keepout_rad: Optional[str] = None
     growth_keepout_part_ids: list = field(default_factory=list)
     growth_keepout_clearance_mm: float = 0.0
