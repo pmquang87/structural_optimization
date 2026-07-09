@@ -413,3 +413,60 @@ def test_enqueue_persists_current_optimiser_selection(tmp_path, monkeypatch):
     assert snap.parent == Path(cfg.model.case_dir).resolve() / qs.QUEUE_CONFIG_DIRNAME
     assert snap != cfg_path
     assert Config.from_yaml(snap).optimizer == "tobs"
+
+
+def test_lock_serialises_concurrent_mutators(tmp_path):
+    """Two processes hammering mutate() concurrently must not lose updates.
+    The old create/unlink lock let contenders break each other's lock and both
+    enter the critical section -- the last writer silently erased the other's
+    entries."""
+    import subprocess
+    import sys
+
+    qpath = tmp_path / "q.json"
+    code = (
+        "import sys\n"
+        "from oropt.gui import queue_store as qs\n"
+        "qpath, tag = sys.argv[1], sys.argv[2]\n"
+        "for i in range(25):\n"
+        "    qs.mutate(qpath, lambda q: qs.add(q, f'{tag}_{i}.yaml'))\n")
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(qpath), tag])
+             for tag in ("a", "b")]
+    for p in procs:
+        assert p.wait(timeout=120) == 0
+    configs = [e.config for e in qs.load_queue(qpath).entries]
+    assert len(configs) == 50 and len(set(configs)) == 50    # nothing lost
+
+
+def test_lock_released_when_holder_dies(tmp_path):
+    """A crashed holder's OS lock is released by the kernel: the next mutate()
+    proceeds immediately -- no staleness heuristic, no permanent wedge."""
+    import subprocess
+    import sys
+
+    qpath = tmp_path / "q.json"
+    # a holder that takes the lock and dies hard inside the critical section
+    code = (
+        "import os, sys\n"
+        "from oropt.gui import queue_store as qs\n"
+        "with qs._lock(sys.argv[1]):\n"
+        "    os._exit(1)\n")
+    subprocess.run([sys.executable, "-c", code, str(qpath)], timeout=60)
+    assert (tmp_path / "q.json.lock").exists()               # file persists...
+    e = qs.mutate(qpath, lambda q: qs.add(q, "after.yaml"))  # ...lock does not
+    assert e.config == "after.yaml"
+
+
+def test_lock_times_out_instead_of_breaking_a_live_lock(tmp_path):
+    """Contention against a LIVE holder must never break the mutex; it raises
+    after the timeout. (The old scheme deleted the live holder's lock after
+    10 s and let both processes write.)"""
+    import pytest
+
+    qpath = tmp_path / "q.json"
+    with qs._lock(qpath):
+        with pytest.raises(TimeoutError, match="run queue"):
+            # a second _lock opens its own fd -> a distinct holder for both
+            # flock (per open-file-description) and msvcrt.locking
+            with qs._lock(qpath, timeout=0.3):
+                pass

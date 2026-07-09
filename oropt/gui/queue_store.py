@@ -23,6 +23,7 @@ import dataclasses
 import json
 import os
 import shutil
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -117,40 +118,61 @@ def save_queue(path: str | Path, q: RunQueue) -> None:
 
 # ---- locked read-modify-write ----------------------------------------------
 @contextmanager
-def _lock(path: str | Path, timeout: float = 10.0, stale_after: float = 60.0):
-    """Best-effort cross-process mutex guarding a queue read-modify-write.
+def _lock(path: str | Path, timeout: float = 30.0):
+    """Cross-process mutex guarding a queue read-modify-write.
 
     Both the GUI (membership edits) and the runner (state transitions) mutate the
-    same file, so each whole-file update is serialised behind ``<path>.lock``
-    (created with ``O_EXCL``). A lock older than *stale_after* — a crashed holder
-    — is broken so the queue can never wedge permanently.
+    same file, so each whole-file update is serialised behind an OS file lock
+    (``flock`` on POSIX, ``msvcrt.locking`` on Windows) held on a persistent
+    ``<path>.lock`` file.
+
+    An OS lock (rather than the previous create-with-``O_EXCL`` + break-if-old
+    scheme) because the kernel releases it automatically when the holder dies —
+    no staleness heuristic at all, and therefore none of its races: two waiters
+    could both judge a crashed holder's file stale, the second deleting the
+    first's *fresh* lock so both entered the critical section and the last
+    writer's queue update silently erased the other's; and after mere seconds of
+    contention the old scheme deleted a perfectly *live* holder's lock. The lock
+    file itself persists (it is never unlinked — unlinking is exactly what made
+    breaking racy); genuinely stuck contention raises ``TimeoutError`` after
+    *timeout* instead of corrupting the queue.
     """
     lock = Path(str(path) + ".lock")
-    start = time.time()
-    while True:
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-            break
-        except FileExistsError:
-            try:
-                age = time.time() - lock.stat().st_mtime
-            except OSError:
-                age = 0.0
-            if age > stale_after or (time.time() - start) > timeout:
-                try:                                    # break a stale/contended lock
-                    lock.unlink()
-                except OSError:
-                    pass
-                continue
-            time.sleep(0.05)
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR)
+    locked = False
     try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"could not lock the run queue within {timeout:.0f}s "
+                        f"({lock}): another oropt process is holding it")
+                time.sleep(0.05)
         yield
     finally:
-        try:
-            lock.unlink()
-        except OSError:
-            pass
+        if locked:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
 
 
 def mutate(path: str | Path, fn: Callable[[RunQueue], object]) -> object:
