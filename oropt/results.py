@@ -82,7 +82,17 @@ def run_anim_to_vtk(cfg: Config, anim_file: Path, out_vtk: Path) -> Path:
     with open(out_vtk, "w", encoding="utf-8", errors="replace") as fh:
         cp = subprocess.run([str(exe), str(anim_file)], stdout=fh,
                             stderr=subprocess.PIPE, env=env, check=False)
-    if cp.returncode != 0 or out_vtk.stat().st_size < 1024:
+    # Success = clean exit + a file that starts like a VTK dataset. (A byte-size
+    # floor is wrong here: a valid conversion of a small validation mesh -- a few
+    # dozen tets -- is well under 1 KiB.)
+    ok = cp.returncode == 0
+    if ok:
+        try:
+            with open(out_vtk, encoding="utf-8", errors="replace") as fh:
+                ok = fh.readline().startswith("# vtk DataFile")
+        except OSError:
+            ok = False
+    if not ok:
         raise RuntimeError(f"anim_to_vtk failed for {anim_file.name}: "
                            f"{cp.stderr.decode(errors='replace')[:300]}")
     return out_vtk

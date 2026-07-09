@@ -97,6 +97,30 @@ def force_kill(work: Path) -> None:
             pass
 
 
+def _int_ids(text: str, label: str) -> list[int]:
+    """Tolerant comma-separated id parse for the free-text id fields.
+
+    A stray non-numeric token (``99999999;``, ``abc``) used to raise an uncaught
+    ``ValueError`` and replace the whole tab render with a traceback -- and abort
+    the script before the deferred Save ran. Flag bad tokens in a caption and
+    keep the good ones instead (the table-based editors in ``cases.py`` /
+    ``boxes.py`` already tolerate bad cells this way).
+    """
+    ids: list[int] = []
+    bad: list[str] = []
+    for tok in text.replace(";", ",").replace(" ", "").split(","):
+        if not tok:
+            continue
+        try:
+            ids.append(int(tok))
+        except ValueError:
+            bad.append(tok)
+    if bad:
+        st.caption(f"⚠ {label}: ignored non-numeric id(s) "
+                   + ", ".join(repr(b) for b in bad))
+    return ids
+
+
 def _fmt_limit(v, fmt: str = "{:.0f}") -> str:
     """Format a feasibility limit for display; a blank limit (None/NaN) -> '—'."""
     return "—" if v is None or v != v else fmt.format(v)
@@ -157,6 +181,17 @@ def render_input_tab(cfg: Config) -> None:
     if n_cases <= 1:
         st.caption("Only one load case — concurrency has nothing to parallelise. "
                    "Add load cases on the 🔀 tab to solve several at once.")
+
+    cfg.run.max_wall_hours = float(st.number_input(
+        "Wall-clock budget [h] (0 = unlimited)",
+        value=float(cfg.run.max_wall_hours), min_value=0.0, step=0.5,
+        key="run_wall_budget",
+        help="Whole-run wall-clock budget. Checked between iterations (a solve "
+             "in flight is never cut short): once exceeded the run stops "
+             "cleanly — state 'stopped', checkpoint kept, post-run steps "
+             "(d3plot/smoothing/animation/report) still run — instead of being "
+             "killed mid-solve by a shared-machine or cluster session limit. "
+             "Resume later with --resume."))
 
     with st.expander("⏩ Seed iteration 0 from another run "
                      "(skip the first full-volume solve)"):
@@ -414,8 +449,8 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                        ",".join(str(x) for x in cfg.model.freeze_group_ids))
     fn = st.text_input("Freeze explicit node ids (comma-sep)",
                        ",".join(str(x) for x in cfg.model.freeze_node_ids))
-    cfg.model.freeze_group_ids = [int(x) for x in fg.replace(" ", "").split(",") if x]
-    cfg.model.freeze_node_ids = [int(x) for x in fn.replace(" ", "").split(",") if x]
+    cfg.model.freeze_group_ids = _int_ids(fg, "freeze group ids")
+    cfg.model.freeze_node_ids = _int_ids(fn, "freeze node ids")
     allow_del_bc = st.checkbox(
         "Allow deleting elements at BC nodes",
         value=not aopt.protect_bc_nodes,
@@ -435,10 +470,8 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         ",".join(str(x) for x in cfg.model.stress_exclude_group_ids))
     sn = st.text_input("Ignore-stress explicit node ids (comma-sep)",
                        ",".join(str(x) for x in cfg.model.stress_exclude_node_ids))
-    cfg.model.stress_exclude_group_ids = [
-        int(x) for x in sg.replace(" ", "").split(",") if x]
-    cfg.model.stress_exclude_node_ids = [
-        int(x) for x in sn.replace(" ", "").split(",") if x]
+    cfg.model.stress_exclude_group_ids = _int_ids(sg, "ignore-stress group ids")
+    cfg.model.stress_exclude_node_ids = _int_ids(sn, "ignore-stress node ids")
 
     st.subheader("Growth regions — add material")
     cfg.model.growth_enabled = st.checkbox(
@@ -752,11 +785,18 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     _axis_vec = {"x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}
     _opts = ["off", "x", "y", "z"]
 
-    def _axis_name(vec, fallback="z"):
+    def _axis_name(vec):
         if vec is None:
             return "off"
         t = [round(float(v), 6) for v in vec]
-        return next((a for a, v in _axis_vec.items() if v == t), fallback)
+        # A hand-edited vector that is no unit axis (e.g. [0,0,-1] -- sign
+        # matters for casting/overhang) maps to "custom", which round-trips the
+        # value untouched. The old "z" fallback silently REWROTE it to +z on the
+        # next Save, inverting the constraint with no warning.
+        return next((a for a, v in _axis_vec.items() if v == t), "custom")
+
+    def _axis_opts(current):
+        return _opts + (["custom"] if current == "custom" else [])
 
     mem = st.columns(2)
     mfg.min_member_layers = int(mem[0].number_input(
@@ -788,12 +828,16 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     st.markdown("**Casting / draw direction** — remove undercuts so a die can "
                 "slide out along the draw axis.")
     cast = st.columns(2)
+    _cur_draw = _axis_name(mfg.draw_direction)
     _sel_draw = cast[0].selectbox(
-        "Draw direction", _opts, index=_opts.index(_axis_name(mfg.draw_direction)),
+        "Draw direction", _axis_opts(_cur_draw),
+        index=_axis_opts(_cur_draw).index(_cur_draw),
         key="draw_dir",
         help="Axis the die is pulled along. Single-sided keeps a solid bottom "
-             "prefix (no material above a void); 'off' disables casting.")
-    mfg.draw_direction = None if _sel_draw == "off" else _axis_vec[_sel_draw]
+             "prefix (no material above a void); 'off' disables casting. "
+             "'custom' = the config's own (non-axis) vector, kept as-is.")
+    if _sel_draw != "custom":
+        mfg.draw_direction = None if _sel_draw == "off" else _axis_vec[_sel_draw]
     mfg.draw_two_sided = cast[1].checkbox(
         "Two-sided (parting surface)", value=mfg.draw_two_sided, key="draw_two",
         disabled=_sel_draw == "off",
@@ -802,21 +846,30 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
 
     st.markdown("**Extrusion** — constant cross-section along an axis (each prism "
                 "made uniform by a majority vote).")
+    _cur_ext = _axis_name(mfg.extrusion_axis)
     _sel_ext = st.selectbox(
-        "Extrusion axis", _opts, index=_opts.index(_axis_name(mfg.extrusion_axis)),
+        "Extrusion axis", _axis_opts(_cur_ext),
+        index=_axis_opts(_cur_ext).index(_cur_ext),
         key="ext_axis",
         help="Elements are binned into prisms by their footprint; a prism is solid "
-             "iff ≥ half of it is alive. 'off' disables extrusion.")
-    mfg.extrusion_axis = None if _sel_ext == "off" else _axis_vec[_sel_ext]
+             "iff ≥ half of it is alive. 'off' disables extrusion. "
+             "'custom' = the config's own (non-axis) vector, kept as-is.")
+    if _sel_ext != "custom":
+        mfg.extrusion_axis = None if _sel_ext == "off" else _axis_vec[_sel_ext]
 
     st.markdown("**Overhang / self-support** — forbid material unsupported below "
                 "the critical angle along the build direction (applied last).")
     ov = st.columns(2)
+    _cur_bld = _axis_name(mfg.build_direction)
     _sel = ov[0].selectbox(
-        "Build direction", _opts, index=_opts.index(_axis_name(mfg.build_direction)),
+        "Build direction", _axis_opts(_cur_bld),
+        index=_axis_opts(_cur_bld).index(_cur_bld),
         key="build_dir",
-        help="Up/growth axis of the print. 'off' disables the overhang constraint.")
-    mfg.build_direction = None if _sel == "off" else _axis_vec[_sel]
+        help="Up/growth axis of the print. 'off' disables the overhang "
+             "constraint. 'custom' = the config's own (non-axis) vector, kept "
+             "as-is.")
+    if _sel != "custom":
+        mfg.build_direction = None if _sel == "off" else _axis_vec[_sel]
     mfg.max_overhang_angle = float(ov[1].number_input(
         "Max overhang angle [deg]", value=float(mfg.max_overhang_angle),
         min_value=0.0, max_value=90.0, step=5.0,
@@ -923,8 +976,7 @@ def _render_keepout(cfg: Config) -> None:
             value=",".join(str(x) for x in cfg.model.growth_keepout_part_ids),
             help="Which /TETRA4 or /BRICK part ids in the keep-out deck form the "
                  "forbidden space. Blank = every solid part in the deck.")
-        cfg.model.growth_keepout_part_ids = [
-            int(x) for x in pids.replace(" ", "").split(",") if x]
+        cfg.model.growth_keepout_part_ids = _int_ids(pids, "keep-out part ids")
         cfg.model.growth_keepout_clearance_mm = float(c[1].number_input(
             "Clearance [mm]", value=float(cfg.model.growth_keepout_clearance_mm),
             min_value=0.0, step=0.5, format="%.3f",
@@ -1413,11 +1465,16 @@ def render_postprocess_tab(cfg: Config, default_folder: Path) -> None:
         "evolution animation, or re-generate the report). More tools may be added "
         "here over time.")
 
-    folder = Path(st.text_input(
+    # Keep the raw text: Path("") stringifies to "." (truthy), so a CLEARED
+    # field would silently mean "operate on the GUI's CWD" — the blank-folder
+    # guards below would never fire and the report tool would write into the
+    # project root instead of a run folder.
+    folder_txt = st.text_input(
         "Run folder", str(default_folder), key="reanim_folder",
         help="A finished run's output folder — the one holding its status.json / "
              "history.csv and the per-iteration topology snapshots. Defaults to the "
-             "currently selected run."))
+             "currently selected run.").strip()
+    folder = Path(folder_txt)
 
     st.markdown("#### 🎬 Evolution animation")
     st.caption(
@@ -1425,9 +1482,9 @@ def render_postprocess_tab(cfg: Config, default_folder: Path) -> None:
         "with new settings (camera angle, resolution, colours, playback). Writes a "
         "new GIF into the run folder, leaving the original `topology_evolution.gif` "
         "untouched unless you reuse its name.")
-    n_frames, src = frame_count(folder) if str(folder).strip() else (0, "")
-    ready = bool(str(folder).strip()) and folder.exists() and n_frames >= 2
-    if not str(folder).strip() or not folder.exists():
+    n_frames, src = frame_count(folder) if folder_txt else (0, "")
+    ready = bool(folder_txt) and folder.exists() and n_frames >= 2
+    if not folder_txt or not folder.exists():
         st.warning("Run folder not found.")
     elif n_frames < 2:
         st.warning(
@@ -1485,7 +1542,7 @@ def render_postprocess_tab(cfg: Config, default_folder: Path) -> None:
         "`status.json` + `history.csv` — the summary, the interactive convergence "
         "charts, and a render of the **last feasible** design. Handy to refresh a "
         "run whose report predates an oropt update.")
-    report_ready = bool(str(folder).strip()) and folder.exists()
+    report_ready = bool(folder_txt) and folder.exists()
     if not report_ready:
         st.caption("Set a valid run folder above to enable this.")
     if st.button("📝 Re-generate report", key="repost_report",

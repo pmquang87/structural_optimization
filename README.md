@@ -457,6 +457,15 @@ in progress.
   give colliding runs their own folder). The mutated deck always lives in
   the `solve/` sub-folder (`<run_folder>/solve/<stem>_0000.rad`), so the source
   decks in `model.case_dir` are never overwritten.
+* `run.max_wall_hours` (default `0` = unlimited) — a **whole-run wall-clock
+  budget** in hours. At ~13 min/solve a run easily outlives a shared-machine or
+  cluster session limit, which would kill it mid-solve and leave a stale
+  `running` status. With a budget set, the elapsed wall time is checked at each
+  iteration boundary (a solve in flight is never cut short): once exceeded, the
+  run stops **cleanly** — state `stopped` (not `failed`), the message names the
+  budget, the checkpoint is kept, and the post-run steps (d3plot / smoothing /
+  animation / report) still execute. Continue later with `--resume`. Size it
+  below the external limit by at least one iteration's wall time.
 * `beso.archive_iterations` / `beso.archive_restart` (both default `true`) — see *Outputs* below.
 * `d3plot` — post-run conversion of the final OpenRadioss animation into an
   LS-Dyna `d3plot` (viewable in LS-PrePost etc.), **on by default**
@@ -491,7 +500,12 @@ in progress.
   even a hard GL/driver crash on a headless box can't abort the run, and each piece
   is best-effort — anything unavailable is logged and the report still writes. Set
   `report.charts: false`, `report.interactive_topology: false` or
-  `report.render_topology: false` to skip those pieces.
+  `report.render_topology: false` to skip those pieces. The report can also be
+  **re-generated headlessly** for any existing run folder — e.g. after an oropt
+  update improved the report — with `oropt-report <run_dir>` (a CLI twin of the
+  GUI's *Re-generate report* button). It prefers the run's frozen
+  `config_used.yaml` so the summarised optimiser/limits match the run
+  (`--config` overrides; `--no-charts` / `--no-render` skip pieces).
 * `animate` — automatic post-run **topology-evolution GIF** (`animate.enabled:
   true` by default). On finish, oropt renders the per-iteration *smoothed*
   surfaces (`topology_smoothed_iterNNNN.<ext>`, falling back to the raw

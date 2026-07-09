@@ -19,21 +19,49 @@ from .results import Results
 
 
 # ---- shared sensitivity helpers (reused by other optimisers, e.g. level-set) --
+def id_positions(elem_ids: np.ndarray,
+                 result_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Positions of *result_ids* within *elem_ids*, order-agnostic.
+
+    Returns ``(pos, valid)``: ``valid`` flags which entries of *result_ids*
+    exist in *elem_ids*, and ``pos`` gives their indices there. A plain
+    ``searchsorted`` requires *elem_ids* sorted ascending — but the deck's
+    element ids are raw card order (Radioss does not require id-ascending
+    cards), and an unsorted deck would silently map most elements to
+    sensitivity 0 and some to *another element's* value. Sorted input (the
+    common case) takes the direct path; anything else goes through an argsort.
+    """
+    n = elem_ids.size
+    result_ids = np.asarray(result_ids)
+    if n == 0 or result_ids.size == 0:
+        return (np.empty(0, dtype=np.intp),
+                np.zeros(result_ids.size, dtype=bool))
+    if np.all(np.diff(elem_ids) > 0):
+        pos = np.searchsorted(elem_ids, result_ids)
+        valid = (pos < n) & (elem_ids[np.clip(pos, 0, n - 1)] == result_ids)
+        return pos[valid], valid
+    order = np.argsort(elem_ids, kind="stable")
+    sorted_ids = elem_ids[order]
+    idx = np.searchsorted(sorted_ids, result_ids)
+    valid = (idx < n) & (sorted_ids[np.clip(idx, 0, n - 1)] == result_ids)
+    return order[idx[valid]], valid
+
+
 def map_sensitivity(results: Results, elem_ids: np.ndarray,
                     sensitivity: str = "energy",
                     blend_weight: float = 0.5) -> np.ndarray:
     """Map per-element OpenRadioss fields onto a full (N,) sensitivity array.
 
-    ``elem_ids`` is the deck's full design element-id list (mesh order, sorted
-    ascending). Elements with no result (dead/absent) get 0 and are pulled up only
+    ``elem_ids`` is the deck's full design element-id list (mesh/card order, any
+    id order). Elements with no result (dead/absent) get 0 and are pulled up only
     by the spatial filter. ``sensitivity`` is ``"energy"`` | ``"vonmises"`` |
     ``"blend"`` (``blend_weight`` weights von-Mises in the blend).
     """
     n = elem_ids.size
     raw = np.zeros(n, dtype=float)
-    pos = np.searchsorted(elem_ids, results.element_ids)
-    valid = (pos < n) & (elem_ids[np.clip(pos, 0, n - 1)] == results.element_ids)
-    pos = pos[valid]
+    pos, valid = id_positions(elem_ids, results.element_ids)
+    if pos.size == 0:      # no overlap (also keeps the blend's .max() legal)
+        return raw
     if sensitivity == "vonmises":
         val = results.vonmises[valid]
     elif sensitivity == "blend":

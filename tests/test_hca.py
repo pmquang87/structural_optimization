@@ -285,3 +285,33 @@ def test_build_optimizer_selects_hca_by_name():
     cfg.optimizer = "bogus"
     with pytest.raises(ValueError):
         build_optimizer(cfg, mesh, protected)
+
+
+# ---- external prunes are reconciled (the level-set "phantom volume" leak) -----
+def test_grow_request_after_prune_does_not_lose_volume():
+    """Ten grow requests in a row after an external prune each iteration must
+    not ratchet the volume DOWN (the leak signature: vf falls against a grow
+    target while the phantom is re-charged every bisection)."""
+    n = 20
+    mesh = _fan_mesh(n)
+    protected = np.zeros(n, bool); protected[0] = True
+    hca = _hca(mesh, protected, kp=1.0, move_limit=1.0)
+    sens = np.linspace(1.0, 0.5, n)
+
+    alive = np.ones(n, bool)
+    vf = hca.volume_fraction(alive)
+    for _ in range(10):
+        target = min(1.0, vf + 0.02)                  # the gate asks to GROW
+        alive = hca.update(alive, sens, target)
+        # external removal-only post-pass: always shave one alive, unprotected
+        # fringe element. Use the HIGHEST-energy one (a real prune shaves the
+        # fringe next to hot material, whose filtered energy keeps its density
+        # alive) so a stale x cannot self-heal via the bisection ranking.
+        removable = np.flatnonzero(alive & ~protected)
+        alive = alive.copy(); alive[removable[0]] = False
+        vf = hca.volume_fraction(alive)
+    # Volume-neutral over each update+prune pair: the run may pay for the
+    # first prune, but must not ratchet 1 element down per iteration (the
+    # pre-fix trace ends at vf=0.50 here -- half the part gone against ten
+    # consecutive GROW requests).
+    assert vf >= 1.0 - 2.0 / n - 1e-9

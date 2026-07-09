@@ -36,6 +36,7 @@ dev = ["pytest>=7.0", "ruff>=0.6", "tetgen>=0.8.4"]
 [project.scripts]
 oropt = "oropt.run:main"
 oropt-animate = "oropt.animate:main"
+oropt-report = "oropt.report:main"
 oropt-growthmesh = "oropt.growthmesh:main"
 
 [tool.setuptools]

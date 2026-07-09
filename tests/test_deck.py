@@ -194,3 +194,30 @@ def test_skew_fix_reads_frame(tmp_path):
     d = _box_deck(tmp_path)
     assert d.skew_fix(9) == [[5.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
     assert d.skew_fix(404) is None
+
+
+# ---- title lines that look like data -----------------------------------------
+def test_group_nodes_digit_leading_title(tmp_path):
+    """A /GRNOD/NODE title starting with a digit (e.g. '2nd_symmetry_set') used
+    to be classified as a node-id line and crash int() with a raw ValueError at
+    every run start."""
+    deck = _MASTER_DECK.replace("/GRNOD/NODE/60000000\nsym\n",
+                                "/GRNOD/NODE/60000000\n2nd_symmetry_set\n")
+    p = tmp_path / "t_0000.rad"
+    p.write_text(deck, encoding="utf-8")
+    d = Deck.load(p, 60000000, 60000000)
+    assert d.group_nodes(60000000).tolist() == [60000001]   # title skipped, data kept
+
+
+def test_box_numeric_title_not_swallowed(tmp_path):
+    """A purely numeric /BOX title (e.g. '1234') used to be consumed as the
+    skew_ID [Diam] line, dropping the real one -- box() then reported the card
+    missing (or attached an unrelated /SKEW frame)."""
+    deck = _BOX_DECK.replace("/BOX/SPHER/7000003\nball\n",
+                             "/BOX/SPHER/7000003\n1234\n")
+    p = tmp_path / "nb_0000.rad"
+    p.write_text(deck, encoding="utf-8")
+    d = Deck.load(p, 60000000, 60000000)
+    b = d.box(7000003)
+    assert b is not None
+    assert b["shape"] == "sphere" and b["radius"] == 2.0    # real Diam line read

@@ -349,7 +349,17 @@ def find_t01(run_dir: str | Path, stem: str) -> Optional[Path]:
 
 
 def find_last_anim(run_dir: str | Path, stem: str) -> Optional[Path]:
-    """Latest animation file ``<stem>A0NN`` in *run_dir* (highest index)."""
+    """Latest animation file ``<stem>A0NN`` in *run_dir* (highest index).
+
+    Sorted numerically on the index: OpenRadioss widens the number past
+    ``A999`` to ``A1000``, and lexicographically ``A1000 < A999`` — a plain
+    sort would silently extract a mid-run state as the "final" one.
+    """
     run_dir = Path(run_dir)
-    anims = sorted(run_dir.glob(f"{stem}A[0-9][0-9]*"))
-    return anims[-1] if anims else None
+
+    def _idx(p: Path) -> int:
+        m = re.search(r"A(\d+)$", p.name)
+        return int(m.group(1)) if m else -1
+
+    anims = [p for p in run_dir.glob(f"{stem}A[0-9][0-9]*") if _idx(p) >= 0]
+    return max(anims, key=_idx) if anims else None

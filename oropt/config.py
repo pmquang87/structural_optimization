@@ -57,6 +57,7 @@ class RunOpts:
     engine_soft_timeout_s: float = 0.0   # >0: per-solve wall-clock sanity budget (s); exceeded -> non-converged, not a run failure. engine_timeout_s stays the hard kill.
     diverge_max_cycles: int = 12         # consecutive ITERATION DIVERGE / timestep-cut cycles with no accepted step between -> non-converging (0 = off). Healthy solves recover after 1-2; 12 means dt collapsed to ~0.8%.
     diverge_fail_after: int = 3          # N consecutive non-converged iterations fail the run
+    max_wall_hours: float = 0.0  # >0: whole-run wall-clock budget (h). Checked at each iteration boundary; exceeded -> the run stops CLEANLY (state 'stopped', checkpoint kept, post-run d3plot/smooth/animate/report still run) instead of being killed mid-solve by a cluster/session limit. Resume later with --resume. 0 = unlimited.
     kmp_stacksize: str = "400m"
     anim_dt: float = 1.0       # animation output interval; >= termination time -> only the final state
     reuse_iter0: bool = True   # if a matching iter_0000 is already in the run folder (e.g. copied from an earlier run of the same initial design), reuse its solve instead of re-running the expensive full-volume iteration 0. Guarded by a byte-compare of the starter deck, so a mismatched design still solves fresh.

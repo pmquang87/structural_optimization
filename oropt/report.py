@@ -33,10 +33,12 @@ problem can never abort or fail an optimisation run.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import datetime as _dt
 import json
 import math
+import sys
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -750,15 +752,20 @@ def _scene_backend_available() -> bool:
 
     The export subprocess uses this same interpreter, so an in-process
     :func:`importlib.util.find_spec` of the two distinct pieces pyvista needs for
-    the offline HTML export — ``trame_vtk`` (the vtk.js exporter) and
-    ``nest_asyncio2`` (to launch trame's server synchronously) — predicts whether
-    the export can work. Both ship with the optional ``report3d`` extra
+    the offline HTML export — ``trame_vtk`` (the vtk.js exporter) and a
+    nest-asyncio module (to launch trame's server synchronously) — predicts
+    whether the export can work. Both ship with the optional ``report3d`` extra
     (``pyvista[jupyter]``); when either is missing we skip a doomed subprocess and
-    fall straight back to the static PNG.
+    fall straight back to the static PNG. pyvista >= 0.47 depends on
+    ``nest_asyncio2`` but 0.43–0.46 (inside our declared support range) use the
+    original ``nest_asyncio`` — accept either, or the viewer is silently dead on
+    a correctly-installed older stack.
     """
     import importlib.util
-    return all(importlib.util.find_spec(m) is not None
-               for m in ("trame_vtk", "nest_asyncio2"))
+    if importlib.util.find_spec("trame_vtk") is None:
+        return False
+    return any(importlib.util.find_spec(m) is not None
+               for m in ("nest_asyncio2", "nest_asyncio"))
 
 
 def _export_topology_scene(work: Path, timeout_s: float,
@@ -1153,3 +1160,77 @@ def write_report(cfg: Config, work: Path,
     except Exception as exc:  # noqa: BLE001  (best-effort: never fail the run)
         log(f"[oropt] report: unexpected error: {exc} - skipped")
         return None
+
+
+def main(argv=None) -> int:
+    """Standalone: ``python -m oropt.report <run_dir>`` to (re)generate the report.
+
+    Headless twin of the GUI's "Re-generate report" button: refresh
+    ``report.html`` / ``report.md`` for any existing run folder without
+    re-running the optimisation (e.g. after an oropt update improved the
+    report). Reads only the artefacts the run already wrote. Prefers the run's
+    own frozen ``config_used.yaml`` — the config it *actually* ran with — so the
+    summarised optimiser/limits match the run; ``--config`` overrides it.
+    """
+    ap = argparse.ArgumentParser(
+        prog="oropt-report",
+        description="(Re)generate report.html / report.md for a finished run "
+                    "folder from its status.json / history.csv, without "
+                    "re-running the optimisation.")
+    ap.add_argument("run_dir", help="run folder containing the run's "
+                                    "status.json / history.csv")
+    ap.add_argument("--config", default=None,
+                    help="YAML config to summarise with (default: the run's "
+                         "frozen config_used.yaml, else oropt defaults)")
+    ap.add_argument("--render-timeout", type=float, default=None,
+                    help="per-render subprocess timeout [s] for the final-design "
+                         "view (default: the config's report.render_timeout_s)")
+    ap.add_argument("--no-charts", action="store_true",
+                    help="skip the convergence charts")
+    ap.add_argument("--no-render", action="store_true",
+                    help="skip the final-design view (interactive and static)")
+    args = ap.parse_args(argv)
+
+    def log(s: str) -> None:
+        print(s, flush=True)
+
+    work = Path(args.run_dir)
+    if not work.is_dir():
+        log(f"[oropt] report: run folder not found: {work}")
+        return 1
+
+    cfg: Optional[Config] = None
+    src = args.config if args.config else work / "config_used.yaml"
+    if args.config or Path(src).is_file():
+        try:
+            cfg = Config.from_yaml(str(src))
+            log(f"[oropt] report: summarising with {src}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"[oropt] report: could not read {src}: {exc}")
+            if args.config:      # an explicit config that doesn't load is fatal;
+                return 1         # the frozen one just falls back to defaults
+    if cfg is None:
+        log("[oropt] report: no config found - summarising with oropt defaults "
+            "(optimiser/limit rows may not match the run)")
+        cfg = Config()
+
+    # The user explicitly asked for a report, so a config that disabled the
+    # automatic post-run one must not veto this run of the tool.
+    cfg.report.enabled = True
+    if args.render_timeout is not None:
+        cfg.report.render_timeout_s = args.render_timeout
+    if args.no_charts:
+        cfg.report.charts = False
+    if args.no_render:
+        cfg.report.interactive_topology = False
+        cfg.report.render_topology = False
+
+    out = write_report(cfg, work, log=log)
+    if out is None:
+        log("[oropt] report: no report produced (see messages above)")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

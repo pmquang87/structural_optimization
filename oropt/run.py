@@ -15,7 +15,7 @@ from typing import Callable, Iterator
 
 from .config import Config
 from .loop import run_optimization
-from .status import RUN_LOG, Status, read_status, write_status
+from .status import RUN_LOG, Status, clear_pid, read_status, write_status
 from .validate import check_config, has_errors
 
 
@@ -82,6 +82,11 @@ def main(argv=None) -> int:
         if has_errors(problems):
             print("[oropt] config has errors -- aborting before launch "
                   "(use --skip-validate to override)", flush=True)
+            # Stamp a `failed` status: without it, a stale terminal status.json
+            # from a PREVIOUS run of this work dir would make the queue runner
+            # classify this rejected launch as that old run's success.
+            errs = "; ".join(p.message for p in problems if p.severity == "error")
+            _mark_failed(cfg.work(), RuntimeError(f"config rejected: {errs}"))
             return 2
 
     # Tee the run's log to <work>/run.log so nothing (least of all a best-effort
@@ -116,6 +121,11 @@ def _mark_failed(work: Path, exc: BaseException) -> None:
         st.activity = ""
         st.message = f"{type(exc).__name__}: {exc}"
         write_status(work, st)
+        # The loop now claims run.pid before its (minutes-long) setup, so an
+        # abort during setup must release the claim too -- a leftover pid from
+        # this still-running (GUI/queue-runner parent) process would otherwise
+        # read as an active run.
+        clear_pid(work)
     except Exception:                                # noqa: BLE001
         pass
 

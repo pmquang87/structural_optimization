@@ -161,8 +161,26 @@ class Hca:
         like the level-set's ``phi``).
         """
         alive_mask = np.asarray(alive_mask, dtype=bool)
+        pruned_V = 0.0
         if self.x is None:
             self.x = np.where(alive_mask, 1.0, _X_MIN)
+        else:
+            # Reconcile the persistent density with the mask the loop actually
+            # kept. The loop's post-passes (manufacturing, island-dropping, the
+            # keep-out hold) act on the mask, not on x, so an element they
+            # pruned would otherwise stay x-alive forever: every bisection
+            # counts its volume as kept and removes REAL material to pay for
+            # the phantom, while the prune re-shaves the fresh fringe -- the
+            # exact permanent leak the level-set fixed with _resync_phi
+            # (docs/levelset_stuck_analysis.md). Drop stale densities to just
+            # below the threshold (minimal push -- the field can still regrow
+            # them next step if the energy asks) and refund their volume to
+            # this step's budget so the update+prune pair stays volume-neutral.
+            stale = (self.x >= _ALIVE) & ~alive_mask & ~self.protected
+            if stale.any():
+                pruned_V = float(self.vol[stale].sum())
+                self.x = self.x.copy()
+                self.x[stale] = np.nextafter(_ALIVE, 0.0)
 
         # HCA-internal running blend with the previous iterations' field (the
         # LS-TaSC multi-iteration weighted sum). At the default weight 1.0 this
@@ -182,7 +200,8 @@ class Hca:
 
         target_V = target_vf * self.V0
         protected_V = float(self.vol[self.protected].sum())
-        s_star = self._solve_setpoint(self.x, field, target_V - protected_V)
+        s_star = self._solve_setpoint(self.x, field,
+                                      target_V - protected_V + pruned_V)
 
         self.x = self._step(self.x, field, s_star)
         self.x[self.protected] = 1.0             # protected pinned at full density
