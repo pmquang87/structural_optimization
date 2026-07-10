@@ -772,6 +772,14 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
     starter = solve_dir / f"{case.stem}_0000.rad"
     engine = solve_dir / f"{case.stem}_0001.rad"
     deck.write(starter, alive, no_pin=no_pin)
+    if getattr(cfg, "demo", None) is not None and cfg.demo.enabled:
+        # Demo backend: answer the solve with deterministic synthetic physics
+        # (oropt.demo) — no starter/engine/anim, no OpenRadioss install. The
+        # deck is still written above so the deletion/pinning path stays
+        # exercised; everything downstream (feasibility, update, status,
+        # post-processing) sees a normal (RunResult, Results) pair.
+        from .demo import demo_solve
+        return demo_solve(deck, alive, case, cfg.demo)
     if case.fast_mode:
         if fast_tie is None:                     # precomputed in run_optimization
             raise ValueError(f"fast-mode case {case.name!r} has no discovered tie")

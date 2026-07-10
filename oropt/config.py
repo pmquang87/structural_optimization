@@ -100,6 +100,25 @@ class DockerOpts:
 
 
 @dataclass
+class DemoOpts:
+    """Demo solver backend — synthetic physics, no OpenRadioss needed.
+
+    When ``enabled``, every solve is answered by :func:`oropt.demo.demo_solve`
+    instead of the real starter/engine: a deterministic analytic response
+    (energy concentrated along a pseudo load path; stress/displacement rising
+    as material is removed) that drives the whole pipeline — loop, monitor,
+    report, smoothing, GIF — so the tool can be evaluated, demonstrated and
+    benchmarked with **zero solver install**. It is NOT a solver: numbers are
+    synthetic and mean nothing physically. Off by default; the real backends
+    are byte-identical to before.
+    """
+    enabled: bool = False
+    sigma0: float = 100.0    # synthetic peak von-Mises [MPa] at full volume
+    disp0: float = 0.5       # synthetic constrained-node displacement [mm] at full volume
+    hardening: float = 1.5   # response exponent: sigma/disp scale with (V0/V_alive)**hardening
+
+
+@dataclass
 class GrowthBox:
     """A user-defined region (like LS-DYNA's ``*DEFINE_BOX`` / Radioss
     ``/BOX/RECTA`` family) marking part of the design mesh as **candidate growth
@@ -896,6 +915,7 @@ class Config:
     or_paths: ORPaths = field(default_factory=ORPaths)
     run: RunOpts = field(default_factory=RunOpts)
     docker: DockerOpts = field(default_factory=DockerOpts)
+    demo: DemoOpts = field(default_factory=DemoOpts)
     model: Model = field(default_factory=Model)
     beso: Beso = field(default_factory=Beso)
     levelset: LevelSet = field(default_factory=LevelSet)
@@ -941,6 +961,7 @@ class Config:
             or_paths=build(ORPaths, data.get("or_paths")),
             run=build(RunOpts, data.get("run")),
             docker=build(DockerOpts, data.get("docker")),
+            demo=build(DemoOpts, data.get("demo")),
             model=build(Model, data.get("model")),
             beso=build(Beso, data.get("beso")),
             levelset=build(LevelSet, data.get("levelset")),
