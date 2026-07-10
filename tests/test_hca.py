@@ -315,3 +315,97 @@ def test_grow_request_after_prune_does_not_lose_volume():
     # pre-fix trace ends at vf=0.50 here -- half the part gone against ten
     # consecutive GROW requests).
     assert vf >= 1.0 - 2.0 / n - 1e-9
+
+
+# ---- MHCA variable neighbourhood (Afrousheh et al. 2019) ----------------------
+def _line_mesh(n=12, spacing=1.0):
+    """``n`` unit-volume tets in a line, centroids ``spacing`` apart, all sharing
+    node 0 so connectivity never interferes -- gives the filter radius real
+    geometry to act on (the fan mesh's all-zero centroids see every radius as
+    all-inclusive)."""
+    conn = np.array([[0, i + 1, i + 2, i + 3] for i in range(n)])
+    cent = np.zeros((n, 3)); cent[:, 0] = np.arange(n) * spacing
+    return Mesh(centroids=cent, volumes=np.ones(n), conn_rows=conn,
+                n_nodes=int(conn.max()) + 1, design_node_min=0)
+
+
+def test_mhca_off_by_default_and_when_not_above_filter_radius():
+    mesh = _line_mesh()
+    protected = np.zeros(mesh.n_elements, bool); protected[0] = True
+    hca = _hca(mesh, protected)                       # radius_start = 0 -> off
+    assert hca.cfg.radius_start == 0.0
+    for it in (0, 5, 50):
+        hca.set_iteration(it)
+        assert hca._scheduled_radius() == hca.cfg.filter_radius
+    # a start radius at/below the filter radius could only grow -> also off
+    cfg = HcaCfg(filter_radius=2.0, radius_start=1.5)
+    hca2 = Hca(mesh, cfg, protected)
+    hca2.set_iteration(0)
+    assert hca2._scheduled_radius() == 2.0
+
+
+def test_mhca_radius_decays_and_quantises():
+    mesh = _line_mesh()
+    protected = np.zeros(mesh.n_elements, bool)
+    cfg = HcaCfg(filter_radius=1.0, radius_start=4.0, radius_iters=12,
+                 radius_steps=4)                      # levels: 4, 3, 2, 1
+    hca = Hca(mesh, cfg, protected)
+
+    radii = []
+    for it in range(0, 20):
+        hca.set_iteration(it)
+        radii.append(hca._scheduled_radius())
+    assert radii[0] == 4.0                            # starts wide
+    assert radii[-1] == 1.0                           # ends at filter_radius
+    assert all(radii[i] >= radii[i + 1] for i in range(len(radii) - 1))
+    assert set(radii) <= {4.0, 3.0, 2.0, 1.0}         # quantised to the levels
+    # past the decay window the radius stays pinned at filter_radius
+    hca.set_iteration(100)
+    assert hca._scheduled_radius() == 1.0
+
+
+def test_mhca_filter_widens_early_and_matches_classic_late():
+    """Early iterations average over a wider neighbourhood than the base filter;
+    once the schedule has decayed the filtering is identical to classic HCA."""
+    mesh = _line_mesh(n=12, spacing=1.0)
+    protected = np.zeros(mesh.n_elements, bool)
+    cfg = HcaCfg(filter_radius=1.0, radius_start=6.0, radius_iters=4,
+                 radius_steps=2, history_weight=1.0)  # levels: 6, 1
+    hca = Hca(mesh, cfg, protected)
+    classic = Hca(mesh, HcaCfg(filter_radius=1.0, history_weight=1.0), protected)
+
+    raw = np.zeros(mesh.n_elements); raw[0] = 1.0     # a point source to smear
+
+    hca.set_iteration(0)                              # radius 6: wide smear
+    wide = hca.filter_history(raw, None)
+    hca.set_iteration(10)                             # decayed: radius 1
+    narrow = hca.filter_history(raw, None)
+
+    assert np.count_nonzero(wide) > np.count_nonzero(narrow)   # wider support early
+    assert np.allclose(narrow, classic.filter_history(raw, None))  # late == classic
+
+
+def test_mhca_filter_matrices_are_cached_per_radius():
+    mesh = _line_mesh()
+    protected = np.zeros(mesh.n_elements, bool)
+    cfg = HcaCfg(filter_radius=1.0, radius_start=3.0, radius_iters=4,
+                 radius_steps=3)                      # levels: 3, 2, 1
+    hca = Hca(mesh, cfg, protected)
+    raw = np.ones(mesh.n_elements)
+
+    for it in range(8):                               # walks all three levels
+        hca.set_iteration(it)
+        hca.filter_history(raw, None)
+    assert set(hca._W_cache.keys()) == {3.0, 2.0, 1.0}
+    # a revisited radius reuses the cached matrix (identity, not a rebuild)
+    W = hca._W_cache[1.0]
+    hca.set_iteration(50)
+    hca.filter_history(raw, None)
+    assert hca._W_cache[1.0] is W
+
+
+def test_mhca_defaults_roundtrip():
+    cfg = Config()
+    assert cfg.hca.radius_start == 0.0                # off by default
+    assert cfg.hca.radius_iters == 20
+    assert cfg.hca.radius_steps == 4

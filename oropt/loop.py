@@ -31,6 +31,8 @@ from .mesh import Mesh
 from .report import reported_iteration, write_report
 from .results import extract
 from .runner import RunResult, run_solver
+from .controller import build_backoff_controller
+from .saip import Saip
 from .smoothing import smooth_all_iterations, smooth_final
 from .tobs import Tobs
 
@@ -50,11 +52,13 @@ def build_optimizer(cfg: Config, mesh: Mesh, protected: np.ndarray,
         return Tobs(mesh, cfg.tobs, protected, anchor=anchor)
     if name == "hca":
         return Hca(mesh, cfg.hca, protected, anchor=anchor)
+    if name == "saip":
+        return Saip(mesh, cfg.saip, protected, anchor=anchor)
     if name == "beso":
         return Beso(mesh, cfg.beso, protected, anchor=anchor)
     raise ValueError(
         f"unknown optimizer {cfg.optimizer!r} "
-        "(expected 'beso', 'levelset', 'tobs' or 'hca')")
+        "(expected 'beso', 'levelset', 'tobs', 'hca' or 'saip')")
 
 
 def snapshot_config_used(work: Path, cfg: Config, resume: bool,
@@ -1056,8 +1060,13 @@ def run_optimization(cfg: Config, resume: bool = False,
                 "keep-out held void every iteration (never grown) -> no material "
                 "enters the neighbour parts")
     opt = build_optimizer(cfg, mesh, protected, anchor=anchor)
+    # Multipoint back-off (backoff_mode: multipoint): the volume target comes
+    # from a controller fitted to the run's own (vf, violation) history instead
+    # of the optimiser's reactive gate. None = the classic gate, unchanged.
+    ctrl = build_backoff_controller(oc)
     log(f"[oropt] optimizer={cfg.optimizer_name()}; protected elements: "
-        f"{int(protected.sum())} ({100*protected.mean():.1f}%); V0={opt.V0:.3f}")
+        f"{int(protected.sum())} ({100*protected.mean():.1f}%); V0={opt.V0:.3f}"
+        + ("; backoff=multipoint" if ctrl is not None else ""))
 
     # Stress-exclusion region: design elements touching a user-flagged hot-spot
     # node set have their von-Mises ignored everywhere it's reported (sigma_max,
@@ -1110,6 +1119,10 @@ def run_optimization(cfg: Config, resume: bool = False,
                     log(f"[oropt] checkpoint density field has {xfield.size} "
                         f"elements but the deck has {deck.n_design_elements} -- "
                         "ignored, density will re-initialise from the alive mask")
+            # Multipoint controller history: restored so the resumed run keeps
+            # its fitted boundary instead of re-learning it from gate steps.
+            if ctrl is not None:
+                ctrl.restore(ckpt.get("ctrl"))
             cur_vf = opt.volume_fraction(alive)
             log(f"[oropt] resumed at iteration {start_iter}, vf={cur_vf:.3f}")
             for msg in resume_warnings(prior_optimizer, cfg.optimizer_name(),
@@ -1158,6 +1171,11 @@ def run_optimization(cfg: Config, resume: bool = False,
             if should_stop and should_stop():
                 status.state = "stopped"; status.message = "stop requested"
                 break
+            # Tell schedule-carrying optimisers (HCA's MHCA neighbourhood decay)
+            # the absolute iteration, so a --resume continues the schedule where
+            # it left off instead of restarting it wide.
+            if hasattr(opt, "set_iteration"):
+                opt.set_iteration(it)
             if budget_s > 0.0 and (time.time() - run_t0) >= budget_s:
                 wall_h = (time.time() - run_t0) / 3600.0
                 status.state = "stopped"
@@ -1242,14 +1260,18 @@ def run_optimization(cfg: Config, resume: bool = False,
                 # nothing to re-grow with; the mask stays put and a
                 # deterministic re-diverge fails the run via diverge_fail_after.
                 if sens_prev is not None:
-                    target_vf = opt.next_target_vf(vf, False,
-                                                   violation=float("inf"))
+                    # A diverged solve carries no usable (vf, violation) point;
+                    # the multipoint controller sees the inf and falls back to
+                    # the gate's capped back-off, unrecorded.
+                    target_vf = (ctrl or opt).next_target_vf(
+                        vf, False, violation=float("inf"))
                     alive = opt.update(alive, sens_prev, target_vf)
                     if hold_void:
                         alive = alive & keep_growable
                 st.save_checkpoint(work, it + 1, alive, sens_prev,
                                    phi=getattr(opt, "phi", None),
-                                   x=getattr(opt, "x", None))
+                                   x=getattr(opt, "x", None),
+                                   ctrl=(ctrl.state() if ctrl else None))
                 # the recovery step invalidates the guards' iteration pairing
                 prev_vf = prev_target_vf = None
                 continue
@@ -1407,13 +1429,23 @@ def run_optimization(cfg: Config, resume: bool = False,
                 # duplicate history row.
                 st.save_checkpoint(work, it + 1, alive, sens,
                                    phi=getattr(opt, "phi", None),
-                                   x=getattr(opt, "x", None))
+                                   x=getattr(opt, "x", None),
+                                   ctrl=(ctrl.state() if ctrl else None))
                 log("[oropt] CONVERGED")
                 break
 
             # ---- next design ----------------------------------------------
             sens_prev = sens
-            target_vf = opt.next_target_vf(vf, feasible, violation=violation)
+            # Multipoint mode: record this iteration's measured point, then let
+            # the controller pick the target from its fitted boundary (it falls
+            # back to the optimiser's classic gate until the fit is usable).
+            if ctrl is not None:
+                ctrl.record(vf, violation)
+                target_vf = ctrl.next_target_vf(vf, feasible,
+                                                violation=violation)
+            else:
+                target_vf = opt.next_target_vf(vf, feasible,
+                                               violation=violation)
             # Stress-responsive add-back bias (off by default): when a stress
             # limit is violated, scale the sensitivity driving THIS update by
             # (1 + bias * vonmises/sigma_allow) so the material the back-off
@@ -1459,7 +1491,8 @@ def run_optimization(cfg: Config, resume: bool = False,
             prev_vf, prev_target_vf = vf, target_vf
             st.save_checkpoint(work, it + 1, alive, sens_prev,
                                phi=getattr(opt, "phi", None),
-                               x=getattr(opt, "x", None))
+                               x=getattr(opt, "x", None),
+                               ctrl=(ctrl.state() if ctrl else None))
         else:
             status.state = "converged" if status.state == "running" else status.state
             status.message = status.message or "reached max_iter"

@@ -249,7 +249,8 @@ def is_running(work_dir: str | Path) -> bool:
 def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray,
                     sens_prev: Optional[np.ndarray] = None,
                     phi: Optional[np.ndarray] = None,
-                    x: Optional[np.ndarray] = None) -> None:
+                    x: Optional[np.ndarray] = None,
+                    ctrl: Optional[np.ndarray] = None) -> None:
     """Persist the state a ``--resume`` needs to continue *without* perturbing the
     design: the alive mask, the history-blended sensitivity, and each field-carrying
     optimiser's *own* continuous field.
@@ -260,7 +261,11 @@ def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray
     (level-set), or discards the controller's sub-threshold memory (HCA). BESO/TOBS
     are stateless and pass neither. On an optimiser *switch* the destination reloads
     only the field that matches its own kind (see the loop), so a phi never lands in
-    HCA's ``x`` or vice versa — the mismatched field is dropped and re-initialised."""
+    HCA's ``x`` or vice versa — the mismatched field is dropped and re-initialised.
+
+    *ctrl* is the multipoint back-off controller's recorded (vf, violation)
+    history, an (n, 2) array (see :mod:`oropt.controller`); without it a resumed
+    multipoint run re-learns the constraint boundary from gate-fallback steps."""
     # Atomic like status.json: the checkpoint is the run's ONLY resume state and
     # the GUI polls it every rerun, so an in-place rewrite risks (a) a reader
     # catching a half-written zip and (b) a crash mid-write destroying the
@@ -271,7 +276,8 @@ def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray
              alive_mask=alive_mask,
              sens_prev=(sens_prev if sens_prev is not None else np.array([])),
              phi=(phi if phi is not None else np.array([])),
-             x=(x if x is not None else np.array([])))
+             x=(x if x is not None else np.array([])),
+             ctrl=(ctrl if ctrl is not None else np.empty((0, 2))))
     os.replace(tmp, final)
 
 
@@ -304,7 +310,9 @@ def load_checkpoint(work_dir: str | Path) -> Optional[dict]:
     sp = d["sens_prev"]
     phi = d["phi"] if "phi" in d.files else np.array([])   # pre-phi checkpoints
     x = d["x"] if "x" in d.files else np.array([])         # pre-x (no HCA field)
+    ctrl = d["ctrl"] if "ctrl" in d.files else np.empty((0, 2))  # pre-multipoint
     return {"iteration": int(d["iteration"]), "alive_mask": d["alive_mask"],
             "sens_prev": (sp if sp.size else None),
             "phi": (phi if phi.size else None),
-            "x": (x if x.size else None)}
+            "x": (x if x.size else None),
+            "ctrl": (ctrl if ctrl.size else None)}

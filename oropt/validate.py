@@ -28,7 +28,7 @@ from .runner import backend_problems
 ERROR = "error"
 WARNING = "warning"
 
-VALID_OPTIMIZERS = ("beso", "levelset", "tobs", "hca")
+VALID_OPTIMIZERS = ("beso", "levelset", "tobs", "hca", "saip")
 VALID_GROWTH_SHAPES = ("box", "cylinder", "sphere", "polyhedron")
 
 
@@ -278,6 +278,40 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             and not any(c.sigma_allow is not None for c in cases):
         warn("addback_stress_bias is set but no load case sets a sigma_allow "
              "limit -- the stress-responsive add-back bias will never engage")
+    if opt.backoff_mode not in ("gate", "multipoint"):
+        err(f"backoff_mode must be 'gate' or 'multipoint': "
+            f"got {opt.backoff_mode!r}")
+    if opt.multipoint_window < 2:
+        err(f"multipoint_window must be >= 2 (a 1-point fit has no slope): "
+            f"got {opt.multipoint_window}")
+    if not (0 < opt.utilization_target <= 1):
+        err(f"utilization_target must be in (0, 1] (1.0 = right at the "
+            f"limits): got {opt.utilization_target}")
+    # optimiser-specific knobs (guarded getattr: only the owning block has them)
+    ur = getattr(opt, "update_rule", "advect")
+    if ur not in ("advect", "rde"):
+        err(f"levelset.update_rule must be 'advect' or 'rde': got {ur!r}")
+    if getattr(opt, "diffusion", 0.0) < 0:
+        err(f"levelset.diffusion must be >= 0: got {opt.diffusion}")
+    if getattr(opt, "radius_start", 0.0) < 0:
+        err(f"hca.radius_start must be >= 0 (0 = fixed filter_radius, "
+            f"classic HCA): got {opt.radius_start}")
+    elif 0.0 < getattr(opt, "radius_start", 0.0) <= opt.filter_radius:
+        warn(f"hca.radius_start={opt.radius_start} is not above "
+             f"filter_radius={opt.filter_radius} -- the MHCA neighbourhood "
+             "schedule only decays, so it is a no-op (set radius_start > "
+             "filter_radius, or 0 to silence this)")
+    if getattr(opt, "radius_iters", 1) < 1:
+        err(f"hca.radius_iters must be >= 1: got {opt.radius_iters}")
+    if getattr(opt, "radius_steps", 2) < 2:
+        err(f"hca.radius_steps must be >= 2: got {opt.radius_steps}")
+    fl = getattr(opt, "flip_limit", None)
+    if fl is not None and not (0 < fl <= 1):
+        err(f"flip_limit must be in (0, 1]: got {fl}")
+    od = getattr(opt, "oscillation_damping", None)
+    if od is not None and not (0 < od <= 1):
+        err(f"saip.oscillation_damping must be in (0, 1] (1.0 = off): "
+            f"got {od}")
     any_disp_limit = any(dc.d_allow is not None
                          for c in cases for dc in c.disp_constraints)
     if (opt.backoff_gain > 0 or opt.damping_threshold < 1) \
@@ -286,6 +320,12 @@ def check_config(cfg: Config, *, raw: dict | None = None,
         warn("the feasibility back-off controller (backoff_gain / "
              "damping_threshold) is configured but no load case sets a "
              "sigma_allow or d_allow limit -- it will never engage")
+    if opt.backoff_mode == "multipoint" \
+            and not (any(c.sigma_allow is not None for c in cases)
+                     or any_disp_limit):
+        warn("backoff_mode is 'multipoint' but no load case sets a "
+             "sigma_allow or d_allow limit -- there is no violation signal "
+             "to fit, so the controller will always fall back to the gate")
 
     # --- per-case weights & feasibility limits ---
     weights = [c.weight for c in cases]

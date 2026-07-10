@@ -480,11 +480,12 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
     st.caption("Feasibility limits (σ_allow / d_allow) are now set **per load "
                "case** on the 🔀 Load cases tab.")
     st.subheader("Optimizer")
-    _opts = ["beso", "levelset", "tobs", "hca"]
+    _opts = ["beso", "levelset", "tobs", "hca", "saip"]
     _opt_labels = {"beso": "BESO — bi-directional element removal",
                    "levelset": "Level-set — smoother boundaries",
                    "tobs": "TOBS — binary ILP flips (Sivapuram & Picelli 2018)",
-                   "hca": "HCA — hybrid cellular automata (LS-TaSC-style)"}
+                   "hca": "HCA — hybrid cellular automata (LS-TaSC-style)",
+                   "saip": "SAIP — sequential integer programming (Liang & Cheng 2019)"}
     opt_name = st.selectbox(
         "Topology optimizer", _opts,
         index=_opts.index(cfg.optimizer_name()) if cfg.optimizer_name() in _opts else 0,
@@ -704,7 +705,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
             "**Enable growth regions** above to edit or use them.")
 
     _opt_short = {"beso": "BESO", "levelset": "Level-set", "tobs": "TOBS",
-                  "hca": "HCA"}
+                  "hca": "HCA", "saip": "SAIP"}
     st.subheader(f"{_opt_short[opt_name]} parameters")
     g = st.columns(3)
     _seed_widget(f"evo_{opt_name}", float(aopt.evolution_rate))
@@ -778,6 +779,32 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
              "the update by (1 + bias·σ_vm/σ_allow), spatially filtered, so "
              "the material added back lands near the overstressed region "
              "instead of wherever the energy ranking points. 0 = off.")
+    m = st.columns(3)
+    _bm_opts = ["gate", "multipoint"]
+    _seed_widget(f"bomode_{opt_name}",
+                 aopt.backoff_mode if aopt.backoff_mode in _bm_opts else "gate")
+    aopt.backoff_mode = m[0].selectbox(
+        "Back-off mode", _bm_opts, key=f"bomode_{opt_name}",
+        format_func=lambda k: {"gate": "Gate (classic / proportional)",
+                               "multipoint": "Multipoint (LS-TaSC-style)"}[k],
+        help="Gate: the reactive controller above. Multipoint: fit "
+             "violation(vf) over the run's own recent history and step the "
+             "volume target to the predicted constraint boundary — the "
+             "LS-TaSC multipoint idea, at zero extra solves. Falls back to "
+             "the gate until enough usable points exist.")
+    _seed_widget(f"mpwin_{opt_name}", int(aopt.multipoint_window))
+    aopt.multipoint_window = int(m[1].number_input(
+        "Multipoint window", min_value=2, max_value=20, step=1,
+        key=f"mpwin_{opt_name}",
+        help="Number of recent (vf, violation) history points the local "
+             "fit uses. Only used in multipoint mode."))
+    _seed_widget(f"mput_{opt_name}", float(aopt.utilization_target))
+    aopt.utilization_target = m[2].number_input(
+        "Utilisation target", min_value=0.5, max_value=1.0, step=0.01,
+        format="%.2f", key=f"mput_{opt_name}",
+        help="The constraint-utilisation ratio the multipoint controller "
+             "steers onto. 1.0 = right at the limits; 0.98 leaves a 2 % "
+             "safety margin. Only used in multipoint mode.")
 
     # ---- optimiser-specific knobs -----------------------------------------
     if opt_name == "tobs":
@@ -800,7 +827,8 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         cfg.levelset.smoothing_passes = int(t[1].number_input(
             "Smoothing passes", value=int(cfg.levelset.smoothing_passes),
             min_value=0, step=1,
-            help="Laplacian/Jacobi regularisation passes per iteration."))
+            help="Laplacian/Jacobi regularisation passes per iteration "
+                 "(advect rule only; the RDE rule regularises implicitly)."))
         cfg.levelset.band_width = t[2].number_input(
             "Band width", value=float(cfg.levelset.band_width), step=0.5,
             help="Clamp |φ| to this each step to keep the field bounded.")
@@ -811,6 +839,25 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                  "regions sink by dt·rate·(1 − Vn) per iteration, so holes can "
                  "nucleate in the free interior instead of only at existing "
                  "void interfaces. 0 = off.")
+        u = st.columns(2)
+        _ur_opts = ["advect", "rde"]
+        cfg.levelset.update_rule = u[0].selectbox(
+            "Update rule", _ur_opts,
+            index=(_ur_opts.index(cfg.levelset.update_rule)
+                   if cfg.levelset.update_rule in _ur_opts else 0),
+            format_func=lambda k: {"advect": "Advect + smoothing (classic)",
+                                   "rde": "Reaction–diffusion (RDE)"}[k],
+            help="Advect: explicit φ += dt·vel then Jacobi smoothing passes. "
+                 "RDE: one implicit reaction–diffusion step per iteration "
+                 "(Yamada/Otomori family) — unconditionally stable, no "
+                 "smoothing passes, complexity controlled by the diffusion "
+                 "knob alone.")
+        cfg.levelset.diffusion = u[1].number_input(
+            "Diffusion (RDE)", value=float(cfg.levelset.diffusion),
+            min_value=0.0, step=0.25, format="%.2f",
+            help="Diffusion coefficient of the implicit RDE step — the single "
+                 "geometric-complexity knob: larger → smoother/simpler designs "
+                 "(fewer, thicker members). Only used with the RDE rule.")
     elif opt_name == "hca":
         t = st.columns(3)
         cfg.hca.kp = t[0].number_input(
@@ -832,6 +879,40 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                  "iterations (LS-TaSC's multi-iteration weighted sum). 1.0 = "
                  "off — the shared history weight above already blends "
                  "iterations.")
+        r = st.columns(3)
+        cfg.hca.radius_start = r[0].number_input(
+            "MHCA start radius [mm]", value=float(cfg.hca.radius_start),
+            min_value=0.0, step=0.5, format="%.2f",
+            help="MHCA variable neighbourhood (Afrousheh et al. 2019): the CA "
+                 "neighbourhood radius starts here and decays to the filter "
+                 "radius over the iterations below — wide early (global "
+                 "search), narrow late (local refinement). 0 = off (fixed "
+                 "filter radius, classic HCA).")
+        cfg.hca.radius_iters = int(r[1].number_input(
+            "MHCA decay iterations", value=int(cfg.hca.radius_iters),
+            min_value=1, step=5,
+            help="Iterations over which the neighbourhood radius decays "
+                 "linearly from the start radius to the filter radius."))
+        cfg.hca.radius_steps = int(r[2].number_input(
+            "MHCA radius steps", value=int(cfg.hca.radius_steps),
+            min_value=2, max_value=10, step=1,
+            help="Distinct radii the schedule quantises to; each builds one "
+                 "cached filter matrix — keep small on large meshes."))
+    elif opt_name == "saip":
+        t = st.columns(2)
+        cfg.saip.flip_limit = t[0].number_input(
+            "Flip move-limit (frac/iter)", value=float(cfg.saip.flip_limit),
+            min_value=0.005, max_value=0.5, step=0.005, format="%.3f",
+            help="Max fraction of elements flipped per canonical-relaxation "
+                 "step — the trust region that keeps successive "
+                 "linearisations valid. 0.01–0.05 is typical.")
+        cfg.saip.oscillation_damping = t[1].number_input(
+            "Oscillation damping", value=float(cfg.saip.oscillation_damping),
+            min_value=0.05, max_value=1.0, step=0.05, format="%.2f",
+            help="Rank-down factor on elements that flipped between the last "
+                 "two designs (SCIP-inspired conservatism): they fall behind "
+                 "fresh candidates for immediately flipping back, so "
+                 "add/remove ping-pong decays. 1.0 = off.")
 
     arch = st.columns(2)
     _seed_widget(f"arch_{opt_name}", bool(aopt.archive_iterations))

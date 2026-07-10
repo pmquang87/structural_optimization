@@ -1,4 +1,4 @@
-# oropt — OpenRadioss-coupled topology optimisation (BESO · level-set · TOBS · HCA)
+# oropt — OpenRadioss-coupled topology optimisation (BESO · level-set · TOBS · HCA · SAIP)
 
 [![CI](https://github.com/pmquang87/structural_optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/pmquang87/structural_optimization/actions/workflows/ci.yml)
 
@@ -11,11 +11,18 @@ bi-directional add-back), and re-solves — removing material while the
 high-fidelity solver still reports peak von-Mises stress and a chosen node's
 displacement within limits.
 
-Four discrete optimisers plug into this same solve → delete → re-solve loop and
+Five discrete optimisers plug into this same solve → delete → re-solve loop and
 are picked with a single `optimizer:` key — **BESO** (default), a nodal
-**level-set** (smoother boundaries), **TOBS** (integer-linear-programming
-binary flips), and **HCA** (hybrid cellular automata, the LS-TaSC method) — all
-reusing the `/ANIM/ELEM/ENER` energy as their sensitivity.
+**level-set** (smoother boundaries; classic advection or a reaction-diffusion
+update), **TOBS** (integer-linear-programming binary flips), **HCA** (hybrid
+cellular automata, the LS-TaSC method, with an optional MHCA
+variable-neighbourhood schedule), and **SAIP** (sequential approximate integer
+programming, canonical-relaxation flips) — all reusing the `/ANIM/ELEM/ENER`
+energy as their sensitivity. An optional **multipoint back-off controller**
+(`backoff_mode: multipoint`) drives any optimiser's volume target from the
+run's own fitted violation(vf) history instead of the reactive gate. The
+algorithm portfolio follows the research survey in
+[`docs/topology_sota_2026.md`](docs/topology_sota_2026.md).
 
 Built for the AlSi10Mg additively-manufactured elevator linkage (575k TET4,
 6 kN pull through rigid cylinders via contact, implicit nonlinear quasi-static).
@@ -57,8 +64,12 @@ oropt/
   beso.py     sensitivity -> filter + history average -> volume-target threshold + add-back + connectivity
   levelset.py nodal level-set alternative: energy -> nodal velocity -> phi evolution + smoothing -> bisected threshold
   tobs.py     binary-ILP alternative: per-iteration element flips chosen by an integer linear program (scipy HiGHS)
-  hca.py      hybrid-cellular-automata alternative (LS-TaSC-style): per-element virtual density driven by a setpoint controller
+  hca.py      hybrid-cellular-automata alternative (LS-TaSC-style): per-element virtual density driven by a setpoint controller; optional MHCA variable-neighbourhood radius schedule
+  saip.py     SAIP alternative (Liang & Cheng): per-iteration flips from the canonical relaxation (analytic dual bisection, no MILP), with SCIP-inspired oscillation damping
+  controller.py  multipoint back-off (LS-TaSC-style): the volume target from a violation(vf) fit over the run's own history; opt-in via backoff_mode on any optimiser block
   simp.py     EXPERIMENTAL SIMP/OC prototype — offline maths only, not wired into the loop (see docs/simp_spike.md)
+  tdsa.py     EXPERIMENTAL topological-derivative sensitivity prototype (stress-quadratic forms) — offline maths only
+  mfse.py     EXPERIMENTAL MFSE + Kriging non-gradient prototype (surrogate over <=200 field coefficients) — offline maths only
   manufacturing.py manufacturing constraints on the alive mask: min/max member size, symmetry, casting (draw), extrusion, overhang
   smoothing.py / d3plot.py  post-run: smoothed-surface (STL/VTP) export; OpenRadioss anim -> LS-Dyna d3plot
   report.py   post-run: auto summary report (report.html/report.md) — charts + interactive/static final-design view from status/history
@@ -147,14 +158,19 @@ in progress.
 * `beso.evolution_rate`, `target_volume_fraction`, `filter_radius`,
   `history_weight`, `sensitivity` (`energy`|`vonmises`|`blend`).
 * `optimizer` (default `beso`) — selects the discrete topology optimiser. All
-  four share the `/ANIM/ELEM/ENER` energy sensitivity, the element-deletion deck
+  five share the `/ANIM/ELEM/ENER` energy sensitivity, the element-deletion deck
   path, and the multi-load / manufacturing-constraint / connectivity machinery; only the
   per-iteration update differs:
   * `beso` — the default bi-directional evolutionary scheme (`beso:` knobs).
   * `levelset` — a **nodal level-set** (smoother boundaries than BESO's
     element-by-element removal): energy → nodal velocity → φ evolution +
     smoothing → bisected volume-target threshold. Specifics under `levelset:`:
-    `dt`, `smoothing_passes`, `band_width`.
+    `dt`, `smoothing_passes`, `band_width`, and the evolution operator
+    `update_rule` — `advect` (classic explicit evolve + Jacobi smoothing) or
+    `rde` (one **implicit reaction–diffusion step** per iteration, the
+    Yamada/Otomori RDE family: unconditionally stable, no smoothing passes,
+    with `diffusion` as the single geometric-complexity knob — larger →
+    smoother, simpler designs).
   * `tobs` — **TOBS** (Topology Optimisation of Binary Structures): each
     iteration's element flips are chosen by an integer linear program
     (`scipy.optimize.milp` / HiGHS) with a formal move limit and a linearised,
@@ -173,7 +189,24 @@ in progress.
     `min(kp, move_limit) > 0.5` so removal can track the target step-for-step,
     lower values give damped multi-iteration decay), `field_history_weight`
     (extra HCA-internal blend of the energy field with previous iterations,
-    LS-TaSC's multi-iteration weighted sum; `1.0` = off).
+    LS-TaSC's multi-iteration weighted sum; `1.0` = off), and the **MHCA
+    variable neighbourhood** (Afrousheh et al. 2019): `radius_start` — above
+    the filter radius it starts the CA neighbourhood wide (global search) and
+    decays it linearly to `filter_radius` over `radius_iters` iterations,
+    quantised to `radius_steps` cached filter matrices; `0` (default) = off,
+    classic fixed-radius HCA. The schedule position follows the absolute
+    iteration, so a `--resume` continues it instead of restarting wide.
+  * `saip` — **SAIP** (Sequential Approximate Integer Programming; Liang &
+    Cheng 2019, the discrete-variable mathematical-programming family): each
+    iteration's flips solve the linearised binary subproblem *analytically*
+    via the canonical relaxation — a per-element sign test on the reduced
+    gain `s_e − λ·vol_e` with the volume multiplier λ found by bisection
+    (value-density ranking, no MILP solver, microseconds at any mesh size),
+    capped by a move limit. Specifics under `saip:`: `flip_limit` (max
+    fraction of elements flipped per step) and `oscillation_damping`
+    (SCIP-inspired conservatism: an element whose state changed anywhere in
+    the last loop iteration ranks lower for immediately flipping back, so
+    add/remove ping-pong decays; `1.0` = off).
 
   Each optimiser's `<name>:` block also mirrors the shared knobs
   (`target_volume_fraction`, `evolution_rate`, `filter_radius`, `history_weight`,
@@ -199,6 +232,19 @@ in progress.
   bleeds into the neighbouring void elements), so the material the back-off
   recovers lands near the overstressed region instead of wherever the energy
   ranking happens to point.
+  **`backoff_mode: multipoint`** replaces the reactive gate entirely with the
+  LS-TaSC-style **multipoint controller** (`oropt/controller.py`): each
+  iteration records the measured `(volume fraction, worst utilisation ratio v)`
+  point, fits a local linear model `v(vf)` over the last `multipoint_window`
+  points, and steps the volume target straight toward the vf where the model
+  crosses `utilization_target` (< 1 leaves a safety margin) — the *predicted*
+  constraint boundary, at zero extra solves, so the design glides onto the
+  limit instead of discovering it by ping-ponging across. The step stays
+  within the gate's authority (one `evolution_rate` shrink, `backoff_cap`
+  growth, at least `backoff_floor` growth while violated), the fit history is
+  checkpointed for `--resume`, and whenever the fit is unusable (too few
+  points, no volume spread, wrong-sign slope, no limits configured) it falls
+  back to the classic gate verbatim.
 * **Manufacturing constraints** (`manufacturing:`, all OFF by default) — applied
   to the alive mask each iteration after the optimiser update, for parts that are
   powder-bed-fusion printed (e.g. AlSi10Mg), cast or extruded. Not purely
@@ -675,7 +721,7 @@ zoom/rotate viewer inlined into `report.html` (and also written as the standalon
   (σ_max = 308.305 MPa, disp = 1.229 mm, NORMAL TERMINATION).
 * A hand-deletion (−16 % volume, 16 352 freed nodes auto-pinned) produces a deck
   that OpenRadioss solves to NORMAL TERMINATION.
-* `pytest` (493 tests, all hermetic — no OpenRadioss needed) covers deck
+* `pytest` (764 tests, all hermetic — no OpenRadioss needed) covers deck
   round-trip/pinning, mesh geometry/connectivity/protection, the **/GRNOD
   group-id run-start guard**, BESO ranking/threshold,
   the **growth boxes** (candidate selection, run-start guards, growth through
@@ -684,12 +730,19 @@ zoom/rotate viewer inlined into `report.html` (and also written as the standalon
   guard integration run against a fabricated backend; the TetGen-backed
   end-to-end tests skip when the optional package is absent),
   the **level-set** (bisected volume targeting / protected / φ-thresholding /
-  connectivity), **TOBS** (ILP feasibility / move-limit / volume targeting /
-  protected) and **HCA** (setpoint bisection / move-limited density decay /
-  candidate growth / protected) updates and optimiser selection, the **multi-load** weighted-sum and
+  connectivity, both the advect and **reaction–diffusion** update rules), **TOBS**
+  (ILP feasibility / move-limit / volume targeting /
+  protected), **HCA** (setpoint bisection / move-limited density decay /
+  candidate growth / protected, plus the **MHCA** radius schedule) and **SAIP**
+  (canonical-relaxation flips / move limit / value-density ranking /
+  oscillation damping) updates and optimiser selection, the **multipoint
+  back-off controller** (boundary fit, gate fallback, clamping, checkpoint
+  round-trip), the **multi-load** weighted-sum and
   worst-case feasibility aggregation, the **manufacturing** constraints,
   the **Docker** command construction, **d3plot**/**surface-smoothing** post-processing,
-  the offline **SIMP** OC/bisection/projection prototype, status/checkpoint
+  the offline **SIMP** OC/bisection/projection, **TDSA**
+  (topological-derivative stress-form sensitivity) and **MFSE + Kriging**
+  (non-gradient surrogate) prototypes, status/checkpoint
   round-trips, VTK extraction, per-iteration snapshot/archive file-writing, and the
   run-folder fallback + source-deck isolation.
 

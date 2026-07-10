@@ -28,6 +28,19 @@ previous iterations). Each iteration:
   pinned at full density and forced alive, and disconnected islands are dropped
   via :meth:`Mesh.keep_connected` — exactly like BESO.
 
+**MHCA variable neighbourhood** (Afrousheh, Marzbanrad & Göhlich, "Topology
+optimization of energy absorbers using a modified hybrid cellular automata
+algorithm", *SMO* 60:1021-1034, 2019; benchmarked there against LS-TaSC): with
+``radius_start > filter_radius`` the cellular automaton's neighbourhood radius
+starts wide and decays linearly to ``filter_radius`` over ``radius_iters``
+iterations — global load-path search early, local refinement late. The
+schedule is quantised to ``radius_steps`` distinct radii; each distinct radius
+builds one filter matrix, cached for the rest of the run (a 575k-element
+KD-tree filter build is not free — keep the step count small). The loop feeds
+the absolute iteration via :meth:`set_iteration`, so a resumed run continues
+the schedule where it left off. Off by default (``radius_start = 0``): the
+fixed ``filter_radius`` neighbourhood, classic HCA, byte-identical behaviour.
+
 With the fixed 0.5 threshold an element can only be *removed in a single
 iteration* when ``min(Kp, move_limit) > 0.5`` (the defaults allow it); smaller
 values make densities decay over several iterations — removal then lags the
@@ -68,6 +81,10 @@ class Hca:
         self.vol = mesh.volumes
         self.V0 = float(self.vol.sum())
         self._W = mesh.filter_matrix(cfg.filter_radius)
+        # MHCA neighbourhood schedule: one cached filter matrix per distinct
+        # scheduled radius (the base filter_radius matrix above is pre-seeded).
+        self._W_cache: dict[float, object] = {float(cfg.filter_radius): self._W}
+        self._iteration = 0
 
         # Per-element virtual density; initialised lazily from the first alive
         # mask seen (so it matches the current / resumed geometry).
@@ -86,9 +103,40 @@ class Hca:
         return map_sensitivity(results, elem_ids, self.cfg.sensitivity,
                                self.cfg.blend_weight)
 
+    # ---- MHCA variable neighbourhood ---------------------------------------
+    def set_iteration(self, iteration: int) -> None:
+        """Absolute loop iteration, fed by the loop each iteration so the MHCA
+        radius schedule survives a ``--resume`` (it would otherwise restart
+        wide). A no-op for the classic fixed-radius HCA."""
+        self._iteration = int(iteration)
+
+    def _scheduled_radius(self) -> float:
+        """The CA neighbourhood radius this iteration: linear decay from
+        ``radius_start`` to ``filter_radius`` over ``radius_iters`` iterations,
+        quantised to ``radius_steps`` distinct values (each distinct radius
+        costs one filter-matrix build, cached). ``radius_start`` at 0 — or not
+        above ``filter_radius``, a schedule that could only *grow* the radius —
+        disables the schedule: classic fixed-radius HCA."""
+        c = self.cfg
+        if c.radius_start <= 0.0 or c.radius_start <= c.filter_radius:
+            return float(c.filter_radius)
+        frac = min(1.0, self._iteration / max(1, int(c.radius_iters)))
+        r = c.radius_start + (c.filter_radius - c.radius_start) * frac
+        levels = np.linspace(c.radius_start, c.filter_radius,
+                             max(2, int(c.radius_steps)))
+        return float(levels[np.argmin(np.abs(levels - r))])
+
+    def _W_at(self, radius: float):
+        W = self._W_cache.get(radius)
+        if W is None:
+            W = self.mesh.filter_matrix(radius)
+            self._W_cache[radius] = W
+        return W
+
     def filter_history(self, raw: np.ndarray,
                        sens_prev: np.ndarray | None) -> np.ndarray:
-        return blend_history(self._W, raw, sens_prev, self.cfg.history_weight)
+        return blend_history(self._W_at(self._scheduled_radius()), raw,
+                             sens_prev, self.cfg.history_weight)
 
     # ---- target volume & constraint gate (shared with Beso) ---------------
     def next_target_vf(self, current_vf: float, feasible: bool,
