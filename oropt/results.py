@@ -27,6 +27,49 @@ F_VONMISES = "3DELEM_Von_Mises"
 P_NODE_ID = "NODE_ID"
 P_DISP = "Displacement"
 
+#: Candidate cell-array names for the per-element stress TENSOR that
+#: ``/ANIM/BRICK/TENS/STRESS`` adds to the animation. UNVERIFIED: unlike the
+#: names above (confirmed against this model), the exact name anim_to_vtk emits
+#: for the tensor has not yet been observed on a real conversion — these are the
+#: plausible spellings, tried in order, and :func:`_find_stress_array` falls back
+#: to *any* 6-component design cell array whose name contains "tens"/"stress"
+#: (case-insensitive). A one-real-solve spike must pin the actual name (then put
+#: it first here) and the component ORDER: Radioss writes the tensor in its own
+#: order and legacy-VTK tensors conventionally use a different (full 3x3 or
+#: Voigt) layout, so which column is which shear is unconfirmed. The TDSA use
+#: below is insensitive to *shear permutation* (its invariants treat the three
+#: shears symmetrically) but does require columns 0-2 = the three NORMAL
+#: components and 3-5 = the three shears — that split is what the spike must
+#: confirm.
+F_STRESS_CANDIDATES: tuple[str, ...] = (
+    "3DELEM_Stress_tensor",
+    "3DELEM_Stress",
+    "Stress_tensor",
+    "Stress",
+    "TENS_STRESS",
+)
+
+
+def _find_stress_array(grid) -> Optional[str]:
+    """Name of the 6-component per-cell stress-tensor array, or ``None``.
+
+    Exact candidate names first, then a case-insensitive scan for any
+    6-component cell array mentioning "tens" or "stress" (the scalar
+    ``3DELEM_Von_Mises`` never matches: it has one component).
+    """
+    def _is6(name: str) -> bool:
+        a = np.asarray(grid.cell_data[name])
+        return a.ndim == 2 and a.shape[1] == 6
+
+    for name in F_STRESS_CANDIDATES:
+        if name in grid.cell_data and _is6(name):
+            return name
+    for name in grid.cell_data.keys():
+        low = name.lower()
+        if ("tens" in low or "stress" in low) and _is6(name):
+            return name
+    return None
+
 # Sentinel for extract()'s disp_node_id default, so an explicit None (a case that
 # tracks no displacement node) is distinct from "argument omitted".
 _UNSET = object()
@@ -40,6 +83,15 @@ class Results:
     [mm] (``nan`` for a node absent from the animation). ``disp`` / ``disp_node_id``
     are the first requested node's convenience scalars (``nan`` / ``None`` when no
     node is tracked), kept so single-node callers stay unchanged.
+
+    ``stress`` is the per-element stress TENSOR, ``(n, 6)`` aligned with
+    ``element_ids`` — present only when the engine deck requested
+    ``/ANIM/BRICK/TENS/STRESS`` (see ``deck.prepare_engine``), else ``None``.
+    Component-order caveat: columns 0-2 are taken to be the normal components
+    and 3-5 the shears, but the exact ordering anim_to_vtk emits is UNVERIFIED
+    against a real conversion (see ``F_STRESS_CANDIDATES``); the TDSA ranking
+    consuming it is invariant to shear permutation, so only the normal/shear
+    split matters until the spike confirms the layout.
     """
     element_ids: np.ndarray      # int64, design-part solid elements still present
     energy: np.ndarray           # float, specific (internal) energy per element  -> BESO sensitivity
@@ -48,6 +100,7 @@ class Results:
     disp: float                  # |displacement| at the first constrained node [mm]
     disp_node_id: Optional[int]
     disps: dict = field(default_factory=dict)   # {node_id: |displacement| [mm]} for every constrained node
+    stress: Optional[np.ndarray] = None  # (n,6) stress tensor per element, or None if not in the anim
 
     def as_dict(self) -> dict:
         return {"sigma_max": self.sigma_max, "disp": self.disp,
@@ -147,6 +200,9 @@ def parse_vtk(vtk_path: Path, design_part_id: int,
     eid = cell_arr(F_ELEMENT_ID).astype(np.int64)[keep]
     energy = cell_arr(F_ENERGY).astype(float)[keep]
     vm = cell_arr(F_VONMISES).astype(float)[keep]
+    stress_name = _find_stress_array(grid)              # optional tensor output
+    stress = (np.asarray(grid.cell_data[stress_name]).astype(float)[keep]
+              if stress_name is not None else None)
     vm_rated = vm                                       # von-Mises that counts toward sigma_max
     if exclude_element_ids is not None and len(exclude_element_ids):
         excl = np.isin(eid, np.asarray(exclude_element_ids, dtype=np.int64))
@@ -168,7 +224,8 @@ def parse_vtk(vtk_path: Path, design_part_id: int,
     first = node_list[0] if node_list else None
     disp = disps.get(first, float("nan")) if first is not None else float("nan")
     return Results(element_ids=eid, energy=energy, vonmises=vm,
-                   sigma_max=sigma_max, disp=disp, disp_node_id=first, disps=disps)
+                   sigma_max=sigma_max, disp=disp, disp_node_id=first,
+                   disps=disps, stress=stress)
 
 
 def extract(cfg: Config, run_dir: str | Path, keep_vtk: bool = False,

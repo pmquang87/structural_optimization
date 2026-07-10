@@ -11,6 +11,10 @@ __pycache__/
 # oropt run artefacts (decks, restarts, animations, status, checkpoints)
 runs/
 
+# demo-backend benchmark / sweep harness output (scripts/benchmark_optimizers.py, sweep.py)
+benchmark_out/
+sweep_out/
+
 # OpenRadioss outputs that may land next to a deck
 *.rst
 *A0[0-9][0-9]

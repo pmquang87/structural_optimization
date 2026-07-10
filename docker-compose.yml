@@ -1,0 +1,35 @@
+# oropt GUI — `docker compose up` then open http://localhost:8501
+# Full guide (build args, the three usage modes, solver-image caveats):
+# docs/docker_image.md
+services:
+  oropt:
+    build: .
+    image: oropt:latest
+    ports:
+      - "8501:8501"
+    volumes:
+      # User decks, configs and run output. Point the GUI/config at paths under
+      # /cases (e.g. model.case_dir: /cases/mypart, work_dir: /cases/runs/r1).
+      - ./cases:/cases
+
+      # ------------------------------------------------------------------
+      # OPTIONAL — docker-out-of-docker for the dockerised MUMPS solver.
+      #
+      # Only needed when the *containerised* GUI must launch the dockerised
+      # OpenRadioss-MUMPS solver (config `docker.enabled: true`). oropt then
+      # shells out to the `docker` CLI, so the container needs (1) the CLI in
+      # the image — rebuild with `--build-arg INSTALL_DOCKER_CLI=1` — and
+      # (2) the host daemon's socket mounted below. NOT needed for the
+      # zero-solver demo backend or post-processing.
+      #
+      # Tradeoffs (see docs/docker_image.md before enabling):
+      #  * Solver containers are siblings launched on the HOST daemon, so the
+      #    `-v <run_dir>:/data` bind mount oropt issues is resolved against
+      #    HOST paths. The cases mount above must therefore be path-identical
+      #    on both sides — replace `./cases:/cases` with an absolute
+      #    same-path mount, e.g. `/abs/path/to/cases:/abs/path/to/cases`.
+      #  * Socket access is effectively root on the host. Grant it only on a
+      #    machine you trust the GUI's users with (add `group_add: [<docker
+      #    gid>]` or run the service as root for socket permissions).
+      # ------------------------------------------------------------------
+      # - /var/run/docker.sock:/var/run/docker.sock

@@ -1,0 +1,26 @@
+#- oropt integration smoke engine: one-ramp nonlinear implicit static, MUMPS
+#- direct solver (/IMPL/SOLVER/2), animation carries the fields oropt extracts
+#- (/ANIM/ELEM/ENER + VONM + /ANIM/VECT/DISP). Card set mirrors the project's
+#- validated fast-mode engine writer (oropt/fastmode.py) plus /IMPL/NONLIN.
+/RUN/smoke/1
+                 1.0
+#
+/TFILE
+0.0001
+#
+/PRINT/-1
+/MON/ON
+#
+/ANIM/DT
+0. 1.0
+/ANIM/VECT/DISP
+/ANIM/ELEM/VONM
+/ANIM/ELEM/ENER
+#
+/IMPL/PRINT/NONL/-1
+/IMPL/NONLIN/2
+         5         0      0.05
+/IMPL/SOLVER/2
+  0 0 0 0
+/IMPL/DTINI
+0.5

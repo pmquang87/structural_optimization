@@ -240,6 +240,138 @@ def test_oscillation_damping_prefers_fresh_candidates():
     assert a2u[8] and not a2u[9]
 
 
+# ---- SCIP conservative subproblem (moving asymptotes, opt-in) ------------------
+def _saip_scip(mesh, protected, target_vf=0.5, flip_limit=0.1,
+               oscillation_damping=1.0, **scip_knobs):
+    """A Saip whose cfg carries the (lead-owned, getattr-read) SCIP knobs, set
+    as plain attributes exactly as the future SaipOpts fields will appear."""
+    cfg = SaipCfg(filter_radius=0.0, target_volume_fraction=target_vf,
+                  evolution_rate=0.2, flip_limit=flip_limit,
+                  oscillation_damping=oscillation_damping)
+    for name, value in scip_knobs.items():
+        setattr(cfg, name, value)
+    return Saip(mesh, cfg, protected)
+
+
+def _run_bouncing(saip, n, iters, seed=3):
+    """Drive a fixed pseudo-random scenario with a bouncing volume target;
+    returns the list of masks after each update (byte-identity fixture)."""
+    rng = np.random.default_rng(seed)
+    alive = np.ones(n, bool)
+    masks = []
+    for i in range(iters):
+        sens = rng.random(n) + 0.01
+        target = 0.5 if i % 2 == 0 else 1.0
+        alive = saip.update(alive, sens, target_vf=target)
+        masks.append(alive.copy())
+    return masks
+
+
+def test_scip_default_off_is_byte_identical():
+    """With scip_asymptotes absent or false the update path is unchanged: a cfg
+    predating the knobs and a cfg with the flag explicitly off both reproduce
+    the legacy masks exactly, iteration by iteration."""
+    n = 24
+    mesh = _fan_mesh(n)
+    protected = np.zeros(n, bool); protected[0] = True
+
+    legacy = _saip(mesh, protected, flip_limit=0.25)              # no scip attrs at all
+    off = _saip_scip(mesh, protected, flip_limit=0.25,
+                     scip_asymptotes=False,
+                     scip_gamma_tight=0.5, scip_gamma_relax=1.5)  # knobs present, flag off
+    for m_leg, m_off in zip(_run_bouncing(legacy, n, 8), _run_bouncing(off, n, 8)):
+        assert (m_leg == m_off).all()
+    assert off._scip_t is None                                    # state never allocated
+
+
+def _bounce_flip_counts(saip, n, sens, iters):
+    """Alternate the volume target so the plain linear subproblem ping-pongs;
+    return per-element flip counts over *iters* updates."""
+    alive = np.ones(n, bool)
+    counts = np.zeros(n, int)
+    for i in range(iters):
+        target = 0.5 if i % 2 == 0 else 1.0
+        new = saip.update(alive, sens, target_vf=target)
+        counts += (new != alive)
+        alive = new
+    return counts
+
+
+def test_scip_asymptotes_decay_ping_pong():
+    """Near-flat sensitivities + K=1 + a bouncing target: the linear subproblem
+    hammers the same lowest-sensitivity element in and out every iteration.
+    With asymptotes on, its tightened gain hands the churn to fresh elements —
+    strictly fewer flips; with no relaxation it stops oscillating entirely."""
+    n = 10
+    mesh = _fan_mesh(n)
+    protected = np.zeros(n, bool); protected[0] = True
+    sens = np.linspace(10.0, 9.1, n)             # e9 lowest; near-flat so t bites
+    iters = 12
+
+    plain = _bounce_flip_counts(_saip(mesh, protected, flip_limit=0.1),
+                                n, sens, iters)
+    assert plain[n - 1] == iters                 # legacy: flips every iteration
+
+    scip = _bounce_flip_counts(
+        _saip_scip(mesh, protected, flip_limit=0.1, scip_asymptotes=True),
+        n, sens, iters)
+    assert scip[n - 1] < plain[n - 1]            # ping-pong decays (default knobs)
+
+    # gamma_relax = 1.0: conservatism never resets -> the oscillation of the
+    # hammered element stops for good after the first detected reversal
+    saip = _saip_scip(mesh, protected, flip_limit=0.1, scip_asymptotes=True,
+                      scip_gamma_relax=1.0)
+    alive = np.ones(n, bool)
+    flip_iters = []
+    for i in range(iters):
+        new = saip.update(alive, sens, target_vf=0.5 if i % 2 == 0 else 1.0)
+        if new[n - 1] != alive[n - 1]:
+            flip_iters.append(i)
+        alive = new
+    assert flip_iters == [0, 1]                  # removed once, re-added once, then held
+
+
+def test_scip_conservatism_bounds_and_protected():
+    """t_e never leaves [t_min, 1] under aggressive gammas and sustained
+    oscillation pressure; protected elements never flip regardless."""
+    n = 12
+    mesh = _fan_mesh(n)
+    protected = np.zeros(n, bool); protected[0] = protected[3] = True
+    sens = np.linspace(1.0, 0.9, n)
+    sens[[0, 3]] = 0.0                           # protected rank last -> max pressure
+    t_min = 0.2
+    saip = _saip_scip(mesh, protected, flip_limit=0.2, scip_asymptotes=True,
+                      scip_gamma_tight=0.5, scip_gamma_relax=1.3,
+                      scip_t_min=t_min)
+    alive = np.ones(n, bool)
+    for i in range(20):
+        alive = saip.update(alive, sens, target_vf=0.4 if i % 2 == 0 else 1.0)
+        assert alive[0] and alive[3]             # protected always alive
+        assert (saip._scip_t >= t_min - 1e-12).all()
+        assert (saip._scip_t <= 1.0 + 1e-12).all()
+
+
+def test_scip_monotone_moves_match_plain_mode():
+    """A clean monotonic removal sequence (steadily shrinking target, no
+    reversals) never tightens an asymptote, so the mode changes nothing: the
+    masks are identical on and off — the conservatism only bites on
+    oscillation."""
+    n = 20
+    mesh = _fan_mesh(n)
+    protected = np.zeros(n, bool); protected[0] = True
+    sens = np.linspace(2.0, 0.1, n)
+
+    plain = _saip(mesh, protected, flip_limit=0.2)
+    scip = _saip_scip(mesh, protected, flip_limit=0.2, scip_asymptotes=True)
+    a_plain = np.ones(n, bool)
+    a_scip = np.ones(n, bool)
+    for target in (0.95, 0.85, 0.75, 0.65, 0.55, 0.5):
+        a_plain = plain.update(a_plain, sens, target_vf=target)
+        a_scip = scip.update(a_scip, sens, target_vf=target)
+        assert (a_scip == a_plain).all()
+    assert (scip._scip_t == 1.0).all()           # asymptotes stayed fully relaxed
+
+
 # ---- all-zero sensitivity: the no-flip safety net ------------------------------
 def test_zero_sensitivity_keeps_design_unchanged():
     n = 12

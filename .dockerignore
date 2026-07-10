@@ -1,0 +1,54 @@
+# Keep the build context to what the Dockerfile actually COPYs
+# (pyproject.toml + oropt/). Everything else is noise or bulk.
+
+# VCS / CI / tool caches
+.git
+.github
+.gitignore
+.pre-commit-config.yaml
+**/.hypothesis
+**/.ruff_cache
+**/.pytest_cache
+**/.mypy_cache
+
+# Virtualenvs
+.venv
+venv
+
+# Python build/runtime cruft
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.egg-info
+build
+dist
+
+# Not needed in the image
+tests
+docs
+cases
+runs
+*.pdf
+
+# Large example/run artifacts (decks, results, animations) wherever they live
+**/*.rad
+**/*.out
+**/*.rst
+**/*.d3plot
+**/*.vtu
+**/*.vtp
+**/*.stl
+**/*.gif
+**/T01*
+**/A0[0-9][0-9]*
+
+# ...but never strip anything shipped inside the package itself (e.g. a
+# bundled demo/toy deck): re-include oropt/, then re-drop only its bytecode.
+!oropt/**
+oropt/**/__pycache__
+oropt/**/*.pyc
+
+# Docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore

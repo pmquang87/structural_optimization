@@ -101,7 +101,8 @@ class Hca:
     def raw_sensitivity(self, results: Results, elem_ids: np.ndarray,
                         alive_mask: np.ndarray) -> np.ndarray:
         return map_sensitivity(results, elem_ids, self.cfg.sensitivity,
-                               self.cfg.blend_weight)
+                               self.cfg.blend_weight,
+                               tdsa_nu=getattr(self.cfg, "tdsa_nu", 0.33))
 
     # ---- MHCA variable neighbourhood ---------------------------------------
     def set_iteration(self, iteration: int) -> None:

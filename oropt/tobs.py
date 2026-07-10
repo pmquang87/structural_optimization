@@ -68,7 +68,8 @@ class Tobs:
     def raw_sensitivity(self, results: Results, elem_ids: np.ndarray,
                         alive_mask: np.ndarray) -> np.ndarray:
         return map_sensitivity(results, elem_ids, self.cfg.sensitivity,
-                               self.cfg.blend_weight)
+                               self.cfg.blend_weight,
+                               tdsa_nu=getattr(self.cfg, "tdsa_nu", 0.33))
 
     def filter_history(self, raw: np.ndarray,
                        sens_prev: np.ndarray | None) -> np.ndarray:

@@ -98,6 +98,48 @@ def test_prepare_engine_anim_dt(mini_engine_path, tmp_path):
     assert "/IMPL/NONLIN/1" in lines                # implicit controls untouched
 
 
+def test_prepare_engine_default_writes_no_stress_tensor(mini_engine_path, tmp_path):
+    """anim_stress_tensor defaults OFF: output byte-identical to before the knob."""
+    out = tmp_path / "eng_0001.rad"
+    prepare_engine(mini_engine_path, out)           # no options at all
+    assert out.read_text() == mini_engine_path.read_text()
+    assert "/ANIM/BRICK/TENS/STRESS" not in out.read_text()
+
+
+def test_prepare_engine_injects_stress_tensor_once(mini_engine_path, tmp_path):
+    out = tmp_path / "eng_0001.rad"
+    prepare_engine(mini_engine_path, out, anim_dt=1.0, anim_stress_tensor=True)
+    lines = out.read_text().splitlines()
+    assert lines.count("/ANIM/BRICK/TENS/STRESS") == 1
+    # placed with the other /ANIM cards: right after the /ANIM/DT value line,
+    # which itself is intact (never split from its header)
+    i = lines.index("/ANIM/DT")
+    assert lines[i + 1].split() == ["0.", "1.0"]
+    assert lines[i + 2] == "/ANIM/BRICK/TENS/STRESS"
+    assert "/IMPL/NONLIN/1" in lines                # implicit controls untouched
+
+
+def test_prepare_engine_stress_tensor_idempotent(mini_engine_path, tmp_path):
+    """Re-preparing a deck that already requests the tensor adds nothing."""
+    once = tmp_path / "eng1_0001.rad"
+    prepare_engine(mini_engine_path, once, anim_stress_tensor=True)
+    twice = tmp_path / "eng2_0001.rad"
+    prepare_engine(once, twice, anim_stress_tensor=True)
+    assert twice.read_text() == once.read_text()
+    assert twice.read_text().splitlines().count("/ANIM/BRICK/TENS/STRESS") == 1
+
+
+def test_prepare_engine_stress_tensor_no_anim_cards(tmp_path):
+    """A deck with no /ANIM card at all still gets the tensor request (appended)."""
+    src = tmp_path / "bare_0001.rad"
+    src.write_text("/RUN/x/1\n1\n/IMPL/NONLIN/1\n", encoding="utf-8")
+    out = tmp_path / "bare_out_0001.rad"
+    prepare_engine(src, out, anim_stress_tensor=True)
+    lines = out.read_text().splitlines()
+    assert lines.count("/ANIM/BRICK/TENS/STRESS") == 1
+    assert lines[-1] == "/ANIM/BRICK/TENS/STRESS"
+
+
 # ---- /BOX/RECTA parsing (growth-box deck references) ------------------------
 # Two /BOX/RECTA cards: 7000001 has a leading skew line + reversed corners (so the
 # parser must skip the skew line and normalise min<=max); 7000002 carries a

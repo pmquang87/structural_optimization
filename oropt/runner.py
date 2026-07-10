@@ -75,8 +75,12 @@ def backend_problems(cfg: Config) -> list[str]:
 
     Docker backend -> the ``docker`` CLI must resolve; native backend -> the
     OpenRadioss starter & engine (and ``mpiexec`` when ``run.use_mpi``) must exist.
+    Demo backend (``demo.enabled``) -> nothing: the synthetic physics needs no
+    solver at all, so both callers stay quiet.
     """
     problems: list[str] = []
+    if getattr(cfg, "demo", None) is not None and cfg.demo.enabled:
+        return problems
     if cfg.docker.enabled:
         exe = cfg.docker.docker_exe
         if shutil.which(exe) is None and not Path(exe).exists():

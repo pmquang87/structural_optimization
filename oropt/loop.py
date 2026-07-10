@@ -786,7 +786,13 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
         build_fast_case(deck, alive, starter, case.engine, engine, fast_tie,
                         anim_dt=anim_dt)
     else:
-        prepare_engine(case.engine, engine, anim_dt=anim_dt)
+        # sensitivity: tdsa needs the per-element stress tensor in the anim —
+        # inject /ANIM/BRICK/TENS/STRESS so extraction can feed the topological-
+        # derivative ranking (absent tensor -> map_sensitivity falls back to
+        # energy with a warning). Other modes keep the engine deck byte-identical.
+        want_tensor = getattr(cfg.active_opts(), "sensitivity", "energy") == "tdsa"
+        prepare_engine(case.engine, engine, anim_dt=anim_dt,
+                       anim_stress_tensor=want_tensor)
     res = (reuse_iter0_solve(reuse_dir, solve_dir, case.stem, starter, log)
            if reuse_dir is not None else None)
     if res is None:

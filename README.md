@@ -114,6 +114,16 @@ oneAPI MPI — the engine is launched as `mpiexec -np 1 engine_win64_impi.exe`
 highlights*) to run the solver from the Dockerised MUMPS-implicit build instead —
 just Docker Desktop and the loaded image, no Intel oneAPI/MPI, AMD or Intel.
 
+**No solver at all?** Set `demo.enabled: true` to drive the entire pipeline —
+loop, monitor, report, smoothing, GIF — with the **demo backend**: deterministic
+*synthetic* physics (`oropt/demo.py`), no OpenRadioss, ~1 s/iteration. It ships
+with a bundled `examples/cantilever` case (see [`QUICKSTART.md`](QUICKSTART.md)
+§0) so oropt can be evaluated, demonstrated and benchmarked out of the box; the
+numbers are synthetic (they exercise the optimisers, not the part). All five
+optimisers can be run head-to-head on it with `scripts/benchmark_optimizers.py`
+(see [`docs/benchmarks.md`](docs/benchmarks.md)). Containerised GUI:
+[`docs/docker_image.md`](docs/docker_image.md).
+
 ## Usage
 
 Headless:
