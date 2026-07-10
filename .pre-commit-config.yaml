@@ -1,0 +1,16 @@
+# Pre-commit hooks for oropt. Mirrors the CI lint step so drift is caught
+# before it reaches a PR. Run `pre-commit install` once, then hooks fire on
+# every `git commit`; `pre-commit run --all-files` lints the whole tree.
+#
+# Only `ruff check` is wired up: the codebase does not use `ruff format`
+# (no formatter config in pyproject), so we lint but do not enforce a
+# formatter. The rev is pinned to a recent stable ruff-pre-commit tag and
+# ruff reads its config (target py310, the E4/E7/E9/F/W select set) from
+# pyproject.toml, so this stays in lockstep with the CI ruff invocation.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.8
+    hooks:
+      # The `ruff` hook id runs `ruff check`; no extra args needed. Config
+      # (target-version, select/ignore) is read from pyproject.toml.
+      - id: ruff

@@ -50,6 +50,7 @@ class Status:
     feasible: bool = True
     elements_alive: int = 0
     elements_total: int = 0
+    design_volume: float = 0.0        # total design-space volume V0 (sum of design-element volumes, deck units); lets the report turn volume_fraction into absolute volume/mass. 0 = unknown (pre-upgrade status)
     stress_excluded_elems: int = 0    # design elements whose von-Mises is ignored (stress-exclusion region)
     elements_candidate: int = 0       # growth-box candidate elements (start void, growable)
     elements_grown: int = 0           # candidates currently alive -- material grown into the boxes
@@ -250,7 +251,8 @@ def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray
                     sens_prev: Optional[np.ndarray] = None,
                     phi: Optional[np.ndarray] = None,
                     x: Optional[np.ndarray] = None,
-                    ctrl: Optional[np.ndarray] = None) -> None:
+                    ctrl: Optional[np.ndarray] = None,
+                    weights: Optional[np.ndarray] = None) -> None:
     """Persist the state a ``--resume`` needs to continue *without* perturbing the
     design: the alive mask, the history-blended sensitivity, and each field-carrying
     optimiser's *own* continuous field.
@@ -265,7 +267,11 @@ def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray
 
     *ctrl* is the multipoint back-off controller's recorded (vf, violation)
     history, an (n, 2) array (see :mod:`oropt.controller`); without it a resumed
-    multipoint run re-learns the constraint boundary from gate-fallback steps."""
+    multipoint run re-learns the constraint boundary from gate-fallback steps.
+
+    *weights* is the adaptive per-load-case weight vector
+    (:class:`oropt.controller.WeightController`); without it a resumed
+    adaptive-weight run restarts the split from the configured weights."""
     # Atomic like status.json: the checkpoint is the run's ONLY resume state and
     # the GUI polls it every rerun, so an in-place rewrite risks (a) a reader
     # catching a half-written zip and (b) a crash mid-write destroying the
@@ -277,7 +283,8 @@ def save_checkpoint(work_dir: str | Path, iteration: int, alive_mask: np.ndarray
              sens_prev=(sens_prev if sens_prev is not None else np.array([])),
              phi=(phi if phi is not None else np.array([])),
              x=(x if x is not None else np.array([])),
-             ctrl=(ctrl if ctrl is not None else np.empty((0, 2))))
+             ctrl=(ctrl if ctrl is not None else np.empty((0, 2))),
+             weights=(weights if weights is not None else np.array([])))
     os.replace(tmp, final)
 
 
@@ -311,8 +318,10 @@ def load_checkpoint(work_dir: str | Path) -> Optional[dict]:
     phi = d["phi"] if "phi" in d.files else np.array([])   # pre-phi checkpoints
     x = d["x"] if "x" in d.files else np.array([])         # pre-x (no HCA field)
     ctrl = d["ctrl"] if "ctrl" in d.files else np.empty((0, 2))  # pre-multipoint
+    weights = d["weights"] if "weights" in d.files else np.array([])  # pre-adaptive-weights
     return {"iteration": int(d["iteration"]), "alive_mask": d["alive_mask"],
             "sens_prev": (sp if sp.size else None),
             "phi": (phi if phi.size else None),
             "x": (x if x.size else None),
-            "ctrl": (ctrl if ctrl.size else None)}
+            "ctrl": (ctrl if ctrl.size else None),
+            "weights": (weights if weights.size else None)}

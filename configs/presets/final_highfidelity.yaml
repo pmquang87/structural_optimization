@@ -1,0 +1,78 @@
+# =============================================================================
+# PRESET: final_highfidelity — conservative production run
+# =============================================================================
+# Purpose: the careful, archive-everything run for a deliverable design.
+# Conservative removal rate, full iteration budget, feasibility back-off enabled
+# so the design glides into the stress/displacement limits instead of
+# ping-ponging, and per-iteration + restart archiving for full replayability.
+#
+# Expect ~13 min/solve x 50-150 iterations (11-33 h). Per-iteration checkpoints
+# make it resumable (`python -m oropt.run --config ... --resume`). Archiving is
+# disk-heavy — see the README "Disk cost" note.
+# =============================================================================
+
+or_paths:
+  root: C:\OpenRadioss                    # native install root; Docker users set docker.enabled below
+  starter: exec/starter_win64.exe
+  engine: exec/engine_win64_impi.exe
+  anim_to_vtk: exec/anim_to_vtk_win64.exe
+  th_to_csv: exec/th_to_csv_win64.exe
+  cfg_path: hm_cfg_files
+  h3d_path: extlib\h3d\lib\win64
+  intel_mpi_root: C:\Program Files (x86)\Intel\oneAPI\mpi\latest
+
+run:
+  np: 1                    # native backend MUST be 1
+  nt: 12
+  use_mpi: true
+  starter_timeout_s: 60000
+  engine_timeout_s: 360000
+  # Non-convergence watchdog: kill an over-carved (load-path-severed) solve in
+  # minutes and treat it as infeasible instead of grinding to the hard timeout.
+  diverge_max_cycles: 12
+  diverge_fail_after: 3
+  kmp_stacksize: 400m
+  anim_dt: 1.0
+
+model:
+  case_dir: ./elevator_case
+  design_part_id: 60000000
+  design_node_min: 60000000
+  bc_group_id: 60000000
+  freeze_group_ids:
+  - 99999999
+  freeze_node_ids: []
+
+optimizer: beso
+
+beso:
+  evolution_rate: 0.01           # CONSERVATIVE: small steps, smoother convergence
+  max_add_ratio: 0.01
+  filter_radius: 1.25
+  history_weight: 0.5
+  target_volume_fraction: 0.6
+  sensitivity: energy
+  blend_weight: 0.5
+  max_iter: 150                  # full budget
+  convergence_tol: 0.001
+  convergence_window: 5
+  protect_layers: 2
+  contact_protect_dist: 0.0
+  # Feasibility back-off controller: react to the stress/displacement LEVEL, not
+  # a binary gate, so the design eases into the limits (README "back-off").
+  backoff_gain: 15.0             # size so gain*(typical overshoot) ~ 1 (10-20 typical)
+  backoff_cap: 4.0
+  damping_threshold: 0.95        # slow removal once utilisation exceeds 95% of a limit
+  # Full archiving for replay/debug (disk-heavy: ~345 MB/iter restart, see README).
+  archive_iterations: true
+  archive_restart: true
+
+load_cases:
+  - name: pull
+    stem: implicit_elevator-linkage
+    weight: 1.0
+    sigma_allow: 452.0
+    disp_constraints:
+      - {node_id: 10021367, d_allow: 5.0}
+
+work_dir: ""

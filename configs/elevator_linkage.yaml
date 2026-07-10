@@ -1,50 +1,100 @@
+# =============================================================================
+# oropt example config — AlSi10Mg elevator-linkage (the REFERENCE example)
+# =============================================================================
+# This is the worked example for oropt's topology optimisation of an OpenRadioss
+# TET4 solid part: a 6 kN pull through rigid cylinders (implicit nonlinear
+# quasi-static), minimising compliance while OpenRadioss reports peak von-Mises
+# stress and a node's displacement within limits.
+#
+# It is written in the CURRENT schema:
+#   * feasibility limits live PER LOAD CASE under `load_cases:` (no top-level
+#     `constraints:` block, no `model.stem` / `model.disp_node_id`);
+#   * paths are placeholders — point them at YOUR own deck folder before running.
+#
+# The pre-`load_cases` format is kept as `configs/legacy_single_case.yaml`.
+# Ready-to-tweak starting points live under `configs/presets/`.
+# =============================================================================
+
 or_paths:
+  # Native OpenRadioss install root (Windows). Docker users: ignore this whole
+  # section and set `docker.enabled: true` below instead (no Intel oneAPI/MPI).
   root: C:\OpenRadioss
   starter: exec/starter_win64.exe
-  engine: exec/engine_win64_impi.exe
+  engine: exec/engine_win64_impi.exe     # MPI engine, launched as `mpiexec -np 1`
   anim_to_vtk: exec/anim_to_vtk_win64.exe
   th_to_csv: exec/th_to_csv_win64.exe
   cfg_path: hm_cfg_files
   h3d_path: extlib\h3d\lib\win64
   intel_mpi_root: C:\Program Files (x86)\Intel\oneAPI\mpi\latest
+
 run:
-  np: 1
-  nt: 12
-  use_mpi: true
+  np: 1                    # native backend MUST be 1 (SPMD implicit + solid contact segfaults)
+  nt: 12                   # OpenMP threads per solve
+  use_mpi: true            # launch the engine via mpiexec (the bare engine can't load its MPI DLLs)
   starter_timeout_s: 60000
-  engine_timeout_s: 360000
+  engine_timeout_s: 360000 # hard kill per engine solve (seconds)
   kmp_stacksize: 400m
-  anim_dt: 1.0
+  anim_dt: 1.0             # animation output interval; >= termination time -> only the final state
+
+# Optionally solve via the Dockerised OpenRadioss MUMPS build (no Intel
+# oneAPI/MKL/MPI; AMD or Intel). Set enabled: true and the `or_paths` +
+# Intel-MPI `run` settings above are ignored. The container supports real MPI,
+# so `np` may be > 1 here (keep np * nt <= cores).
+docker:
+  enabled: false
+  image: openradioss-mumps:20260520
+  np: 4
+  nt: 1
+
 model:
-  case_dir: E:\foxcore_data\_MITEB\openradioss\implicit_elevator-linkage\implicit_6kN_elevator-linkage_pull__BC-A\opti_test
-  stem: implicit_elevator-linkage
-  design_part_id: 60000000
-  design_node_min: 60000000
-  disp_node_id: 10021367
-  bc_group_id: 60000000
+  # Point this at YOUR deck folder holding <stem>_0000.rad / _0001.rad for each
+  # load case below. A relative path resolves against your working directory.
+  case_dir: ./elevator_case
+  design_part_id: 60000000     # the /TETRA4/<id> block to optimise
+  design_node_min: 60000000    # design-part node ids are >= this (rigid parts are 10xxxxxx)
+  bc_group_id: 60000000        # /GRNOD/NODE/<id> holding the BC/symmetry nodes to protect
+  # Keep-out / non-design regions: any design element touching one of these nodes
+  # is frozen (never deleted). Give /GRNOD/NODE/<id> group ids present in the deck.
   freeze_group_ids:
   - 99999999
   freeze_node_ids: []
-constraints:
-  sigma_allow: 452.0
-  d_allow: 5.0
+
+# Which discrete optimiser drives the loop. beso (default) | levelset | tobs |
+# hca | saip — all share the /ANIM/ELEM/ENER energy sensitivity and the
+# element-deletion deck path. See docs/choosing_an_optimizer.md.
+optimizer: beso
+
 beso:
-  evolution_rate: 0.02
-  max_add_ratio: 0.01
-  filter_radius: 1.25
-  history_weight: 0.5
-  target_volume_fraction: 0.7
-  sensitivity: energy
-  blend_weight: 0.5
-  max_iter: 15
-  convergence_tol: 0.001
+  evolution_rate: 0.02           # ER: target volume fraction removed per iteration
+  max_add_ratio: 0.01            # cap on re-added (resurrected) volume per iteration
+  filter_radius: 1.25            # spatial sensitivity-filter radius [mm] (~2-3x element size)
+  history_weight: 0.5            # blend of current & previous-iteration sensitivity
+  target_volume_fraction: 0.7    # stop reducing once this fraction of the design volume remains
+  sensitivity: energy            # energy | vonmises | blend
+  blend_weight: 0.5              # weight on von-Mises when sensitivity == blend
+  max_iter: 15                   # bump to 50-150 for a real run; start small while dialling in
+  convergence_tol: 0.001         # rel. change in objective over the averaging window
   convergence_window: 5
-  protect_layers: 2
+  protect_layers: 2              # element layers around protected nodes to freeze
   contact_protect_dist: 0.0
   # Keep each iteration's deck + final animation + engine listing in
-  # work_dir/iter_NNNN/ (skips the ~345 MB restart). Off by default; see README.
+  # work_dir/iter_NNNN/. On by default; set false (here) to save disk while
+  # developing. The ~345 MB/iter restart (archive_restart) is off by default.
   archive_iterations: false
+
+# Load cases — the single source of truth for each deck's stem, its stress limit
+# `sigma_allow`, and its per-node displacement constraints. At least one required;
+# a single-load run is just one load case. Add more (with weights) to optimise one
+# structure against several loads — see configs/presets/multiload.yaml.
+load_cases:
+  - name: pull                       # human-readable label
+    stem: implicit_elevator-linkage  # source deck stem: <stem>_0000.rad / _0001.rad in case_dir
+    weight: 1.0                      # w_i in the weighted-sum sensitivity
+    sigma_allow: 452.0               # max von-Mises [MPa]; blank -> stress left unconstrained
+    disp_constraints:                # one entry per constrained node; empty -> no disp tracked
+      - {node_id: 10021367, d_allow: 5.0}   # max |displacement| at this node [mm]
+
 # Run/output folder for scratch, checkpoints and status files. Blank -> default
-# to the input deck folder (model.case_dir above); set an explicit path such as
+# to the input deck folder (model.case_dir) itself; set an explicit path such as
 # runs/run01 to keep outputs separate from the source decks.
 work_dir: ""

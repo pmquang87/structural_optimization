@@ -35,6 +35,8 @@ from oropt.mesh import Mesh
 
 from conftest import MINI_DECK
 
+pytestmark = pytest.mark.gui   # Streamlit AppTest / pandas-pyarrow: excluded on non-Windows CI
+
 # Region attached to the part's x=0 face (nodes 60000001/3/4 of MINI_DECK):
 # generated tets there share those surface nodes -> reachable.
 WING = GrowthBox(name="wing", x_min=-1.0, x_max=-0.001, y_min=-0.5, y_max=1.5,

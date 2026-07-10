@@ -1,0 +1,77 @@
+# =============================================================================
+# PRESET: docker_mumps — solve via the Dockerised OpenRadioss MUMPS build
+# =============================================================================
+# Purpose: run the solver from the Dockerised MUMPS-implicit OpenRadioss build
+# instead of a native Windows install — no Intel oneAPI / MKL / MPI needed, works
+# on AMD or Intel. Just Docker Desktop + the loaded image. The container supports
+# real MPI, so `np > 1` gives genuine domain parallelism (keep np * nt <= cores).
+#
+# When docker.enabled is true, the `or_paths` and the Intel-MPI `run` settings
+# are IGNORED. Requires Docker running and the image loaded locally.
+# =============================================================================
+
+# `or_paths` is ignored under the Docker backend, but kept here so toggling
+# docker.enabled: false falls back to a valid native config.
+or_paths:
+  root: C:\OpenRadioss
+  starter: exec/starter_win64.exe
+  engine: exec/engine_win64_impi.exe
+  anim_to_vtk: exec/anim_to_vtk_win64.exe
+  th_to_csv: exec/th_to_csv_win64.exe
+  cfg_path: hm_cfg_files
+  h3d_path: extlib\h3d\lib\win64
+  intel_mpi_root: C:\Program Files (x86)\Intel\oneAPI\mpi\latest
+
+run:
+  # These native-backend knobs are ignored while docker.enabled is true.
+  np: 1
+  nt: 12
+  use_mpi: true
+  starter_timeout_s: 60000
+  engine_timeout_s: 360000
+  kmp_stacksize: 400m
+  anim_dt: 1.0
+
+docker:
+  enabled: true
+  image: openradioss-mumps:20260520   # the loaded image tag
+  docker_exe: docker                  # docker CLI: a name on PATH or a full path
+  shm_size: 2g                        # MUMPS needs shared memory
+  np: 4                               # MPI domains (Docker build supports np > 1)
+  nt: 2                               # OpenMP threads per domain (keep np * nt <= cores)
+
+model:
+  case_dir: ./elevator_case
+  design_part_id: 60000000
+  design_node_min: 60000000
+  bc_group_id: 60000000
+  freeze_group_ids:
+  - 99999999
+  freeze_node_ids: []
+
+optimizer: beso
+
+beso:
+  evolution_rate: 0.02
+  max_add_ratio: 0.01
+  filter_radius: 1.25
+  history_weight: 0.5
+  target_volume_fraction: 0.6
+  sensitivity: energy
+  blend_weight: 0.5
+  max_iter: 100
+  convergence_tol: 0.001
+  convergence_window: 5
+  protect_layers: 2
+  contact_protect_dist: 0.0
+  archive_iterations: false
+
+load_cases:
+  - name: pull
+    stem: implicit_elevator-linkage
+    weight: 1.0
+    sigma_allow: 452.0
+    disp_constraints:
+      - {node_id: 10021367, d_allow: 5.0}
+
+work_dir: ""

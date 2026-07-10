@@ -25,6 +25,8 @@ from oropt.loop import (growth_blocked_mask, growth_candidate_mask,
 from oropt.mesh import Mesh
 from oropt.validate import check_config
 
+pytestmark = pytest.mark.gui   # Streamlit AppTest / pandas-pyarrow: excluded on non-Windows CI
+
 # ---- design deck (same geometry as tests/test_growth.py) --------------------
 # e1(nodes 1-4) = anchored part; e2(2-5) centroid (.5,.5,.5); e3(5,6,11,12)
 # centroid (1.5,1.75,1.5), touches the structure only via e2 (node 5); e4 island.

@@ -13,6 +13,8 @@ from oropt.gui.cases import (CASE_COLUMNS, format_disp_constraints,
                              load_cases_from_records, parse_disp_constraints,
                              records_from_load_cases)
 
+pytestmark = pytest.mark.gui   # Streamlit AppTest / pandas-pyarrow: excluded on non-Windows CI
+
 
 # ---- pure record <-> LoadCase conversion -----------------------------------
 def test_roundtrip_records_load_cases():

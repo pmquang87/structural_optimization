@@ -11,14 +11,18 @@ authors = [{ name = "Minh Quang Pham" }]
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
-    "pyvista>=0.43",   # VTK-backed reader for anim_to_vtk output + topology export/viz
+    # pyvista and streamlit move fast and ship breaking changes on minor bumps;
+    # cap below the next-untested major so a fresh install can't silently pull an
+    # incompatible release. Tested through pyvista 0.48 / streamlit 1.59; raise the
+    # ceilings once a newer line is verified.
+    "pyvista>=0.43,<1.0",   # VTK-backed reader for anim_to_vtk output + topology export/viz
     "matplotlib>=3.7",
     "pillow>=9.0",     # GIF encoding for the post-run topology-evolution animation
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-gui = ["streamlit>=1.30", "stpyvista>=0.0.10"]
+gui = ["streamlit>=1.30,<2.0", "stpyvista>=0.0.10"]
 # Interactive (zoom/rotate) final-design viewer embedded in report.html, via
 # pyvista's Plotter.export_html. This is pyvista's own "jupyter" extra (the trame
 # export stack: trame / trame-vtk / trame-vuetify / nest-asyncio2). Without it the
@@ -30,8 +34,17 @@ report3d = ["pyvista[jupyter]>=0.43"]
 # itself is AGPL-licensed — evaluate before redistributing a bundle.
 growthmesh = ["tetgen>=0.8.4"]
 # tetgen is in dev so CI exercises the TetGen-backed end-to-end tests (the
-# hermetic suite passes without it; those tests importorskip).
-dev = ["pytest>=7.0", "ruff>=0.6", "tetgen>=0.8.4"]
+# hermetic suite passes without it; those tests importorskip). pytest-cov powers
+# the non-gating coverage CI leg; mypy the non-gating type-check leg; hypothesis
+# the property-based tests (tests/test_property.py).
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.6",
+    "tetgen>=0.8.4",
+    "pytest-cov>=4.0",
+    "mypy>=1.8",
+    "hypothesis>=6.0",
+]
 
 [project.scripts]
 oropt = "oropt.run:main"
@@ -42,8 +55,28 @@ oropt-growthmesh = "oropt.growthmesh:main"
 [tool.setuptools]
 packages = ["oropt", "oropt.gui"]
 
+# Ship the PEP 561 marker so downstream importers pick up oropt's inline type hints.
+[tool.setuptools.package-data]
+oropt = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gui: Streamlit AppTest-driven tests (skipped on the non-Windows CI leg; a pandas/pyarrow interaction can segfault the AppTest runner off Windows)",
+    "integration: needs a real OpenRadioss install (gated on the OROPT_OR_ROOT env var; skipped by default)",
+]
+
+# Non-gating type check (CI runs `mypy oropt` with continue-on-error). The
+# codebase is broadly annotated but not yet clean under strict settings, so this
+# stays lenient — it is a drift signal, not a wall.
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+exclude = ['^oropt/gui/']
 
 [tool.ruff]
 target-version = "py310"

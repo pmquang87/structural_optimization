@@ -14,6 +14,8 @@ from oropt import status as st_io
 from oropt.config import Config
 from oropt.gui import queue_store as qs
 
+pytestmark = pytest.mark.gui   # Streamlit AppTest / pandas-pyarrow: excluded on non-Windows CI
+
 
 # ---- pure transitions ------------------------------------------------------
 def test_add_remove_and_reorder():

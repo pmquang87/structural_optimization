@@ -31,6 +31,8 @@ from oropt.mesh import Mesh, local_frame_basis, overlay_primitives
 from oropt.tobs import Tobs
 from oropt.validate import check_config
 
+pytestmark = pytest.mark.gui   # Streamlit AppTest / pandas-pyarrow: excluded on non-Windows CI
+
 # Four tets: e1-e2 share a face (the "part"), e3 touches ONLY e2 via node 5 (a
 # chain candidate), e4 is a disjoint island far away. Centroids: e1 (.25,.25,.25),
 # e2 (.5,.5,.5), e3 (1.5,1.75,1.5), e4 (5.25,5.25,5.25).
