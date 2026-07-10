@@ -156,9 +156,11 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     backend is selected; it is off by default so the check stays hermetic.
 
     Pass *raw* (the mapping the config was parsed from, e.g.
-    :meth:`Config.read_yaml_dict`) to also warn about unrecognised keys that
-    :meth:`Config.from_dict` silently dropped -- a typo'd or misplaced knob that
-    would otherwise revert to its default unnoticed.
+    :meth:`Config.read_yaml_dict`) to also **error** on unrecognised keys that
+    :meth:`Config.from_dict` silently dropped -- a typo'd or misplaced knob (e.g.
+    ``evolution_ratte``) would otherwise revert to its default unnoticed and the
+    run would spend hours optimising the wrong thing, so a stray key blocks the
+    launch rather than merely warning.
     """
     problems: list[Problem] = []
 
@@ -169,10 +171,13 @@ def check_config(cfg: Config, *, raw: dict | None = None,
         problems.append(Problem(WARNING, msg))
 
     # --- unrecognised config keys (silently dropped by Config.from_dict) ---
+    # An error, not a warning: a typo'd knob reverts to its default and the run
+    # would silently optimise the wrong thing for hours. Blocking the launch is
+    # cheaper than discovering it afterwards.
     if raw is not None:
         for key in unknown_keys(raw):
-            warn(f"unrecognised config key {key!r} -- ignored (typo or wrong "
-                 "section?); its default is used")
+            err(f"unrecognised config key {key!r} -- typo or wrong section? "
+                "(it would be ignored and its default used). Remove or correct it.")
 
     # --- optimiser selector ---
     if cfg.optimizer_name() not in VALID_OPTIMIZERS:

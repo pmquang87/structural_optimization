@@ -1,0 +1,79 @@
+# =============================================================================
+# PRESET: multiload — one structure optimised against several loads
+# =============================================================================
+# Purpose: optimise ONE shared design against multiple load cases at once (the
+# elevator linkage pulled in different directions), minimising a weighted-sum
+# compliance. Each load case is a SEPARATE deck pair sharing the SAME design-part
+# element ids — only the applied-load cards differ.
+#
+# Cost scales ~linearly with the number of cases (they solve sequentially). See
+# the README "How multiple load cases work" section.
+# =============================================================================
+
+or_paths:
+  root: C:\OpenRadioss                    # native install root; Docker users set docker.enabled below
+  starter: exec/starter_win64.exe
+  engine: exec/engine_win64_impi.exe
+  anim_to_vtk: exec/anim_to_vtk_win64.exe
+  th_to_csv: exec/th_to_csv_win64.exe
+  cfg_path: hm_cfg_files
+  h3d_path: extlib\h3d\lib\win64
+  intel_mpi_root: C:\Program Files (x86)\Intel\oneAPI\mpi\latest
+
+run:
+  np: 1                    # native backend MUST be 1
+  nt: 12
+  use_mpi: true
+  starter_timeout_s: 60000
+  engine_timeout_s: 360000
+  # On a strong PC, solve the load cases concurrently (each still uses `nt`
+  # threads, so solver_concurrency * nt threads must fit the machine).
+  solver_concurrency: 1
+  kmp_stacksize: 400m
+  anim_dt: 1.0
+
+model:
+  case_dir: ./elevator_case
+  design_part_id: 60000000
+  design_node_min: 60000000
+  bc_group_id: 60000000
+  freeze_group_ids:
+  - 99999999
+  freeze_node_ids: []
+
+optimizer: beso
+
+beso:
+  evolution_rate: 0.015
+  max_add_ratio: 0.01
+  filter_radius: 1.25
+  history_weight: 0.5
+  target_volume_fraction: 0.65
+  sensitivity: energy
+  blend_weight: 0.5
+  max_iter: 80
+  convergence_tol: 0.001
+  convergence_window: 5
+  protect_layers: 2
+  contact_protect_dist: 0.0
+  archive_iterations: false
+
+# Two load cases. `weight` sets each case's RELATIVE importance in the
+# per-case-normalised weighted-sum sensitivity; each carries its OWN sigma_allow
+# and displacement limits, and the design is feasible only when EVERY case is
+# feasible. All cases must share the same design-part element ids.
+load_cases:
+  - name: pull_z
+    stem: implicit_pull_z          # <stem>_0000.rad / _0001.rad for the primary (z) load
+    weight: 1.0
+    sigma_allow: 452.0
+    disp_constraints:
+      - {node_id: 10021367, d_allow: 5.0}
+  - name: pull_x
+    stem: implicit_pull_x          # a second deck pair, same mesh, x-direction load
+    weight: 0.5
+    sigma_allow: 480.0
+    disp_constraints:
+      - {node_id: 10021367, d_allow: 3.0}
+
+work_dir: ""

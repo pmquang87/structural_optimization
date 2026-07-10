@@ -226,6 +226,12 @@ class Summary:
     total_wall_s: float
     n_cases: int
     stress_excluded: int = 0
+    # Absolute design volume V0 (deck units) and material density/cost, so the
+    # report can turn the volume fractions into mass. All 0 when unknown (no
+    # density configured, or a pre-upgrade status without design_volume).
+    design_volume: float = 0.0
+    material_density: float = 0.0
+    material_cost_per_mass: float = 0.0
     # Provenance of the reported design (see _pick_reported): the design metrics
     # above describe iteration ``reported_iteration`` — the last *feasible* one —
     # while the run actually ended at ``last_iteration``. They differ when the
@@ -327,6 +333,10 @@ def _summarise(cfg: Config, status: Optional[st.Status],
         n_cases=len(cfg.load_cases),
         stress_excluded=(int(getattr(status, "stress_excluded_elems", 0))
                          if status is not None else 0),
+        design_volume=(_f(getattr(status, "design_volume", 0.0))
+                       if status is not None else 0.0),
+        material_density=float(getattr(cfg.model, "material_density", 0.0) or 0.0),
+        material_cost_per_mass=float(getattr(cfg.model, "material_cost_per_mass", 0.0) or 0.0),
         reported_iteration=reported_iter,
         last_iteration=(_iter_num(last) if last else reported_iter),
         all_infeasible=all_infeasible,
@@ -371,12 +381,55 @@ def _rows(s: Summary) -> list[tuple[str, str]]:
         ("Mass removed" if _isnan(s.mass_removed_pct) or s.mass_removed_pct >= 0
          else "Mass added (net growth)",
          _pct(abs(s.mass_removed_pct), 1)),   # abs(nan) is nan -> still "n/a"
+    ]
+    # Absolute mass (and cost) when a material density is configured — mass =
+    # volume_fraction * V0 * density, in whatever unit system density is given in.
+    if s.material_density > 0.0 and s.design_volume > 0.0:
+        start_m = s.start_vf * s.design_volume * s.material_density
+        final_m = s.final_vf * s.design_volume * s.material_density
+        rows.append(("Mass", f"{_num(start_m, 4)} → {_num(final_m, 4)}"))
+        if s.material_cost_per_mass > 0.0:
+            rows.append(("Cost", f"{_num(start_m * s.material_cost_per_mass, 2)} → "
+                                 f"{_num(final_m * s.material_cost_per_mass, 2)}"))
+    rows += [
         (f"Final σ_max{' (worst case)' if s.multi_load else ''}", sigma),
         (f"Final disp{' (worst case)' if s.multi_load else ''}", disp),
         ("Feasible", verdict),
         ("Total wall time", _hms(s.total_wall_s)),
     ]
     return rows
+
+
+def _read_manufacturability(work: Path) -> Optional[dict]:
+    """The independent manufacturability audit (oropt.mfg_verify, written to
+    ``manufacturability.json`` by the loop when manufacturing constraints are
+    active), or ``None`` when absent/unreadable."""
+    import json
+    p = Path(work) / "manufacturability.json"
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and data.get("checks") else None
+    except (OSError, ValueError):
+        return None
+
+
+def _manufacturability_rows(work: Path) -> list[tuple[str, str, str]]:
+    """(check, result, detail) rows for the manufacturability table, or []."""
+    data = _read_manufacturability(work)
+    if data is None:
+        return []
+    out = []
+    for c in data.get("checks", []):
+        if not c.get("active", True):
+            continue
+        result = "PASS" if c.get("passed") else "FAIL"
+        meas, lim = c.get("measured"), c.get("limit")
+        detail = c.get("detail") or (f"measured {meas} vs limit {lim}"
+                                     if meas is not None else "")
+        out.append((str(c.get("name", "?")), result, str(detail)))
+    return out
 
 
 def _provenance_lines(s: Summary) -> list[str]:
@@ -951,6 +1004,20 @@ def _html(s: Summary, work: Path, charts: dict[str, Path],
             f'element(s)</strong> in the configured stress-exclusion region(s) — '
             f'their von-Mises is ignored for the peak and the feasibility verdict.'
             f'</p>')
+    mfg_rows = _manufacturability_rows(work)
+    if mfg_rows:
+        overall = "PASS" if all(r == "PASS" for _, r, _ in mfg_rows) else "FAIL"
+        trs = "\n".join(
+            f'    <tr><td>{escape(name)}</td><td>{res}</td>'
+            f'<td>{escape(detail)}</td></tr>'
+            for name, res, detail in mfg_rows)
+        parts.append(
+            '  <h2>Manufacturability audit</h2>\n'
+            f'  <p class="note">Independent geometric re-check of the final design '
+            f'against the configured manufacturing constraints — '
+            f'<strong>{overall}</strong>.</p>\n'
+            '  <table><tr><th>Check</th><th>Result</th><th>Detail</th></tr>\n'
+            f'{trs}\n  </table>')
 
     # Hover-interactive inline-SVG charts (iteration + value on hover), like the
     # Monitor tab; the static PNGs remain as the <noscript> fallback.
@@ -1059,6 +1126,14 @@ def _md(s: Summary, work: Path, charts: dict[str, Path],
                   f"> σ_max **excludes {s.stress_excluded} element(s)** in the "
                   f"configured stress-exclusion region(s) — their von-Mises is "
                   f"ignored for the peak and the feasibility verdict."]
+    mfg_rows = _manufacturability_rows(work)
+    if mfg_rows:
+        overall = "PASS" if all(r == "PASS" for _, r, _ in mfg_rows) else "FAIL"
+        lines += ["", "## Manufacturability audit", "",
+                  f"Independent geometric re-check of the final design against the "
+                  f"configured manufacturing constraints — **{overall}**.", "",
+                  "| Check | Result | Detail |", "| --- | --- | --- |"]
+        lines += [f"| {name} | {res} | {detail} |" for name, res, detail in mfg_rows]
     lines += ["", "## Convergence", ""]
     any_chart = False
     for key, title in (("vf", "Volume fraction"),

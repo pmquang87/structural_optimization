@@ -2,8 +2,13 @@
 
 [![CI](https://github.com/pmquang87/structural_optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/pmquang87/structural_optimization/actions/workflows/ci.yml)
 
-Lightweight structural **topology optimisation** that drives the real
-**OpenRadioss** implicit nonlinear model in the loop. Its default optimiser is
+Lightweight structural **topology optimisation for OpenRadioss TET4 solid
+parts**: it drives the real **OpenRadioss** implicit nonlinear model in the loop,
+so the tool is mechanically general — any TET4 solid part with an implicit deck
+that emits `/ANIM/ELEM/ENER` can be optimised (the AlSi10Mg elevator linkage
+below is the *reference example*, not a limit; see
+[`docs/applicability.md`](docs/applicability.md) for the "can I use this for my
+part?" checklist). Its default optimiser is
 **BESO** (Bi-directional Evolutionary Structural Optimisation): each iteration
 solves the deck, ranks elements by the internal-energy density OpenRadioss already
 writes to `/ANIM/ELEM/ENER`, **deletes** the least-important ones (with
@@ -24,8 +29,11 @@ run's own fitted violation(vf) history instead of the reactive gate. The
 algorithm portfolio follows the research survey in
 [`docs/topology_sota_2026.md`](docs/topology_sota_2026.md).
 
-Built for the AlSi10Mg additively-manufactured elevator linkage (575k TET4,
-6 kN pull through rigid cylinders via contact, implicit nonlinear quasi-static).
+The **reference example** throughout this README is the AlSi10Mg
+additively-manufactured elevator linkage (575k TET4, 6 kN pull through rigid
+cylinders via contact, implicit nonlinear quasi-static) — a concrete case to make
+the docs specific, not the tool's only target. A new user's fastest path is
+[`QUICKSTART.md`](QUICKSTART.md).
 
 ## Why element deletion (and not SIMP)
 
@@ -128,8 +136,8 @@ GUI (configure, launch, and live-monitor; safe to close mid-run):
 > `run_gui.py` and the interpreter at `.venv\Scripts\python.exe`.
 
 The Monitor tab auto-refreshes from the status files on a fixed interval
-(default 60 s); adjust it with the **Refresh interval (s)** control in the
-sidebar. The **Run / output folder** field on the Input tab is editable; leave it
+(default 120 s, range 120–300 s); adjust it with the **Refresh interval (s)**
+control in the sidebar. The **Run / output folder** field on the Input tab is editable; leave it
 blank to write into the case directory itself (matching the blank-`work_dir`
 default), or type an explicit path to override it.
 

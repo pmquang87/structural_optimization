@@ -13,6 +13,10 @@ import oropt.gui.runstate as runstate
 from oropt import status as st_io
 from oropt.config import Config, LoadCase
 
+import pytest
+
+pytestmark = pytest.mark.gui   # Streamlit AppTest / pandas-pyarrow: excluded on non-Windows CI
+
 _APP = Path(oropt.__file__).resolve().parent / "gui" / "app.py"
 
 

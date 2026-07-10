@@ -31,7 +31,9 @@ from .mesh import Mesh
 from .report import reported_iteration, write_report
 from .results import extract
 from .runner import RunResult, run_solver
-from .controller import build_backoff_controller
+from .controller import build_backoff_controller, build_weight_controller
+from .sanity import audit as sanity_audit
+from .mfg_verify import verify as mfg_verify
 from .saip import Saip
 from .smoothing import smooth_all_iterations, smooth_final
 from .tobs import Tobs
@@ -627,6 +629,21 @@ def stress_ratio_field(cases, case_results, elem_ids: np.ndarray
     return out
 
 
+def case_violation(case, res) -> float | None:
+    """One load case's worst constraint-utilisation ratio ``value/limit`` over
+    its stress and every displacement constraint — the per-case analogue of
+    :func:`worst_violation`. ``None`` when the case configures no limit (nothing
+    to equalise on), so the adaptive-weight controller holds its weight and
+    excludes it from the mean."""
+    ratios = []
+    if case.sigma_allow is not None:
+        ratios.append(res.sigma_max / case.sigma_allow)
+    for _nid, val, limit, _feas in disp_breakdown(case, res):
+        if limit is not None:
+            ratios.append(val / limit)
+    return max(ratios) if ratios else None
+
+
 def worst_violation(cases, case_results) -> float:
     """Worst constraint-utilisation ratio ``value/limit`` over all load cases and
     both limit types (``sigma_max/sigma_allow`` and, for *every* displacement
@@ -1064,9 +1081,14 @@ def run_optimization(cfg: Config, resume: bool = False,
     # from a controller fitted to the run's own (vf, violation) history instead
     # of the optimiser's reactive gate. None = the classic gate, unchanged.
     ctrl = build_backoff_controller(oc)
+    # Adaptive per-load-case weights (run.adaptive_weights): the combined
+    # sensitivity's per-case split is nudged toward equal constraint utilisation
+    # each iteration. None = fixed configured weights, byte-identical to before.
+    wctrl = build_weight_controller(cfg, [c.weight for c in cases])
     log(f"[oropt] optimizer={cfg.optimizer_name()}; protected elements: "
         f"{int(protected.sum())} ({100*protected.mean():.1f}%); V0={opt.V0:.3f}"
-        + ("; backoff=multipoint" if ctrl is not None else ""))
+        + ("; backoff=multipoint" if ctrl is not None else "")
+        + ("; adaptive-weights" if wctrl is not None else ""))
 
     # Stress-exclusion region: design elements touching a user-flagged hot-spot
     # node set have their von-Mises ignored everywhere it's reported (sigma_max,
@@ -1123,6 +1145,10 @@ def run_optimization(cfg: Config, resume: bool = False,
             # its fitted boundary instead of re-learning it from gate steps.
             if ctrl is not None:
                 ctrl.restore(ckpt.get("ctrl"))
+            # Adaptive per-load-case weights: restored so a resume continues the
+            # adapted split instead of resetting to the configured weights.
+            if wctrl is not None:
+                wctrl.restore(ckpt.get("weights"))
             cur_vf = opt.volume_fraction(alive)
             log(f"[oropt] resumed at iteration {start_iter}, vf={cur_vf:.3f}")
             for msg in resume_warnings(prior_optimizer, cfg.optimizer_name(),
@@ -1271,7 +1297,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                 st.save_checkpoint(work, it + 1, alive, sens_prev,
                                    phi=getattr(opt, "phi", None),
                                    x=getattr(opt, "x", None),
-                                   ctrl=(ctrl.state() if ctrl else None))
+                                   ctrl=(ctrl.state() if ctrl else None),
+                                   weights=(wctrl.state() if wctrl else None))
                 # the recovery step invalidates the guards' iteration pairing
                 prev_vf = prev_target_vf = None
                 continue
@@ -1318,7 +1345,9 @@ def run_optimization(cfg: Config, resume: bool = False,
             # ---- combine cases: weighted-sum sensitivity + worst-case gate -
             raws = [opt.raw_sensitivity(r, deck.elem_ids, alive)
                     for r in case_results]
-            raw = combine_sensitivity(raws, [c.weight for c in cases])
+            weights = (wctrl.weights if wctrl is not None
+                       else [c.weight for c in cases])
+            raw = combine_sensitivity(raws, weights)
             # Each case is gated against its OWN limits; a blank limit (None) leaves
             # that quantity unconstrained. A case with several displacement
             # constraints is feasible only when EVERY one holds. A design is
@@ -1344,6 +1373,13 @@ def run_optimization(cfg: Config, resume: bool = False,
                                      and disp_feasible)})
             feasible = all(c["feasible"] for c in per_case)
             violation = worst_violation(cases, case_results)
+            # Adaptive weights: step the per-case split from this iteration's
+            # per-case utilisation ratios so the new weights apply next combine.
+            if wctrl is not None:
+                new_w = wctrl.update([case_violation(case, r)
+                                      for case, r in zip(cases, case_results)])
+                log("[oropt] adaptive weights -> "
+                    + ", ".join(f"{c.name}={w:.3f}" for c, w in zip(cases, new_w)))
             # Headline sigma_max stays the worst raw stress across cases; headline
             # disp is the worst *ratio* displacement constraint over every case and
             # every node. Each is reported with the limit of the constraint it came
@@ -1374,6 +1410,7 @@ def run_optimization(cfg: Config, resume: bool = False,
                 d_allow=d_allow, feasible=feasible,
                 elements_alive=int(alive.sum()),
                 elements_total=deck.n_design_elements,
+                design_volume=float(opt.V0),
                 stress_excluded_elems=n_excluded,
                 elements_candidate=n_candidate,
                 elements_grown=int((alive & candidate).sum()),
@@ -1430,7 +1467,8 @@ def run_optimization(cfg: Config, resume: bool = False,
                 st.save_checkpoint(work, it + 1, alive, sens,
                                    phi=getattr(opt, "phi", None),
                                    x=getattr(opt, "x", None),
-                                   ctrl=(ctrl.state() if ctrl else None))
+                                   ctrl=(ctrl.state() if ctrl else None),
+                                   weights=(wctrl.state() if wctrl else None))
                 log("[oropt] CONVERGED")
                 break
 
@@ -1488,11 +1526,20 @@ def run_optimization(cfg: Config, resume: bool = False,
                     "wholesale low-energy collapse; inspect topology_latest.vtu "
                     "before trusting the next solve")
             removal_hist = (removal_hist + [removed_now])[-5:]
+            # Post-update physics sanity audit (advisory: logs, never aborts).
+            # Audits the mask about to be solved next against the one just solved.
+            if getattr(cfg.run, "sanity_checks", True):
+                rep = sanity_audit(mesh, alive, alive_before, anchor,
+                                   min_layers=max(1, cfg.manufacturing.min_member_layers),
+                                   protected=protected)
+                for w in rep.warnings:
+                    log(f"[oropt] SANITY: {w}")
             prev_vf, prev_target_vf = vf, target_vf
             st.save_checkpoint(work, it + 1, alive, sens_prev,
                                phi=getattr(opt, "phi", None),
                                x=getattr(opt, "x", None),
-                               ctrl=(ctrl.state() if ctrl else None))
+                               ctrl=(ctrl.state() if ctrl else None),
+                               weights=(wctrl.state() if wctrl else None))
         else:
             status.state = "converged" if status.state == "running" else status.state
             status.message = status.message or "reached max_iter"
@@ -1546,6 +1593,23 @@ def run_optimization(cfg: Config, resume: bool = False,
             make_animation(cfg, work, log)
         except Exception as exc:  # noqa: BLE001
             log(f"[oropt] animate: unexpected error during animation: {exc}")
+        # Independent manufacturability audit of the FINAL design (oropt.mfg_verify):
+        # re-measures the shipped mask against the configured manufacturing limits
+        # from raw geometry — NOT a re-run of the enforcement code — so a bug in a
+        # constraint, or a violation the post-manufacturing keep_connected
+        # reintroduced, is caught. Written to manufacturability.json for the report;
+        # best-effort, never affects the run. Skipped when no constraint is active.
+        try:
+            if manufacturing_active(cfg.manufacturing):
+                rep = mfg_verify(mesh, alive, cfg.manufacturing, protected=protected)
+                write_manufacturability(work, rep)
+                verdict = "PASS" if rep.ok else "FAIL"
+                log(f"[oropt] manufacturability audit: {verdict} "
+                    f"({len(rep.checks)} checks)")
+                for w in rep.warnings:
+                    log(f"[oropt] manufacturability: {w}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"[oropt] manufacturability: unexpected error during audit: {exc}")
         # Automatic post-run summary (report.html/report.md) from the status &
         # history this run wrote. Read-only and best-effort; never affects the run.
         try:
@@ -1554,6 +1618,17 @@ def run_optimization(cfg: Config, resume: bool = False,
             log(f"[oropt] report: unexpected error during report: {exc}")
         st.clear_pid(work)
     return status
+
+
+def write_manufacturability(work: Path, report) -> None:
+    """Persist the final-design manufacturability audit (oropt.mfg_verify) to
+    ``manufacturability.json`` in the run folder, for the report / a later review.
+    The report dataclasses are plain, so ``dataclasses.asdict`` round-trips them.
+    """
+    import json
+    payload = dataclasses.asdict(report)
+    (Path(work) / "manufacturability.json").write_text(
+        json.dumps(payload, indent=2, default=float), encoding="utf-8")
 
 
 def _scatter(results, elem_ids: np.ndarray) -> np.ndarray:

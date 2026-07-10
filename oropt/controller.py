@@ -40,8 +40,9 @@ of re-learning the boundary. Selected per optimiser block via
 ``backoff_mode: multipoint`` — the optimiser itself is untouched, this wraps
 only its ``next_target_vf``.
 
-Adapting the *load-case weights* the same way (LS-TaSC's second global
-variable set) is future work; today the per-case weights stay as configured.
+The *load-case weights* — LS-TaSC's second global variable set — are handled
+by :class:`WeightController` below (opt-in via ``run.adaptive_weights``); the
+per-case weights stay as configured unless it is enabled.
 """
 from __future__ import annotations
 
@@ -137,3 +138,106 @@ def build_backoff_controller(opt_cfg) -> MultipointBackoff | None:
     if getattr(opt_cfg, "backoff_mode", "gate") == "multipoint":
         return MultipointBackoff(opt_cfg)
     return None
+
+
+class WeightController:
+    """Adaptive per-load-case weights — LS-TaSC's second global variable set.
+
+    In a multi-load run the objective is a weighted sum of the per-case
+    sensitivities (:func:`oropt.beso.combine_sensitivity`); with *fixed* weights
+    the case that is easiest to satisfy dominates the material budget and a
+    harder case's load path can starve and collapse (the documented multi-load
+    failure mode). LS-TaSC instead treats the weights as *global* variables
+    driven to satisfy the constraints from data the run already produces
+    (Roux, "The LS-TaSC multipoint method…"; survey in
+    ``docs/topology_sota_2026.md`` §3).
+
+    This is that idea reduced to a robust proportional rule: each iteration take
+    every case's worst constraint-utilisation ratio ``v_i = value/limit`` (the
+    same per-case number the feasibility check computes, ``v_i <= 1`` feasible)
+    and nudge the weights toward *equal utilisation* — the case furthest over
+    its limit gains weight (keep more of the material serving its load path),
+    the case with the most slack loses it::
+
+        w_i <- w_i * (v_i / v_mean) ** gain      (multiplicative, gain small)
+
+    then the weights are renormalised to preserve the original weight sum (so
+    the *combined* sensitivity scale — and thus the history blend — is
+    essentially unchanged; only the split between cases moves) and finally
+    clamped to ``[base_i / bound, base_i * bound]`` so no case is ever starved
+    or runs away (the clamp is the last step — a hard bound — so it can leave
+    the sum slightly off the target when it actually fires).
+
+    The update runs only when it has a usable signal — at least two cases and
+    at least two finite, positive ``v_i`` (cases with no configured limit, or a
+    diverged/blank solve, are held at their current weight and excluded from
+    the mean). Whenever the signal is unusable the weights are returned
+    untouched, so enabling the controller can never be worse-defined than the
+    fixed weights. The weights are the controller's only state; the loop
+    checkpoints them (``weights`` in ``checkpoint.npz``) so a ``--resume``
+    continues the adaptation instead of resetting to the configured split.
+    """
+
+    def __init__(self, base_weights, gain: float = 0.5, bound: float = 4.0):
+        self.base = [float(w) for w in base_weights]
+        self.weights = list(self.base)
+        self.gain = float(gain)
+        self.bound = max(1.0, float(bound))
+        self._sum = sum(self.base) or float(len(self.base))
+
+    def update(self, violations) -> list[float]:
+        """Step the weights from this iteration's per-case violation ratios and
+        return the new weight list. ``violations[i]`` is ``None``/non-finite for
+        a case with no usable signal; such cases keep their weight and sit out
+        the mean. A no-op (returns the current weights) when fewer than two
+        cases carry a usable, positive ratio."""
+        v = [float(x) if (x is not None and math.isfinite(x) and x > 0.0)
+             else None for x in violations]
+        usable = [x for x in v if x is not None]
+        if len(usable) < 2:
+            return list(self.weights)
+        v_mean = sum(usable) / len(usable)
+        if v_mean <= 0.0:
+            return list(self.weights)
+        new = list(self.weights)
+        for i, vi in enumerate(v):
+            if vi is None:
+                continue
+            new[i] = self.weights[i] * (vi / v_mean) ** self.gain
+        # renormalise to preserve the original total weight (combined-sensitivity
+        # scale essentially unchanged; only the per-case split moves)...
+        s = sum(new)
+        if s > 0.0:
+            new = [w * self._sum / s for w in new]
+        # ...then a final hard clamp so no case is ever starved or runs away.
+        new = [min(self.base[i] * self.bound, max(self.base[i] / self.bound, w))
+               for i, w in enumerate(new)]
+        self.weights = new
+        return list(self.weights)
+
+    def state(self) -> np.ndarray:
+        """The current weights as a 1-D array for the checkpoint."""
+        return np.asarray(self.weights, dtype=float)
+
+    def restore(self, state) -> None:
+        """Reload weights saved by :meth:`state` (a resume). A length mismatch
+        or malformed array is ignored — adaptation then restarts from base."""
+        if state is None:
+            return
+        arr = np.asarray(state, dtype=float).ravel()
+        if arr.size != len(self.base) or not np.all(np.isfinite(arr)):
+            return
+        self.weights = arr.tolist()
+
+
+def build_weight_controller(cfg, base_weights) -> WeightController | None:
+    """A :class:`WeightController` when ``run.adaptive_weights`` is on and the
+    run has at least two load cases; ``None`` otherwise (the fixed-weight path,
+    byte-identical to before)."""
+    if not getattr(cfg.run, "adaptive_weights", False):
+        return None
+    if len(list(base_weights)) < 2:
+        return None
+    return WeightController(base_weights,
+                            gain=getattr(cfg.run, "adaptive_weight_gain", 0.5),
+                            bound=getattr(cfg.run, "adaptive_weight_bound", 4.0))

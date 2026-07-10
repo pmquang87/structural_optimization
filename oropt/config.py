@@ -62,6 +62,21 @@ class RunOpts:
     anim_dt: float = 1.0       # animation output interval; >= termination time -> only the final state
     reuse_iter0: bool = True   # if a matching iter_0000 is already in the run folder (e.g. copied from an earlier run of the same initial design), reuse its solve instead of re-running the expensive full-volume iteration 0. Guarded by a byte-compare of the starter deck, so a mismatched design still solves fresh.
     solver_concurrency: int = 1  # how many load-case solves to run at once within an iteration (default 1 = sequential, unchanged). On a strong PC set >1 to solve several load cases simultaneously — each solver still uses `nt` threads (and MPI with `np`), so concurrency*nt threads / concurrency deck-copies must fit the machine. A single-case run is unaffected.
+    # Adaptive per-load-case weights (LS-TaSC's second global variable set; see
+    # oropt.controller.WeightController). OFF by default -> the combined
+    # sensitivity uses the fixed per-case `weight`s, byte-identical to before.
+    # On (>=2 load cases) the weights are nudged toward EQUAL constraint
+    # utilisation each iteration, so a hard case's load path can't starve.
+    adaptive_weights: bool = False
+    adaptive_weight_gain: float = 0.5   # step size of the multiplicative weight update (small = gentle)
+    adaptive_weight_bound: float = 4.0  # each weight is clamped to [base/bound, base*bound]
+    # Post-update physics sanity audit (oropt.sanity): after each mask update, a
+    # cheap hermetic geometric check flags designs that are severed from the load
+    # path, feature thin webs, or newly expose self-contact faces — the failure
+    # class that silently wasted a run in docs/levelset_stuck_analysis.md.
+    # ADVISORY: it only logs warnings (never aborts), and is negligible next to a
+    # solve. Set false to skip it.
+    sanity_checks: bool = True
 
 
 @dataclass
@@ -259,6 +274,14 @@ class Model:
     growth_keepout_rad: Optional[str] = None
     growth_keepout_part_ids: list = field(default_factory=list)
     growth_keepout_clearance_mm: float = 0.0
+    # Material density (mass per unit design-mesh volume, e.g. tonne/mm^3 in the
+    # deck's own unit system — AlSi10Mg is ~2.67e-9 tonne/mm^3) and optional cost
+    # per unit mass. When density > 0 the report shows the start/final design MASS
+    # (and cost, if given) alongside the volume-fraction %; both default 0 = off
+    # (report shows volume/% only, unchanged). Density only scales the reported
+    # numbers — it never affects the optimisation.
+    material_density: float = 0.0
+    material_cost_per_mass: float = 0.0
 
     def __post_init__(self):
         fields = {f.name for f in dataclasses.fields(GrowthBox)}

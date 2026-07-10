@@ -192,6 +192,7 @@ def test_cancel_kills_live_child(tmp_path):
 
 
 # ---- real subprocess end-to-end (needs tetgen, like the CLI e2e) ----------------
+@pytest.mark.gui   # spawns a real detached child; excluded on the non-Windows CI leg
 def test_start_to_done_real_subprocess(tmp_path):
     """The full GUI contract against a real detached child: launch, poll via
     files only, parse the report back, decks written where the report says."""

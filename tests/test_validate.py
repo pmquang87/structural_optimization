@@ -65,14 +65,15 @@ def test_valid_optimizers_accepted(tmp_path, name):
 
 
 # ---- unrecognised keys (raw dict passed in) --------------------------------
-def test_unknown_keys_warned_when_raw_passed(tmp_path):
+def test_unknown_keys_error_when_raw_passed(tmp_path):
     cfg = _good_cfg(tmp_path)
     raw = {"beso": {"evolution_ratte": 0.05}}     # typo for evolution_rate
-    warns = [p.message for p in check_config(cfg, raw=raw)
-             if p.severity == WARNING]
-    assert any("evolution_ratte" in w and "unrecognised" in w for w in warns)
-    # ...and an unrecognised key never blocks the launch (it is only a warning)
-    assert not has_errors(check_config(cfg, raw=raw))
+    errs = [p.message for p in check_config(cfg, raw=raw)
+            if p.severity == ERROR]
+    assert any("evolution_ratte" in e and "unrecognised" in e for e in errs)
+    # ...and an unrecognised key now BLOCKS the launch (a typo would otherwise
+    # silently revert to the default and waste a multi-hour run)
+    assert has_errors(check_config(cfg, raw=raw))
 
 
 def test_unknown_keys_silent_when_raw_omitted(tmp_path):
