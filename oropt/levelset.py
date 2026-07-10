@@ -24,6 +24,24 @@ and history-averaged by :func:`filter_history` (shared with BESO). Each iteratio
 * threshold ``phi`` -> new alive mask, force protected elements alive, and drop
   islands not connected to the anchor.
 
+**Reaction-diffusion update rule** (``update_rule: rde``): instead of the
+explicit evolve + N ad-hoc smoothing passes above, one *implicit*
+reaction-diffusion step per iteration,
+``(I + dt*diffusion*L) phi_new = phi + dt*vel`` with ``L = I - S`` the
+random-walk graph Laplacian of the same row-stochastic neighbour-averaging
+operator — the Yamada/Otomori/Choi RDE level-set family (Otomori, Yamada,
+Izui & Nishiwaki, "Matlab code for a level set-based topology optimization
+method using a reaction diffusion equation", *SMO* 51:1159-1172, 2015; survey
+in ``docs/topology_sota_2026.md``). The implicit step is unconditionally
+stable, needs no reinitialisation or velocity extension, and makes
+``diffusion`` the *single* geometric-complexity knob (larger -> smoother,
+simpler designs). The linear solve is a fixed-point contraction
+``x <- (b + c*S@x)/(1+c)`` with inf-norm rate ``c/(1+c) < 1`` (S is
+row-stochastic), i.e. sparse matvecs only. ``L`` annihilates constants, so
+the operator preserves them and the uniform ``-tau`` volume shift keeps its
+meaning. Everything else — the velocity, nucleation term, tau bisection,
+prune re-sync, checkpointing — is shared with the classic rule verbatim.
+
 The loop may prune the returned mask further (manufacturing constraints,
 island-dropping) before feeding it back; the next :meth:`LevelSet.update`
 reconciles ``phi`` with that mask and refunds the pruned volume to the
@@ -64,6 +82,12 @@ _RESYNC_PASSES = 8
 # that a handful of point artefacts cannot own the scale (elevator-linkage
 # load-introduction peak: max/median 417x, but max/p99 only 8.2x).
 _SPEED_PCTL = 99.0
+
+# Fixed-point solve of the implicit RDE step: the iteration contracts with
+# inf-norm rate c/(1+c) (c = dt*diffusion), so even c = 9 (rate 0.9) reaches
+# 1e-8 within ~175 iterations of sparse matvecs — negligible next to a solve.
+_RDE_MAX_ITERS = 400
+_RDE_TOL = 1e-8
 
 
 class LevelSet:
@@ -124,6 +148,29 @@ class LevelSet:
         for _ in range(max(0, int(passes))):
             out = (1.0 - _SMOOTH_RELAX) * out + _SMOOTH_RELAX * (self._smooth_op @ out)
         return out
+
+    def _rde_step(self, phi: np.ndarray, vel: np.ndarray) -> np.ndarray:
+        """One implicit reaction-diffusion step:
+        ``(I + c*(I - S)) phi_new = phi + dt*vel`` with ``c = dt*diffusion``
+        and ``S`` the row-stochastic neighbour average (so ``I - S`` is the
+        random-walk graph Laplacian). Solved by the fixed-point contraction
+        ``x <- (b + c*S@x)/(1+c)``: ``||c*S/(1+c)||_inf = c/(1+c) < 1``, so it
+        converges geometrically on sparse matvecs alone. Constants are fixed
+        points (``S @ const = const``), so the uniform ``-tau`` shift after
+        this step keeps the bisection's meaning exactly like ``_smooth``."""
+        b = phi + self.cfg.dt * np.asarray(vel, dtype=float)
+        c = self.cfg.dt * self.cfg.diffusion
+        if c <= 0.0:
+            return b                       # no diffusion: pure reaction step
+        x = b.copy()
+        for _ in range(_RDE_MAX_ITERS):
+            x_new = (b + c * (self._smooth_op @ x)) / (1.0 + c)
+            done = float(np.max(np.abs(x_new - x))) \
+                <= _RDE_TOL * max(1.0, float(np.max(np.abs(x_new))))
+            x = x_new
+            if done:
+                break
+        return x
 
     # ---- scatter element -> node ------------------------------------------
     def _scatter(self, elem_vals: np.ndarray) -> np.ndarray:
@@ -340,8 +387,15 @@ class LevelSet:
         # +band_width clamp, where the pure-energy velocity would hold them.
         vel = Vn - self.cfg.nucleation_rate * (1.0 - Vn)
 
-        # evolve + regularise (smoothing preserves constants -> see _solve_tau)
-        phi_base = self._smooth(self.phi + self.cfg.dt * vel, self.cfg.smoothing_passes)
+        # evolve + regularise (both rules preserve constants -> see _solve_tau):
+        # "rde" takes one implicit reaction-diffusion step; anything else is the
+        # classic explicit evolve + Jacobi smoothing (validation rejects unknown
+        # names before a run starts).
+        if self.cfg.update_rule == "rde":
+            phi_base = self._rde_step(self.phi, vel)
+        else:
+            phi_base = self._smooth(self.phi + self.cfg.dt * vel,
+                                    self.cfg.smoothing_passes)
 
         # bisect the threshold so the kept volume meets the per-iteration target;
         # the refunded prune volume keeps removal-only post-passes from being

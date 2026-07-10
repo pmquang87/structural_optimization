@@ -394,3 +394,111 @@ def test_build_optimizer_selects_by_name():
     cfg.optimizer = "bogus"
     with pytest.raises(ValueError):
         build_optimizer(cfg, mesh, protected)
+
+
+# ---- reaction-diffusion update rule (update_rule: rde) -------------------------
+def _ls_rde(mesh, protected, diffusion=1.0, target_vf=0.5, dt=1.0,
+            evolution_rate=0.2, band_width=3.0):
+    cfg = LevelSetCfg(filter_radius=0.0, target_volume_fraction=target_vf,
+                      evolution_rate=evolution_rate, dt=dt,
+                      band_width=band_width, update_rule="rde",
+                      diffusion=diffusion)
+    return LevelSet(mesh, cfg, protected)
+
+
+def test_rde_step_solves_the_implicit_system():
+    """The fixed-point solve really solves (I + c(I-S)) x = phi + dt*vel."""
+    mesh = _bar_mesh(12)
+    protected = np.zeros(12, bool)
+    ls = _ls_rde(mesh, protected, diffusion=2.0, dt=0.5)
+    rng = np.random.default_rng(0)
+    phi = rng.normal(size=mesh.n_nodes)
+    vel = rng.normal(size=mesh.n_nodes)
+
+    x = ls._rde_step(phi, vel)
+    c = ls.cfg.dt * ls.cfg.diffusion
+    lhs = x + c * (x - ls._smooth_op @ x)              # (I + c(I - S)) x
+    assert np.allclose(lhs, phi + ls.cfg.dt * vel, atol=1e-6)
+
+
+def test_rde_step_preserves_constants():
+    """A constant field with zero velocity is a fixed point — the property the
+    tau bisection's uniform-shift argument rests on."""
+    mesh = _bar_mesh(10)
+    ls = _ls_rde(mesh, np.zeros(10, bool), diffusion=3.0)
+    const = np.full(mesh.n_nodes, 1.7)
+    assert np.allclose(ls._rde_step(const, np.zeros(mesh.n_nodes)), const)
+
+
+def test_rde_diffusion_smears_a_point_source_more_with_larger_coefficient():
+    mesh = _bar_mesh(20)
+    protected = np.zeros(20, bool)
+    spike = np.zeros(mesh.n_nodes); spike[10] = 1.0
+
+    def peak(diffusion):
+        ls = _ls_rde(mesh, protected, diffusion=diffusion)
+        return float(ls._rde_step(spike, np.zeros(mesh.n_nodes)).max())
+
+    assert peak(0.5) > peak(2.0) > peak(8.0)           # more diffusion, flatter
+    # zero diffusion: the pure reaction step, no smoothing at all
+    ls0 = _ls_rde(mesh, protected, diffusion=0.0)
+    assert np.allclose(ls0._rde_step(spike, np.zeros(mesh.n_nodes)), spike)
+
+
+def test_rde_update_hits_the_volume_target_and_removes_low_energy():
+    """The RDE rule plugs into the same bisected volume targeting: the update
+    lands at/below the target and carves the low-energy region first."""
+    n = 24
+    mesh = _bar_mesh(n)
+    protected = np.zeros(n, bool); protected[0] = protected[n - 1] = True
+    ls = _ls_rde(mesh, protected, diffusion=1.0, target_vf=0.3)
+    x = np.arange(n, dtype=float)
+    sens = 1.0 + np.abs(x - n / 2) / n                 # mid-span lowest energy
+    alive = np.ones(n, bool)
+
+    for _ in range(6):
+        vf = ls.volume_fraction(alive)
+        alive = ls.update(alive, sens, ls.next_target_vf(vf, feasible=True))
+        assert ls.volume_fraction(alive) <= vf + 1e-9  # monotone toward target
+        assert alive[0] and alive[n - 1]               # protected kept
+    removed = np.flatnonzero(~alive)
+    assert removed.size                                # material was removed
+    # what went is the low-energy mid-span, not the high-energy ends
+    assert np.all(np.abs(removed - n / 2) <= n / 3)
+
+
+def test_rde_and_advect_produce_different_fields_same_contract():
+    """Same inputs, both rules: masks obey the same volume contract, but the
+    evolved fields differ (the rules are genuinely different operators)."""
+    n = 24
+    mesh = _bar_mesh(n)
+    protected = np.zeros(n, bool)
+    sens = np.linspace(1.0, 0.1, n)
+    alive = np.ones(n, bool)
+
+    adv = _ls(mesh, protected, target_vf=0.5, smoothing_passes=3)
+    rde = _ls_rde(mesh, protected, target_vf=0.5, diffusion=1.0)
+    a_adv = adv.update(alive.copy(), sens, 0.8)
+    a_rde = rde.update(alive.copy(), sens, 0.8)
+
+    for opt, mask in ((adv, a_adv), (rde, a_rde)):
+        assert opt.volume_fraction(mask) <= 0.8 + 1e-9
+        assert mask.dtype == np.bool_
+    assert not np.allclose(adv.phi, rde.phi)           # different evolutions
+
+
+def test_rde_default_config_is_advect():
+    cfg = Config()
+    assert cfg.levelset.update_rule == "advect"        # classic path by default
+    assert cfg.levelset.diffusion == 1.0
+    # round-trips through YAML like every other knob
+    cfg.levelset.update_rule = "rde"
+    cfg.levelset.diffusion = 2.5
+    import tempfile
+    import pathlib
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d) / "cfg.yaml"
+        cfg.to_yaml(p)
+        back = Config.from_yaml(p)
+    assert back.levelset.update_rule == "rde"
+    assert back.levelset.diffusion == 2.5

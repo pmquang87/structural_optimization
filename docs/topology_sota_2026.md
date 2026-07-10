@@ -293,30 +293,45 @@ verification panels (budget), which is why §3, §5 and §6 carry
 **[extracted]** markers — their primary sources were fetched and quoted, but
 not adversarially cross-checked.
 
-## 9. Proposed implementation plan
+## 9. Implementation plan — status
 
-1. **`saip.py` — SAIP/SCIP optimiser** (fifth optimiser, `optimizer: saip`).
-   Binary contract identical to `tobs.py`; CRA subproblem solver (analytic
-   dual bisection) + optional SCIP conservative asymptotes (checkpointed like
-   HCA's `x`). Hermetic tests mirroring `test_tobs.py` (volume targeting,
-   move limit, protected mask, growth candidates, connectivity). *Medium.*
-2. **`hca.radius_schedule` — MHCA** (variable neighbourhood radius on the
-   existing HCA). Pre-built filter matrices at 2–3 radii + linear schedule.
-   *Small.*
-3. **`controller.py` — multipoint back-off** (LS-TaSC-style): response
-   surface over run history driving the volume target (and optionally
-   per-case weights); `backoff_mode: multipoint` opt-in on every optimiser
-   block. *Medium.*
-4. **`levelset.update_rule: rde`** — reaction–diffusion φ update with a
-   `diffusion` complexity knob, keeping the post-leak-fix bookkeeping.
-   *Medium.*
-5. **Spike: stress-tensor extraction** from the engine anim → if available,
-   `sensitivity: tdsa` prototype (offline first, like the SIMP spike).
-   *Spike.*
-6. **Phase-2 prototype: MFSE + Kriging over `fastmode`** — offline MFSE basis
-   (Nyström) + scipy/scikit Kriging loop on the tied-linear proxy with
-   periodic full-solve correction. Go/no-go on a coarse proxy mesh before any
-   loop integration. *Large, exploratory.*
+1. **`saip.py` — SAIP optimiser** (`optimizer: saip`) — **IMPLEMENTED**.
+   Binary contract identical to `tobs.py`; canonical-relaxation subproblem
+   (analytic dual bisection on the value density `s_e/vol_e`, move-limited)
+   plus an *oscillation damping* standing in for SCIP's conservatism (a
+   rank-down on just-flipped elements — documented in the module as NOT the
+   paper's reciprocal-asymptote formulation). Hermetic tests in
+   `tests/test_saip.py`.
+2. **MHCA** (variable neighbourhood radius on the existing HCA) —
+   **IMPLEMENTED** (`hca.radius_start` / `radius_iters` / `radius_steps`,
+   cached per-radius filter matrices, resume-safe schedule position via the
+   loop's `set_iteration` hook). Tests in `tests/test_hca.py`.
+3. **`controller.py` — multipoint back-off** — **IMPLEMENTED** for the volume
+   target (`backoff_mode: multipoint` on every optimiser block: local linear
+   fit of violation(vf) over the last `multipoint_window` history points,
+   step to the `utilization_target` crossing, gate-authority clamps,
+   checkpointed history, verbatim gate fallback whenever the fit is
+   unusable). Adaptive per-case *weights* (LS-TaSC's second global set)
+   remain future work. Tests in `tests/test_controller.py`.
+4. **`levelset.update_rule: rde`** — **IMPLEMENTED** (one implicit
+   reaction–diffusion step per iteration on the random-walk graph Laplacian
+   of the existing smoothing operator, solved by a fixed-point contraction;
+   `diffusion` is the complexity knob; tau bisection / prune re-sync /
+   checkpointing shared with the classic rule). Tests in
+   `tests/test_levelset.py`.
+5. **TDSA** — **offline prototype implemented** (`oropt/tdsa.py`): verified
+   closed-form 2D/3D topological derivatives of compliance as
+   stress-quadratic forms, energy-proxy comparison and rank-agreement
+   helpers; the module docstring records the exact verification chain. The
+   remaining step to a `sensitivity: tdsa` mode is stress-*tensor* extraction
+   from the engine anim (today only von-Mises is read). Tests in
+   `tests/test_tdsa.py`.
+6. **MFSE + Kriging over `fastmode`** — **offline prototype implemented**
+   (`oropt/mfse.py`): Nyström MFSE basis over element centroids, exact
+   volume thresholding, numpy-only GP + expected-improvement loop,
+   deterministic seeded runs. Go/no-go on a coarse proxy mesh (with
+   `fastmode` as the evaluator) still precedes any loop integration. Tests
+   in `tests/test_mfse.py`.
 
 ## Sources
 

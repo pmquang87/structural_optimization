@@ -292,6 +292,9 @@ class Beso:
     backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
+    backoff_mode: str = "gate"       # "gate" (the classic/proportional gate above) | "multipoint" (LS-TaSC-style: fit violation(vf) over the run's own recent history and step to the predicted constraint boundary, at zero extra solves; falls back to the gate until enough usable points exist)
+    multipoint_window: int = 5       # multipoint only: number of recent (vf, violation) history points the local fit uses
+    utilization_target: float = 1.0  # multipoint only: the constraint-utilisation ratio the controller steers the design onto (< 1 leaves a safety margin below the limits, e.g. 0.98)
 
 
 @dataclass
@@ -332,11 +335,16 @@ class LevelSet:
     backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
+    backoff_mode: str = "gate"       # "gate" (the classic/proportional gate above) | "multipoint" (LS-TaSC-style: fit violation(vf) over the run's own recent history and step to the predicted constraint boundary, at zero extra solves; falls back to the gate until enough usable points exist)
+    multipoint_window: int = 5       # multipoint only: number of recent (vf, violation) history points the local fit uses
+    utilization_target: float = 1.0  # multipoint only: the constraint-utilisation ratio the controller steers the design onto (< 1 leaves a safety margin below the limits, e.g. 0.98)
     # --- level-set specific ---
     dt: float = 1.0                  # pseudo-time step for the phi evolution
     smoothing_passes: int = 3        # Laplacian/Jacobi smoothing passes per iteration (regularisation)
     band_width: float = 3.0          # clamp |phi| to this after each step to keep the field bounded
     nucleation_rate: float = 0.5     # topological-derivative-style reaction: phi sinks by dt*rate*(1 - Vn), Vn = the velocity normalised to the p99 alive non-protected sensitivity, so low-energy interior material can cross the threshold (nucleate holes away from existing void interfaces) instead of parking at the +band_width clamp. 0 = off (interface-only evolution)
+    update_rule: str = "advect"      # "advect" (classic: explicit phi += dt*vel then smoothing_passes Jacobi passes) | "rde" (reaction-diffusion: one IMPLICIT diffusion step (I + dt*diffusion*L)phi = phi + dt*vel per iteration -- unconditionally stable, no smoothing_passes, the Yamada/Otomori RDE level-set family)
+    diffusion: float = 1.0           # rde only: diffusion coefficient of the implicit step. The single geometric-complexity knob of the RDE method: larger -> smoother/simpler designs (fewer, thicker members), smaller -> more detail
 
 
 @dataclass
@@ -386,6 +394,9 @@ class TobsOpts:
     backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
+    backoff_mode: str = "gate"       # "gate" (the classic/proportional gate above) | "multipoint" (LS-TaSC-style: fit violation(vf) over the run's own recent history and step to the predicted constraint boundary, at zero extra solves; falls back to the gate until enough usable points exist)
+    multipoint_window: int = 5       # multipoint only: number of recent (vf, violation) history points the local fit uses
+    utilization_target: float = 1.0  # multipoint only: the constraint-utilisation ratio the controller steers the design onto (< 1 leaves a safety margin below the limits, e.g. 0.98)
     # --- TOBS specific ---
     flip_limit: float = 0.05         # beta: max fraction of elements flipped per ILP step (Sum|dx| <= beta*N)
     constraint_relaxation: float = 0.01  # epsilon: relaxation band (x V0) on the linearised volume constraint
@@ -434,10 +445,75 @@ class HcaOpts:
     backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
     damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
     addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
+    backoff_mode: str = "gate"       # "gate" (the classic/proportional gate above) | "multipoint" (LS-TaSC-style: fit violation(vf) over the run's own recent history and step to the predicted constraint boundary, at zero extra solves; falls back to the gate until enough usable points exist)
+    multipoint_window: int = 5       # multipoint only: number of recent (vf, violation) history points the local fit uses
+    utilization_target: float = 1.0  # multipoint only: the constraint-utilisation ratio the controller steers the design onto (< 1 leaves a safety margin below the limits, e.g. 0.98)
     # --- HCA specific ---
     kp: float = 1.0                  # proportional gain of the density controller
     move_limit: float = 1.0          # cap on |dx_e| per iteration (1.0 = uncapped). Keep min(kp, move_limit) > 0.5 or no element can be removed in a single step
     field_history_weight: float = 1.0  # extra HCA-internal blend of the energy field with previous iterations (LS-TaSC's multi-iteration weighted sum); 1.0 = off (the shared history_weight already blends iterations)
+    # --- MHCA variable neighbourhood (Afrousheh, Marzbanrad & Goehlich, SMO 2019) ---
+    radius_start: float = 0.0        # MHCA: initial CA neighbourhood radius [mm], decaying to filter_radius over radius_iters iterations (wide early = global search, narrow late = local refinement). 0 = off (fixed filter_radius, classic HCA)
+    radius_iters: int = 20           # MHCA: iterations over which the neighbourhood radius decays linearly from radius_start to filter_radius
+    radius_steps: int = 4            # MHCA: number of distinct radii the schedule quantises to (each distinct radius builds one filter matrix, cached -- keep small at large meshes)
+
+
+@dataclass
+class SaipOpts:
+    """SAIP (Sequential Approximate Integer Programming) optimiser knobs — a
+    config-selectable alternative to BESO/TOBS (Liang & Cheng, *CMAME* 348:1005,
+    2019; the 128-line code, *SMO* 61:411, 2020; review *Eng. Opt.* 2025; the
+    conservative SCIP variant: Sun, Cheng, Zhang & Liang, *Acta Mech. Sin.* 40,
+    2024).
+
+    Like TOBS the design variables are the binary alive/void flags and each
+    iteration picks a capped set of element flips — but the subproblem
+    ``max sum_e s_e x_e  s.t.  sum_e vol_e x_e <= budget, sum|dx| <= K`` is
+    solved by the family's *canonical relaxation*: a per-element analytic
+    optimum under a single volume multiplier ``lambda``, found by bisection —
+    no integer-programming solver, microseconds at any mesh size. The basic
+    SAIP sensitivity for compliance-type objectives is the element strain
+    energy (`u_e^T k_e u_e`), i.e. exactly the ``/ANIM/ELEM/ENER`` field the
+    other optimisers already use.
+
+    ``oscillation_damping`` adds a lightweight conservatism in the *spirit* of
+    SCIP's moving-asymptote subproblems (it is NOT the paper's
+    reciprocal-variable formulation): an element that flipped between the last
+    two designs ranks lower for immediately flipping back, breaking the
+    add/remove ping-pong that plain successive linearisation is prone to.
+
+    Protected elements are forced to stay alive and disconnected islands are
+    dropped, exactly like BESO. The first block mirrors the shared knobs (so a
+    SAIP run is fully specified by its own config block); the second block is
+    SAIP specific.
+    """
+    # --- shared semantics with BESO ---
+    evolution_rate: float = 0.02     # ER: target volume fraction removed per iteration
+    filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm]
+    history_weight: float = 0.5      # blend of current & previous-iteration sensitivity
+    target_volume_fraction: float = 0.5  # stop reducing once this volume fraction remains
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
+    max_iter: int = 150
+    convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
+    convergence_window: int = 5
+    protect_layers: int = 2          # element layers around protected nodes to freeze
+    contact_protect_dist: float = 0.0  # also protect design elements within this distance of a rigid node
+    protect_bc_nodes: bool = True    # freeze elements touching the BC node-group
+    archive_iterations: bool = True    # keep each iteration's deck/anim/listing in work_dir/iter_NNNN/ (on by default)
+    archive_restart: bool = False      # when archiving, also copy the restart (.rst). OFF by default (~345 MB/iter); opt in for replayable solver state
+    # --- feasibility back-off controller (defaults = the classic binary gate) ---
+    backoff_gain: float = 0.0        # proportional back-off: when infeasible, grow by ER*min(gain*(v-1), cap) with v the worst value/limit ratio, instead of a fixed +ER step. 0 = classic binary gate
+    backoff_cap: float = 4.0         # cap on the proportional growth step, in multiples of ER (only used when backoff_gain > 0)
+    backoff_floor: float = 0.25      # floor on the proportional back-step, in fractions of ER: er_eff = ER*max(floor, min(gain*(v-1), cap)), so a persistent hair-above-the-limit violation still backs off meaningfully instead of sitting in a limit cycle pinned just above the allowable (only used when backoff_gain > 0)
+    damping_threshold: float = 1.0   # while feasible with v above this, slow removal by (1-v)/(1-threshold) so the design glides into the limit instead of ping-ponging. 1.0 = off (full rate until infeasible)
+    addback_stress_bias: float = 0.0  # when a stress limit is violated, scale the update's sensitivity by (1 + bias * filtered vonmises/sigma_allow) so recovered material lands near the overstressed region. 0 = off
+    backoff_mode: str = "gate"       # "gate" (the classic/proportional gate above) | "multipoint" (LS-TaSC-style: fit violation(vf) over the run's own recent history and step to the predicted constraint boundary, at zero extra solves; falls back to the gate until enough usable points exist)
+    multipoint_window: int = 5       # multipoint only: number of recent (vf, violation) history points the local fit uses
+    utilization_target: float = 1.0  # multipoint only: the constraint-utilisation ratio the controller steers the design onto (< 1 leaves a safety margin below the limits, e.g. 0.98)
+    # --- SAIP specific ---
+    flip_limit: float = 0.05         # move limit: max fraction of elements flipped per step (the trust region that keeps successive linearisations valid)
+    oscillation_damping: float = 0.5  # rank-down factor on elements that flipped between the last two designs (SCIP-inspired conservatism; 1.0 = off). Candidacy is unchanged -- only the priority within the flip cap drops
 
 
 @dataclass
@@ -802,6 +878,7 @@ class Config:
     levelset: LevelSet = field(default_factory=LevelSet)
     tobs: TobsOpts = field(default_factory=TobsOpts)
     hca: HcaOpts = field(default_factory=HcaOpts)
+    saip: SaipOpts = field(default_factory=SaipOpts)
     manufacturing: ManufacturingOpts = field(default_factory=ManufacturingOpts)
     d3plot: D3plotOpts = field(default_factory=D3plotOpts)
     smooth: SmoothOpts = field(default_factory=SmoothOpts)
@@ -814,8 +891,10 @@ class Config:
     load_cases: list = field(default_factory=list)
     # Which topology optimiser to drive the loop: "beso" (default, bi-directional
     # element removal), "levelset" (nodal level-set, smoother boundaries), "tobs"
-    # (binary ILP flips, Sivapuram & Picelli 2018) or "hca" (hybrid cellular
-    # automata, LS-TaSC-style density controller). The active block's shared knobs
+    # (binary ILP flips, Sivapuram & Picelli 2018), "hca" (hybrid cellular
+    # automata, LS-TaSC-style density controller) or "saip" (sequential
+    # approximate integer programming, Liang & Cheng 2019 -- canonical-relaxation
+    # flips, no ILP solver). The active block's shared knobs
     # (target_volume_fraction, max_iter, convergence, protect_*, archive_*) are read
     # via ``active_opts()``.
     optimizer: str = "beso"
@@ -844,6 +923,7 @@ class Config:
             levelset=build(LevelSet, data.get("levelset")),
             tobs=build(TobsOpts, data.get("tobs")),
             hca=build(HcaOpts, data.get("hca")),
+            saip=build(SaipOpts, data.get("saip")),
             manufacturing=build(ManufacturingOpts, data.get("manufacturing")),
             d3plot=build(D3plotOpts, data.get("d3plot")),
             smooth=build(SmoothOpts, data.get("smooth")),
@@ -872,8 +952,8 @@ class Config:
 
     # ---- optimiser selection ----------------------------------------------
     def optimizer_name(self) -> str:
-        """Normalised optimiser selector: ``"beso"``, ``"levelset"``, ``"tobs"``
-        or ``"hca"``."""
+        """Normalised optimiser selector: ``"beso"``, ``"levelset"``, ``"tobs"``,
+        ``"hca"`` or ``"saip"``."""
         return (self.optimizer or "beso").strip().lower()
 
     def active_opts(self):
@@ -888,6 +968,8 @@ class Config:
             return self.tobs
         if name == "hca":
             return self.hca
+        if name == "saip":
+            return self.saip
         return self.beso
 
     def load_case_list(self) -> list[ResolvedCase]:
