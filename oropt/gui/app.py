@@ -10,7 +10,7 @@ status files the loop writes (``status.json`` / ``history.csv`` /
 ``topology_latest.vtu``). Closing the browser never stops the run; reopening
 re-attaches to it.
 
-The page is laid out as a sidebar (config selection + run/queue control) and six
+The page is laid out as a sidebar (config selection + run/queue control) and seven
 tabs; each tab's body lives in its own ``render_*_tab`` function below so this
 script stays readable as orchestration rather than one long top-level block.
 """
@@ -39,6 +39,7 @@ from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
 from oropt.gui import growthprep
+from oropt.gui import history as run_history
 from oropt.gui.runstate import find_active_run
 from oropt.growthmesh import GROWTH_MESH_DIRNAME, point_config_at
 from oropt.loop import copy_iter0, preview_growth_boxes
@@ -729,7 +730,7 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "Max iterations", step=10, key=f"mi_{opt_name}"))
     _seed_widget(f"sens_{opt_name}", aopt.sensitivity)
     aopt.sensitivity = h[2].selectbox(
-        "Sensitivity", ["energy", "vonmises", "blend"],
+        "Sensitivity", ["energy", "vonmises", "blend", "tdsa"],
         key=f"sens_{opt_name}")
 
     st.markdown("**Feasibility back-off** — how the volume target reacts to the "
@@ -1426,8 +1427,73 @@ def _add_growth_overlay(pl, pv, boxes) -> int:
     return drawn
 
 
+# ---- run-history browser + downloads (shared by Monitor / Re-postprocessing /
+# Compare; logic lives in oropt.gui.history, these only draw) -----------------
+def _render_run_browser(default_root: Path, key: str):
+    """Runs-root input + past-run picker; returns the chosen RunEntry or None.
+
+    Widget keys are namespaced by *key* because every tab body renders on each
+    rerun, so each tab needs its own widget identities. Options are keyed by the
+    run's *path* (stable while a live run's headline label keeps changing)."""
+    root_txt = st.text_input(
+        "Runs root", str(default_root), key=f"{key}_root",
+        help="Folder scanned (up to 3 levels deep) for run folders — any "
+             "directory holding a `status.json`.").strip()
+    entries = run_history.scan_runs(Path(root_txt)) if root_txt else []
+    if not entries:
+        st.caption("No runs found under this root.")
+        return None
+    by_path = {str(e.path): e for e in entries}
+    pick = st.selectbox(
+        "Past runs (newest first)", list(by_path),
+        format_func=lambda p: run_history.entry_label(by_path[p]),
+        key=f"{key}_pick")
+    return by_path[pick]
+
+
+def _render_download_buttons(folder: Path, key: str) -> None:
+    """⬇ Download buttons for every shippable artefact *folder* holds (report /
+    smoothed surface / evolution GIF / history / manufacturability audit).
+
+    Must stay OUTSIDE any ``run_every`` fragment: Streamlit forbids
+    ``st.download_button`` in auto-rerun fragments — which also means the
+    artefact bytes are only re-read on a full rerun, not every refresh tick."""
+    arts = run_history.downloadable_artifacts(folder)
+    if not arts:
+        return
+    st.markdown("---")
+    st.markdown("#### ⬇ Downloads")
+    cols = st.columns(min(len(arts), 3))
+    for i, (label, path) in enumerate(arts):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue                      # deleted/locked mid-render: skip quietly
+        cols[i % len(cols)].download_button(
+            label, data, file_name=path.name,
+            mime=run_history.artifact_mime(path), key=f"{key}_dl_{path.name}")
+
+
 # ---- Monitor tab -----------------------------------------------------------
 def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
+    # 🗂 Run-history browser: optionally point the Monitor at a PAST run's folder
+    # (read-only, like everything the Monitor does). The default stays whatever
+    # find_active_run resolved — following the live run is never broken, only
+    # explicitly overridden until 🟢 Follow live run clears it.
+    with st.expander("🗂 Run history — browse past runs"):
+        picked = _render_run_browser(work.parent, key="hist_mon")
+        bc = st.columns(2)
+        if bc[0].button("📡 Monitor selected run", key="hist_mon_use",
+                        width="stretch", disabled=picked is None):
+            st.session_state["hist_mon_folder"] = str(picked.path)
+        if bc[1].button("🟢 Follow live run", key="hist_mon_live", width="stretch",
+                        disabled="hist_mon_folder" not in st.session_state):
+            st.session_state.pop("hist_mon_folder", None)
+    browsed = st.session_state.get("hist_mon_folder")
+    if browsed:
+        work = Path(browsed)
+        st.caption("📌 Monitoring a browsed run folder — click 🟢 Follow live "
+                   "run above to re-attach to the live run.")
     @st.fragment(run_every=refresh_s)
     def monitor():
         st.caption(f"📂 monitoring `{work}`")     # which run folder this view reads
@@ -1601,6 +1667,11 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
 
     queue_monitor()
 
+    # ⬇ Downloads for the monitored run's shippable artefacts (U8). Outside the
+    # fragments above by requirement (download_button is disallowed in a
+    # run_every fragment), so the bytes are only read on full reruns.
+    _render_download_buttons(work, key="mon")
+
 
 # ---- Re-postprocessing tab -------------------------------------------------
 def render_postprocess_tab(cfg: Config, default_folder: Path) -> None:
@@ -1620,6 +1691,16 @@ def render_postprocess_tab(cfg: Config, default_folder: Path) -> None:
         "re-solving. Set the run folder, then use the tools below (re-render the "
         "evolution animation, or re-generate the report). More tools may be added "
         "here over time.")
+
+    # 🗂 Run-history browser (U6): pick a past run instead of typing its path.
+    # Rendered BEFORE the "Run folder" widget so 📂 Use selected run can seed the
+    # same "reanim_folder" session key on this very rerun (a keyed widget reads
+    # its session state at instantiation).
+    with st.expander("🗂 Run history — browse past runs"):
+        picked = _render_run_browser(default_folder.parent, key="hist_pp")
+        if st.button("📂 Use selected run", key="hist_pp_use",
+                     disabled=picked is None):
+            st.session_state["reanim_folder"] = str(picked.path)
 
     # Keep the raw text: Path("") stringifies to "." (truthy), so a CLEARED
     # field would silently mean "operate on the GUI's CWD" — the blank-folder
@@ -1725,6 +1806,55 @@ def render_postprocess_tab(cfg: Config, default_folder: Path) -> None:
             st.success(f"Wrote `{out.name}` (+ `report.md`) in {folder}")
         else:
             st.warning("No report written — see the log above.")
+
+    # ⬇ Downloads for this run folder's shippable artefacts (U8) — natural here
+    # since the tools above (re)generate exactly these files.
+    if folder_txt and folder.is_dir():
+        _render_download_buttons(folder, key="pp")
+
+
+# ---- Compare tab ------------------------------------------------------------
+def render_compare_tab(default_root: Path) -> None:
+    """Side-by-side comparison of past runs (U6): headline table + overlaid
+    convergence traces. All logic lives in :mod:`oropt.gui.history`; this only
+    draws the picker, the table and three ``st.line_chart`` overlays."""
+    st.subheader("Compare runs")
+    st.caption(
+        "Pick past runs (any folder holding a `status.json` under the runs "
+        "root) to see their headline metrics side by side and overlay their "
+        "`history.csv` convergence traces.")
+    root_txt = st.text_input(
+        "Runs root", str(default_root), key="cmp_root",
+        help="Folder scanned (up to 3 levels deep) for run folders — any "
+             "directory holding a `status.json`.").strip()
+    entries = run_history.scan_runs(Path(root_txt)) if root_txt else []
+    if not entries:
+        st.info("No runs found under this root — a run appears here once its "
+                "`status.json` exists.")
+        return
+    by_path = {str(e.path): e for e in entries}
+    picked = st.multiselect(
+        "Runs to compare (newest first)", list(by_path),
+        format_func=lambda p: run_history.entry_label(by_path[p]),
+        key="cmp_runs")
+    sel = [by_path[p] for p in picked if p in by_path]
+    if not sel:
+        st.caption("Pick at least one run above.")
+        return
+    st.dataframe(pd.DataFrame(run_history.compare_table(sel)),
+                 hide_index=True, use_container_width=True)
+    named = {e.name: run_history.load_history_series(e.path) for e in sel}
+    cols = st.columns(3)
+    for col, (title, metric) in zip(cols, (
+            ("Volume fraction", "volume_fraction"),
+            ("σ_max [MPa]", "sigma_max"),
+            ("disp [mm]", "disp"))):
+        data = run_history.overlay_series(named, metric)
+        col.caption(title)
+        if data:
+            col.line_chart(pd.DataFrame(data))
+        else:
+            col.caption("(no history data)")
 
 
 # ---- Queue tab -------------------------------------------------------------
@@ -1939,9 +2069,9 @@ if qcol[1].button("⏸ Pause queue", width="stretch", disabled=not runner_alive)
     st.rerun()
 
 # ---- tabs (each body lives in a render_*_tab function above) ---------------
-tab_in, tab_lc, tab_con, tab_mon, tab_anim, tab_q = st.tabs(
+tab_in, tab_lc, tab_con, tab_mon, tab_cmp, tab_anim, tab_q = st.tabs(
     ["📥 Input", "🔀 Load cases", "🎚 Optimizer / Output", "📊 Monitor",
-     "🛠 Re-postprocessing", "🧮 Queue"])
+     "📊 Compare", "🛠 Re-postprocessing", "🧮 Queue"])
 with tab_in:
     render_input_tab(cfg)
 with tab_lc:
@@ -1950,6 +2080,8 @@ with tab_con:
     render_constraints_tab(cfg, cfg_path)
 with tab_mon:
     render_monitor_tab(cfg, live_dir, refresh_s)   # follow the live run's folder
+with tab_cmp:
+    render_compare_tab(work.parent)                # browse / overlay past runs
 with tab_anim:
     render_postprocess_tab(cfg, live_dir)          # re-run post-processing on a run
 with tab_q:

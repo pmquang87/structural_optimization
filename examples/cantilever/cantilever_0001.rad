@@ -1,0 +1,7 @@
+/RUN/cantilever/1
+                 1.0
+/ANIM/DT
+0. 1.0
+/ANIM/ELEM/ENER
+/ANIM/ELEM/VONM
+/IMPL/NONLIN/1

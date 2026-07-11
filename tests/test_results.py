@@ -4,8 +4,20 @@ import numpy as np
 from oropt.results import parse_vtk
 
 
-def _make_vtk(path, erosion=(1, 1, 1)):
-    """Synthetic anim_to_vtk-style file: 2 design tets + 1 rigid triangle."""
+#: per-cell 6-component stress tensor used by the tensor-parsing tests
+#: (rows: design tet 1, design tet 2, rigid triangle)
+_STRESS_3 = np.array([[10.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                      [20.0, 6.0, 7.0, 8.0, 9.0, 1.5],
+                      [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+
+
+def _make_vtk(path, erosion=(1, 1, 1), stress_name=None):
+    """Synthetic anim_to_vtk-style file: 2 design tets + 1 rigid triangle.
+
+    *stress_name* (optional) adds ``_STRESS_3`` as a 6-component cell array
+    under that name — the exact name the real converter emits for
+    /ANIM/BRICK/TENS/STRESS is unverified, so tests exercise several.
+    """
     import pyvista as pv
     points = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1],
                        [1, 1, 1], [2, 2, 2]], dtype=float)
@@ -18,6 +30,8 @@ def _make_vtk(path, erosion=(1, 1, 1)):
     g.cell_data["EROSION_STATUS"] = np.array(erosion)
     g.cell_data["3DELEM_Specific_Energy"] = np.array([11.0, 22.0, 0.0])
     g.cell_data["3DELEM_Von_Mises"] = np.array([100.0, 250.0, 0.0])
+    if stress_name is not None:
+        g.cell_data[stress_name] = _STRESS_3.copy()
     g.point_data["NODE_ID"] = np.array([1, 2, 3, 4, 5, 6])
     disp = np.zeros((6, 3)); disp[4] = [0.3, 0.4, 0.0]      # NODE_ID 5 -> |d|=0.5
     g.point_data["Displacement"] = disp
@@ -40,6 +54,44 @@ def test_erosion_excluded(tmp_path):
     r = parse_vtk(vtk, design_part_id=60000000, disp_node_id=5)
     assert r.element_ids.tolist() == [60000001]
     assert r.sigma_max == 100.0
+
+
+def test_parse_stress_tensor_absent_is_none(tmp_path):
+    vtk = tmp_path / "s0.vtk"
+    _make_vtk(vtk)                                           # no tensor array
+    r = parse_vtk(vtk, design_part_id=60000000)
+    assert r.stress is None
+
+
+def test_parse_stress_tensor_candidate_name(tmp_path):
+    """A 6-component cell array under a known candidate name lands in
+    Results.stress, aligned with element_ids and part-filtered."""
+    vtk = tmp_path / "s1.vtk"
+    _make_vtk(vtk, stress_name="3DELEM_Stress_tensor")
+    r = parse_vtk(vtk, design_part_id=60000000)
+    assert r.element_ids.tolist() == [60000001, 60000002]
+    assert r.stress is not None and r.stress.shape == (2, 6)
+    assert np.allclose(r.stress, _STRESS_3[:2])              # rigid triangle dropped
+
+
+def test_parse_stress_tensor_fallback_name_scan(tmp_path):
+    """An unanticipated converter spelling still matches via the case-insensitive
+    'tens'/'stress' 6-component scan."""
+    vtk = tmp_path / "s2.vtk"
+    _make_vtk(vtk, stress_name="3DELEM_TENS/STRESS_weird")
+    r = parse_vtk(vtk, design_part_id=60000000)
+    assert r.stress is not None
+    assert np.allclose(r.stress, _STRESS_3[:2])
+
+
+def test_parse_stress_tensor_erosion_filtered(tmp_path):
+    """The tensor gets the same keep-filtering as energy/vonmises."""
+    vtk = tmp_path / "s3.vtk"
+    _make_vtk(vtk, erosion=(1, 0, 1), stress_name="3DELEM_Stress_tensor")
+    r = parse_vtk(vtk, design_part_id=60000000)
+    assert r.element_ids.tolist() == [60000001]
+    assert r.stress.shape == (1, 6)
+    assert np.allclose(r.stress[0], _STRESS_3[0])
 
 
 def test_parse_multiple_disp_nodes(tmp_path):

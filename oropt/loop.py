@@ -772,13 +772,27 @@ def _solve_case(cfg: Config, case: ResolvedCase, deck: Deck, alive: np.ndarray,
     starter = solve_dir / f"{case.stem}_0000.rad"
     engine = solve_dir / f"{case.stem}_0001.rad"
     deck.write(starter, alive, no_pin=no_pin)
+    if getattr(cfg, "demo", None) is not None and cfg.demo.enabled:
+        # Demo backend: answer the solve with deterministic synthetic physics
+        # (oropt.demo) — no starter/engine/anim, no OpenRadioss install. The
+        # deck is still written above so the deletion/pinning path stays
+        # exercised; everything downstream (feasibility, update, status,
+        # post-processing) sees a normal (RunResult, Results) pair.
+        from .demo import demo_solve
+        return demo_solve(deck, alive, case, cfg.demo)
     if case.fast_mode:
         if fast_tie is None:                     # precomputed in run_optimization
             raise ValueError(f"fast-mode case {case.name!r} has no discovered tie")
         build_fast_case(deck, alive, starter, case.engine, engine, fast_tie,
                         anim_dt=anim_dt)
     else:
-        prepare_engine(case.engine, engine, anim_dt=anim_dt)
+        # sensitivity: tdsa needs the per-element stress tensor in the anim —
+        # inject /ANIM/BRICK/TENS/STRESS so extraction can feed the topological-
+        # derivative ranking (absent tensor -> map_sensitivity falls back to
+        # energy with a warning). Other modes keep the engine deck byte-identical.
+        want_tensor = getattr(cfg.active_opts(), "sensitivity", "energy") == "tdsa"
+        prepare_engine(case.engine, engine, anim_dt=anim_dt,
+                       anim_stress_tensor=want_tensor)
     res = (reuse_iter0_solve(reuse_dir, solve_dir, case.stem, starter, log)
            if reuse_dir is not None else None)
     if res is None:

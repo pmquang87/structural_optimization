@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .config import Config, unknown_keys
 from .deck import read_solid_geometry
@@ -30,6 +30,7 @@ WARNING = "warning"
 
 VALID_OPTIMIZERS = ("beso", "levelset", "tobs", "hca", "saip")
 VALID_GROWTH_SHAPES = ("box", "cylinder", "sphere", "polyhedron")
+VALID_SENSITIVITIES = ("energy", "vonmises", "blend", "tdsa")
 
 
 def _is_vec3(v) -> bool:
@@ -147,21 +148,11 @@ def _docker_image_present(cfg: Config) -> bool | None:
     return cp.returncode == 0
 
 
-def check_config(cfg: Config, *, raw: dict | None = None,
-                 probe_docker_image: bool = False) -> list[Problem]:
-    """Structured validation of *cfg* -- the engine behind :func:`validate_config`.
+_Say = Callable[[str], None]
 
-    Pure and fast (no solver, no file writes). The only optional side effect is a
-    short ``docker image inspect`` when *probe_docker_image* is set and the Docker
-    backend is selected; it is off by default so the check stays hermetic.
 
-    Pass *raw* (the mapping the config was parsed from, e.g.
-    :meth:`Config.read_yaml_dict`) to also **error** on unrecognised keys that
-    :meth:`Config.from_dict` silently dropped -- a typo'd or misplaced knob (e.g.
-    ``evolution_ratte``) would otherwise revert to its default unnoticed and the
-    run would spend hours optimising the wrong thing, so a stray key blocks the
-    launch rather than merely warning.
-    """
+def _collector() -> tuple[list[Problem], _Say, _Say]:
+    """A fresh problem list plus its ``err``/``warn`` appenders (one per helper)."""
     problems: list[Problem] = []
 
     def err(msg: str) -> None:
@@ -170,21 +161,38 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     def warn(msg: str) -> None:
         problems.append(Problem(WARNING, msg))
 
-    # --- unrecognised config keys (silently dropped by Config.from_dict) ---
-    # An error, not a warning: a typo'd knob reverts to its default and the run
-    # would silently optimise the wrong thing for hours. Blocking the launch is
-    # cheaper than discovering it afterwards.
+    return problems, err, warn
+
+
+def _check_unknown_keys(raw: dict | None) -> list[Problem]:
+    """Unrecognised config keys (silently dropped by ``Config.from_dict``).
+
+    An error, not a warning: a typo'd knob reverts to its default and the run
+    would silently optimise the wrong thing for hours. Blocking the launch is
+    cheaper than discovering it afterwards. No-op when *raw* is ``None``.
+    """
+    problems, err, _warn = _collector()
     if raw is not None:
         for key in unknown_keys(raw):
             err(f"unrecognised config key {key!r} -- typo or wrong section? "
                 "(it would be ignored and its default used). Remove or correct it.")
+    return problems
 
-    # --- optimiser selector ---
+
+def _check_optimizer(cfg: Config) -> list[Problem]:
+    """The optimiser selector: must name one of the known algorithms."""
+    problems, err, _warn = _collector()
     if cfg.optimizer_name() not in VALID_OPTIMIZERS:
         err(f"optimizer must be one of {', '.join(VALID_OPTIMIZERS)} "
             f"(got {cfg.optimizer!r})")
+    return problems
 
-    # --- model directory / decks ---
+
+def _check_model_and_decks(cfg: Config) -> list[Problem]:
+    """Model directory and per-load-case decks: the case dir must be a real
+    directory, every case needs a stem with existing starter/engine decks, and
+    stems must be distinct (the whole file layout is keyed by them)."""
+    problems, err, _warn = _collector()
     m = cfg.model
     if not cfg.load_cases:
         err("no load cases defined -- define at least one load case (Load cases tab)")
@@ -214,13 +222,23 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             + ", ".join(repr(s) for s in dup_stems)
             + " (their per-iteration archives / iter-0 reuse / d3plots would "
               "overwrite each other)")
+    return problems
 
-    # --- run / output folder ---
+
+def _check_run_folder(cfg: Config) -> list[Problem]:
+    """The run/output folder must be creatable (``mkdir -p``-able)."""
+    problems, err, _warn = _collector()
     run_folder = Path(cfg.run_folder())
     if not _creatable(run_folder):
         err(f"run folder is not creatable: {run_folder.resolve()}")
+    return problems
 
-    # --- solver backend (shared source of truth with runner.run_solver) ---
+
+def _check_backend(cfg: Config, probe_docker_image: bool) -> list[Problem]:
+    """Solver backend readiness: missing executables/CLI (shared source of truth
+    with ``runner.run_solver`` via :func:`backend_problems`), the optional Docker
+    image probe, and the native backend's np=1 requirement."""
+    problems, err, warn = _collector()
     for msg in backend_problems(cfg):
         err(msg)
     if cfg.docker.enabled:
@@ -230,7 +248,13 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     elif cfg.run.np != 1:
         warn(f"run.np={cfg.run.np}: the native implicit + solid-contact solver "
              "requires np=1 (it segfaults otherwise)")
-    # --- engine non-convergence watchdog ---
+    return problems
+
+
+def _check_run_limits(cfg: Config) -> list[Problem]:
+    """Run-level watchdog/budget knobs: the engine soft-vs-hard timeout ordering,
+    the wall-clock budget, and the divergence-abort counters."""
+    problems, err, warn = _collector()
     if cfg.run.engine_soft_timeout_s > 0 \
             and cfg.run.engine_soft_timeout_s >= cfg.run.engine_timeout_s:
         warn(f"run.engine_soft_timeout_s={cfg.run.engine_soft_timeout_s:g} >= "
@@ -246,8 +270,17 @@ def check_config(cfg: Config, *, raw: dict | None = None,
     if cfg.run.diverge_max_cycles < 0:
         err(f"run.diverge_max_cycles must be >= 0 (0 = off): got "
             f"{cfg.run.diverge_max_cycles}")
+    return problems
 
-    # --- numeric sanity (knobs of the active optimiser block) ---
+
+def _check_optimizer_knobs(cfg: Config) -> list[Problem]:
+    """Numeric sanity of the *active* optimiser block's knobs -- volume target,
+    rates, the feasibility back-off controller (gain/cap/floor, gate vs
+    multipoint), and the optimiser-specific extras (level-set, HCA, TOBS, SAIP)
+    -- plus the warnings for controllers configured without any feasibility
+    limit to react to."""
+    problems, err, warn = _collector()
+    cases = cfg.load_case_list()
     opt = cfg.active_opts()
     tvf = opt.target_volume_fraction
     if not (0 < tvf <= 1):
@@ -283,6 +316,12 @@ def check_config(cfg: Config, *, raw: dict | None = None,
             and not any(c.sigma_allow is not None for c in cases):
         warn("addback_stress_bias is set but no load case sets a sigma_allow "
              "limit -- the stress-responsive add-back bias will never engage")
+    if getattr(opt, "sensitivity", "energy") not in VALID_SENSITIVITIES:
+        # map_sensitivity silently falls back to "energy" for an unknown value --
+        # a typo'd mode would run the whole optimisation on the wrong ranking,
+        # so block it here instead.
+        err(f"sensitivity must be one of {', '.join(VALID_SENSITIVITIES)}: "
+            f"got {opt.sensitivity!r}")
     if opt.backoff_mode not in ("gate", "multipoint"):
         err(f"backoff_mode must be 'gate' or 'multipoint': "
             f"got {opt.backoff_mode!r}")
@@ -331,8 +370,15 @@ def check_config(cfg: Config, *, raw: dict | None = None,
         warn("backoff_mode is 'multipoint' but no load case sets a "
              "sigma_allow or d_allow limit -- there is no violation signal "
              "to fit, so the controller will always fall back to the gate")
+    return problems
 
-    # --- per-case weights & feasibility limits ---
+
+def _check_load_cases(cfg: Config) -> list[Problem]:
+    """Per-load-case weights and feasibility limits: non-negative weights with at
+    least one positive, optional sigma_allow > 0, and displacement constraints
+    each naming a node with an optional d_allow > 0."""
+    problems, err, _warn = _collector()
+    cases = cfg.load_case_list()
     weights = [c.weight for c in cases]
     for c in cases:
         if c.weight < 0:
@@ -351,12 +397,25 @@ def check_config(cfg: Config, *, raw: dict | None = None,
                 err(f"{where}: node id is required")
             if dc.d_allow is not None and dc.d_allow <= 0:
                 err(f"{where}: d_allow must be > 0: got {dc.d_allow}")
+    return problems
 
-    # --- growth regions (add-material boxes / spheres / cylinders) ---
-    # Skipped entirely when growth is switched off: the boxes are retained in the
-    # config (so the GUI can toggle back on) but ignored at run time, so their
-    # coordinates/back-off-ratio caveats aren't relevant to this run.
-    boxes = (m.growth_boxes or []) if getattr(m, "growth_enabled", True) else []
+
+def _growth_boxes(cfg: Config) -> list:
+    """The growth regions this run will actually use: the configured boxes, or
+    none at all when growth is switched off (the boxes are retained in the config
+    so the GUI can toggle back on, but ignored at run time)."""
+    m = cfg.model
+    return (m.growth_boxes or []) if getattr(m, "growth_enabled", True) else []
+
+
+def _check_growth(cfg: Config) -> list[Problem]:
+    """Growth (add-material) regions: per-shape geometry sanity (box corners and
+    local frame, sphere/cylinder radii and axes, polyhedron point sets), the
+    original/expansion element-id boundary, and the carve / BESO add-ratio
+    interplay warnings. Skipped entirely when growth is switched off."""
+    problems, err, warn = _collector()
+    m = cfg.model
+    boxes = _growth_boxes(cfg)
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
         kind = b.shape_kind()
@@ -420,8 +479,17 @@ def check_config(cfg: Config, *, raw: dict | None = None,
              f"evolution_rate={cfg.beso.evolution_rate}: per-iteration growth "
              "into the boxes is capped below the feasibility back-off step; "
              "consider max_add_ratio >= evolution_rate")
+    return problems
 
-    # --- growth keep-out deck (forbidden growth space: nearby parts) ---
+
+def _check_growth_keepout(cfg: Config) -> list[Problem]:
+    """The optional growth keep-out deck (forbidden growth space: nearby parts):
+    clearance-band sanity, the deck must exist and parse, and its requested part
+    ids must actually contribute solid elements."""
+    problems, err, warn = _collector()
+    m = cfg.model
+    boxes = _growth_boxes(cfg)
+    case_dir = Path(m.case_dir).resolve()
     if m.growth_keepout_rad:
         clr = m.growth_keepout_clearance_mm
         if isinstance(clr, bool) or not isinstance(clr, (int, float)) \
@@ -456,8 +524,39 @@ def check_config(cfg: Config, *, raw: dict | None = None,
                     warn("growth keep-out deck has no solid elements for part "
                          f"id(s) {missing} (found {found}); those parts "
                          "contribute nothing to the keep-out")
-
     return problems
+
+
+def check_config(cfg: Config, *, raw: dict | None = None,
+                 probe_docker_image: bool = False) -> list[Problem]:
+    """Structured validation of *cfg* -- the engine behind :func:`validate_config`.
+
+    Pure and fast (no solver, no file writes). The only optional side effect is a
+    short ``docker image inspect`` when *probe_docker_image* is set and the Docker
+    backend is selected; it is off by default so the check stays hermetic.
+
+    Pass *raw* (the mapping the config was parsed from, e.g.
+    :meth:`Config.read_yaml_dict`) to also **error** on unrecognised keys that
+    :meth:`Config.from_dict` silently dropped -- a typo'd or misplaced knob (e.g.
+    ``evolution_ratte``) would otherwise revert to its default unnoticed and the
+    run would spend hours optimising the wrong thing, so a stray key blocks the
+    launch rather than merely warning.
+
+    Composes the ``_check_*`` helpers; their order (and each helper's internal
+    order) is the report order, so it is part of the observable behaviour.
+    """
+    return [
+        *_check_unknown_keys(raw),
+        *_check_optimizer(cfg),
+        *_check_model_and_decks(cfg),
+        *_check_run_folder(cfg),
+        *_check_backend(cfg, probe_docker_image),
+        *_check_run_limits(cfg),
+        *_check_optimizer_knobs(cfg),
+        *_check_load_cases(cfg),
+        *_check_growth(cfg),
+        *_check_growth_keepout(cfg),
+    ]
 
 
 def validate_config(cfg: Config, *, raw: dict | None = None,

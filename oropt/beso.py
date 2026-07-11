@@ -1,7 +1,9 @@
 """BESO core: rank, filter, threshold, add-back, connectivity, constraint gate.
 
 The sensitivity number is the per-element internal-energy density read from
-``/ANIM/ELEM/ENER`` (optionally von-Mises, or a blend). It is spatially filtered
+``/ANIM/ELEM/ENER`` (optionally von-Mises, a blend, or the topological
+derivative of compliance from the stress tensor — ``sensitivity: tdsa``,
+:mod:`oropt.tdsa`). It is spatially filtered
 and averaged with the previous iteration (Huang-Xie) for mesh-independence, then
 a volume threshold keeps the highest-ranked elements: low-ranked solids are
 deleted, high-ranked voids may be re-added (bi-directional), protected elements
@@ -11,11 +13,38 @@ current design feasible.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
+from . import tdsa
 from .config import Beso as BesoCfg
 from .mesh import Mesh
 from .results import Results
+
+#: default Poisson ratio for the "tdsa" sensitivity (AlSi10Mg-ish); overridable
+#: per optimiser block via a ``tdsa_nu`` config field (read with getattr so the
+#: config dataclasses need no change until the knob is formally added).
+TDSA_NU_DEFAULT = 0.33
+
+# One-time warning latch: "tdsa" requested but the animation carried no stress
+# tensor (engine deck missing /ANIM/BRICK/TENS/STRESS). The run must not crash
+# mid-optimisation, so map_sensitivity falls back to the energy field -- but
+# silently doing so every iteration would hide a misconfiguration, hence one
+# loud warning on the first occurrence.
+_tdsa_fallback_warned = False
+
+
+def _warn_tdsa_fallback() -> None:
+    global _tdsa_fallback_warned
+    if not _tdsa_fallback_warned:
+        warnings.warn(
+            "sensitivity 'tdsa' requested but Results.stress is None -- the "
+            "animation carries no stress tensor (engine deck lacks "
+            "/ANIM/BRICK/TENS/STRESS; see deck.prepare_engine's "
+            "anim_stress_tensor). Falling back to the energy sensitivity for "
+            "this run.", RuntimeWarning, stacklevel=4)
+        _tdsa_fallback_warned = True
 
 
 # ---- shared sensitivity helpers (reused by other optimisers, e.g. level-set) --
@@ -49,19 +78,33 @@ def id_positions(elem_ids: np.ndarray,
 
 def map_sensitivity(results: Results, elem_ids: np.ndarray,
                     sensitivity: str = "energy",
-                    blend_weight: float = 0.5) -> np.ndarray:
+                    blend_weight: float = 0.5,
+                    tdsa_nu: float = TDSA_NU_DEFAULT) -> np.ndarray:
     """Map per-element OpenRadioss fields onto a full (N,) sensitivity array.
 
     ``elem_ids`` is the deck's full design element-id list (mesh/card order, any
     id order). Elements with no result (dead/absent) get 0 and are pulled up only
     by the spatial filter. ``sensitivity`` is ``"energy"`` | ``"vonmises"`` |
-    ``"blend"`` (``blend_weight`` weights von-Mises in the blend).
+    ``"blend"`` (``blend_weight`` weights von-Mises in the blend) | ``"tdsa"``.
+
+    ``"tdsa"`` ranks by the topological derivative of compliance,
+    :func:`oropt.tdsa.td_compliance_3d` on the per-element stress tensor
+    ``Results.stress`` (requires the engine deck to request
+    ``/ANIM/BRICK/TENS/STRESS`` — ``deck.prepare_engine(anim_stress_tensor=True)``).
+    ``tdsa_nu`` is the Poisson ratio entering the TD coefficients; Young's
+    modulus is fixed at 1.0 because it enters the TD only as the global positive
+    prefactor ``3(1-nu)/(2*E*(7-5nu))`` — a uniform 1/E scaling that cannot
+    change the element *ranking* (nor the shape of the normalised combined
+    field), which is all the downstream threshold machinery consumes. If the
+    tensor is absent (``results.stress is None``) the energy field is returned
+    instead, with a one-time RuntimeWarning — never a mid-run crash.
     """
     n = elem_ids.size
     raw = np.zeros(n, dtype=float)
     pos, valid = id_positions(elem_ids, results.element_ids)
     if pos.size == 0:      # no overlap (also keeps the blend's .max() legal)
         return raw
+    stress = getattr(results, "stress", None)
     if sensitivity == "vonmises":
         val = results.vonmises[valid]
     elif sensitivity == "blend":
@@ -69,7 +112,12 @@ def map_sensitivity(results: Results, elem_ids: np.ndarray,
         en = en / en.max() if en.max() > 0 else en
         vm = vm / vm.max() if vm.max() > 0 else vm
         val = blend_weight * vm + (1 - blend_weight) * en
+    elif sensitivity == "tdsa" and stress is not None:
+        val = tdsa.td_compliance_3d(np.asarray(stress, dtype=float)[valid],
+                                    E=1.0, nu=tdsa_nu)
     else:  # "energy" (default): internal-energy density
+        if sensitivity == "tdsa":                     # tensor absent -> fall back
+            _warn_tdsa_fallback()
         val = results.energy[valid]
     raw[pos] = val
     return raw
@@ -176,7 +224,9 @@ class Beso:
         makes them eligible for bi-directional add-back.
         """
         return map_sensitivity(results, elem_ids, self.cfg.sensitivity,
-                               self.cfg.blend_weight)
+                               self.cfg.blend_weight,
+                               tdsa_nu=getattr(self.cfg, "tdsa_nu",
+                                               TDSA_NU_DEFAULT))
 
     def filter_history(self, raw: np.ndarray,
                        sens_prev: np.ndarray | None) -> np.ndarray:

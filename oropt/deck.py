@@ -451,8 +451,14 @@ class Deck:
         out[end:end] = block
 
 
+#: engine card that makes OpenRadioss write the per-element stress tensor into
+#: the animation files (same card fastmode.write_linear_engine always emits).
+ANIM_STRESS_TENSOR_CARD = "/ANIM/BRICK/TENS/STRESS"
+
+
 def prepare_engine(src_engine: str | Path, dst_engine: str | Path,
-                   anim_dt: Optional[float] = None) -> None:
+                   anim_dt: Optional[float] = None,
+                   anim_stress_tensor: bool = False) -> None:
     """Copy the engine deck, optionally reducing animation output frequency.
 
     The baseline deck writes 11 animation states (~811 MB / run); the optimiser
@@ -460,6 +466,13 @@ def prepare_engine(src_engine: str | Path, dst_engine: str | Path,
     time makes OpenRadioss emit just the start + end states, slashing I/O.
     Only the ``/ANIM/DT`` value line is touched; the implicit controls are left
     exactly as the converter wrote them.
+
+    ``anim_stress_tensor`` additionally injects a ``/ANIM/BRICK/TENS/STRESS``
+    card (the per-element stress tensor, needed by ``sensitivity: tdsa`` —
+    exactly the card :func:`oropt.fastmode.write_linear_engine` always emits)
+    next to the deck's other ``/ANIM`` cards. Idempotent: a deck that already
+    requests the tensor is left alone. The default (``False``) writes output
+    byte-identical to before the knob existed.
     """
     raw = Path(src_engine).read_text(encoding="utf-8", errors="replace")
     nl = "\r\n" if "\r\n" in raw[:8192] else "\n"
@@ -476,6 +489,24 @@ def prepare_engine(src_engine: str | Path, dst_engine: str | Path,
                     tstart = toks[0] if toks else "0."
                     lines[k] = f"{tstart} {anim_dt}"
                 break
+    if anim_stress_tensor and not any(
+            ln.strip() == ANIM_STRESS_TENSOR_CARD for ln in lines):
+        # Insert after the deck's last /ANIM card so the tensor request sits with
+        # the other animation outputs (order of engine cards is free, but keeping
+        # them together matches the converter's layout). /ANIM/DT carries a
+        # "Tstart dt" value line (possibly preceded by comments) that must not be
+        # split from its header. No /ANIM card at all -> append at the end.
+        ins = len(lines)
+        for i, ln in enumerate(lines):
+            if not ln.strip().startswith("/ANIM"):
+                continue
+            ins = i + 1
+            if ln.strip() == "/ANIM/DT":
+                k = i + 1
+                while k < len(lines) and lines[k].lstrip()[:1] == "#":
+                    k += 1
+                ins = min(k + 1, len(lines))       # after the "Tstart dt" line
+        lines.insert(ins, ANIM_STRESS_TENSOR_CARD)
     Path(dst_engine).write_text(nl.join(lines) + nl, encoding="utf-8", newline="")
 
 

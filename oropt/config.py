@@ -100,6 +100,25 @@ class DockerOpts:
 
 
 @dataclass
+class DemoOpts:
+    """Demo solver backend — synthetic physics, no OpenRadioss needed.
+
+    When ``enabled``, every solve is answered by :func:`oropt.demo.demo_solve`
+    instead of the real starter/engine: a deterministic analytic response
+    (energy concentrated along a pseudo load path; stress/displacement rising
+    as material is removed) that drives the whole pipeline — loop, monitor,
+    report, smoothing, GIF — so the tool can be evaluated, demonstrated and
+    benchmarked with **zero solver install**. It is NOT a solver: numbers are
+    synthetic and mean nothing physically. Off by default; the real backends
+    are byte-identical to before.
+    """
+    enabled: bool = False
+    sigma0: float = 100.0    # synthetic peak von-Mises [MPa] at full volume
+    disp0: float = 0.5       # synthetic constrained-node displacement [mm] at full volume
+    hardening: float = 1.5   # response exponent: sigma/disp scale with (V0/V_alive)**hardening
+
+
+@dataclass
 class GrowthBox:
     """A user-defined region (like LS-DYNA's ``*DEFINE_BOX`` / Radioss
     ``/BOX/RECTA`` family) marking part of the design mesh as **candidate growth
@@ -299,7 +318,8 @@ class Beso:
     filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm] (~2-3x element size)
     history_weight: float = 0.5      # blend of current & previous-iteration sensitivity (0.5 = Huang-Xie)
     target_volume_fraction: float = 0.5  # stop reducing once this fraction of the design volume remains
-    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend" | "tdsa" (topological-derivative stress-quadratic ranking; needs the stress tensor in the anim -- falls back to energy with a warning when absent)
+    tdsa_nu: float = 0.33            # tdsa only: Poisson's ratio in the topological derivative (AlSi10Mg ~0.33). E cancels out of the ranking
     blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
     max_iter: int = 150
     convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
@@ -342,7 +362,8 @@ class LevelSet:
     filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm]
     history_weight: float = 0.5      # blend of current & previous-iteration sensitivity
     target_volume_fraction: float = 0.5  # stop reducing once this volume fraction remains
-    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend" | "tdsa" (topological-derivative stress-quadratic ranking; needs the stress tensor in the anim -- falls back to energy with a warning when absent)
+    tdsa_nu: float = 0.33            # tdsa only: Poisson's ratio in the topological derivative (AlSi10Mg ~0.33). E cancels out of the ranking
     blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
     max_iter: int = 150
     convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
@@ -401,7 +422,8 @@ class TobsOpts:
     filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm]
     history_weight: float = 0.5      # blend of current & previous-iteration sensitivity
     target_volume_fraction: float = 0.5  # stop reducing once this volume fraction remains
-    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend" | "tdsa" (topological-derivative stress-quadratic ranking; needs the stress tensor in the anim -- falls back to energy with a warning when absent)
+    tdsa_nu: float = 0.33            # tdsa only: Poisson's ratio in the topological derivative (AlSi10Mg ~0.33). E cancels out of the ranking
     blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
     max_iter: int = 150
     convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
@@ -452,7 +474,8 @@ class HcaOpts:
     filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm] (= the CA neighbourhood)
     history_weight: float = 0.5      # blend of current & previous-iteration sensitivity
     target_volume_fraction: float = 0.5  # stop reducing once this volume fraction remains
-    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend" | "tdsa" (topological-derivative stress-quadratic ranking; needs the stress tensor in the anim -- falls back to energy with a warning when absent)
+    tdsa_nu: float = 0.33            # tdsa only: Poisson's ratio in the topological derivative (AlSi10Mg ~0.33). E cancels out of the ranking
     blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
     max_iter: int = 150
     convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
@@ -515,7 +538,8 @@ class SaipOpts:
     filter_radius: float = 1.5       # spatial sensitivity-filter radius [mm]
     history_weight: float = 0.5      # blend of current & previous-iteration sensitivity
     target_volume_fraction: float = 0.5  # stop reducing once this volume fraction remains
-    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend"
+    sensitivity: str = "energy"      # "energy" | "vonmises" | "blend" | "tdsa" (topological-derivative stress-quadratic ranking; needs the stress tensor in the anim -- falls back to energy with a warning when absent)
+    tdsa_nu: float = 0.33            # tdsa only: Poisson's ratio in the topological derivative (AlSi10Mg ~0.33). E cancels out of the ranking
     blend_weight: float = 0.5        # weight on von-Mises when sensitivity == "blend"
     max_iter: int = 150
     convergence_tol: float = 1e-3    # rel. change in objective over the averaging window
@@ -536,7 +560,12 @@ class SaipOpts:
     utilization_target: float = 1.0  # multipoint only: the constraint-utilisation ratio the controller steers the design onto (< 1 leaves a safety margin below the limits, e.g. 0.98)
     # --- SAIP specific ---
     flip_limit: float = 0.05         # move limit: max fraction of elements flipped per step (the trust region that keeps successive linearisations valid)
-    oscillation_damping: float = 0.5  # rank-down factor on elements that flipped between the last two designs (SCIP-inspired conservatism; 1.0 = off). Candidacy is unchanged -- only the priority within the flip cap drops
+    oscillation_damping: float = 0.5  # rank-down factor on elements that flipped between the last two designs (lighter ranking-only conservatism; 1.0 = off). Candidacy is unchanged -- only the priority within the flip cap drops. Prefer scip_asymptotes below for the principled version; set this to 1.0 when that is on
+    # --- SCIP conservative subproblem (Sun, Cheng, Zhang & Liang, Acta Mech. Sin. 40, 2024) ---
+    scip_asymptotes: bool = False   # opt-in: reciprocal-variable (MMA moving-asymptote) conservative gains -- flip-oscillating elements get geometrically harder to flip, so add/remove ping-pong decays instead of cycling. False = the plain linear subproblem, bit-for-bit
+    scip_gamma_tight: float = 0.7   # asymptote tightening: t_e *= this when an element flipped in opposite directions in consecutive iterations (MMA's oscillation test)
+    scip_gamma_relax: float = 1.2   # asymptote relaxation: t_e *= this (capped at 1 = plain linear gain) when the element stayed put or moved monotonically
+    scip_t_min: float = 0.1         # floor on the conservatism factor t_e: bounds how hard an oscillator's flip gain can be inflated/deflated
 
 
 @dataclass
@@ -896,6 +925,7 @@ class Config:
     or_paths: ORPaths = field(default_factory=ORPaths)
     run: RunOpts = field(default_factory=RunOpts)
     docker: DockerOpts = field(default_factory=DockerOpts)
+    demo: DemoOpts = field(default_factory=DemoOpts)
     model: Model = field(default_factory=Model)
     beso: Beso = field(default_factory=Beso)
     levelset: LevelSet = field(default_factory=LevelSet)
@@ -941,6 +971,7 @@ class Config:
             or_paths=build(ORPaths, data.get("or_paths")),
             run=build(RunOpts, data.get("run")),
             docker=build(DockerOpts, data.get("docker")),
+            demo=build(DemoOpts, data.get("demo")),
             model=build(Model, data.get("model")),
             beso=build(Beso, data.get("beso")),
             levelset=build(LevelSet, data.get("levelset")),

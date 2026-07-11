@@ -4,11 +4,41 @@ A fast path from a fresh checkout to a running topology optimisation. oropt is
 topology optimisation for **OpenRadioss TET4 solid parts**; the AlSi10Mg elevator
 linkage is the reference example. For the full reference see [`README.md`](README.md).
 
-> **Heads-up:** oropt drives the *real* OpenRadioss solver in the loop, so today
-> you need a working OpenRadioss install (native Windows + Intel oneAPI MPI, **or**
-> the Dockerised MUMPS build) and your own converted deck to actually run. A
-> zero-solver `demo` backend is planned (roadmap P2/U2) but not here yet — until
-> then this quickstart gets you installed, oriented, and launch-ready.
+> **No OpenRadioss? Start anyway.** The zero-solver **demo backend** answers
+> every solve with deterministic synthetic physics, so the whole pipeline —
+> loop, GUI monitor, report, smoothing, GIF — runs on the bundled example in
+> seconds (step 0 below). For a *real* optimisation you need a working
+> OpenRadioss install (native Windows + Intel oneAPI MPI, **or** the Dockerised
+> MUMPS build — see [`docs/docker_image.md`](docs/docker_image.md)) and your
+> own converted deck.
+
+## 0. Try it with zero solver (~2 minutes)
+
+The repo bundles a ~2850-tet cantilever (`examples/cantilever/`) and a `demo:`
+config section. After the install in step 1:
+
+```
+python - <<'EOF'
+from oropt.config import Config
+from oropt.loop import run_optimization
+cfg = Config.from_dict({
+    "demo": {"enabled": True},
+    "model": {"case_dir": "examples/cantilever", "design_part_id": 60000000,
+              "design_node_min": 60000000, "bc_group_id": 60000000},
+    "load_cases": [{"name": "tip", "stem": "cantilever", "sigma_allow": 400.0,
+                    "disp_constraints": [{"node_id": 60000699, "d_allow": 5.0}]}],
+    "beso": {"target_volume_fraction": 0.6, "evolution_rate": 0.05,
+             "filter_radius": 8.0, "max_iter": 15},
+    "work_dir": "runs/demo",
+})
+print(run_optimization(cfg).state)
+EOF
+```
+
+Then open `runs/demo/report.html` (and `topology_evolution.gif`). Demo numbers
+are **synthetic** — it demonstrates and benchmarks the optimisers, it does not
+analyse your part. `scripts/benchmark_optimizers.py` runs all five optimisers
+head-to-head on this case.
 
 ## 1. Install
 

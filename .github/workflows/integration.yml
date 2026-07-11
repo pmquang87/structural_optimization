@@ -1,0 +1,67 @@
+# Real-solver integration smoke job (roadmap item V1) — separate from ci.yml.
+#
+# Runs tests/integration (the gated @pytest.mark.integration suite) against the
+# Dockerised OpenRadioss-MUMPS build. The pytest gate is the OROPT_DOCKER_IMAGE
+# environment variable:
+#
+#   * If the repository variable OROPT_DOCKER_IMAGE is set (Settings ->
+#     Secrets and variables -> Actions -> Variables), or an image is passed to
+#     workflow_dispatch, the image is pulled and the tests solve for real —
+#     and then they GATE (continue-on-error is false).
+#   * Until someone provides a MUMPS image, the variable is unset, the env var
+#     stays empty, every integration test skips, and the nightly is a NO-OP
+#     THAT STAYS GREEN. Arming it later needs no workflow change — just set
+#     the repository variable (or dispatch with an image).
+name: Integration (real solver)
+
+on:
+  workflow_dispatch:
+    inputs:
+      docker_image:
+        description: >-
+          OpenRadioss MUMPS docker image tag (e.g. ghcr.io/OWNER/openradioss-mumps:TAG).
+          Leave empty to fall back to the OROPT_DOCKER_IMAGE repository variable.
+        required: false
+        default: ""
+  schedule:
+    # Nightly, 03:17 UTC (off the :00 rush). A no-op green run while no solver
+    # image is configured — see the header comment.
+    - cron: "17 3 * * *"
+
+jobs:
+  real-solver-smoke:
+    name: Real-solver smoke (docker MUMPS)
+    runs-on: ubuntu-latest
+    # When a solver image IS configured this job must gate — a red nightly is
+    # the whole point. The unarmed (image-less) path stays green via skips.
+    continue-on-error: false
+    timeout-minutes: 30
+    env:
+      # workflow_dispatch input wins; scheduled runs fall back to the
+      # repository variable; both unset -> empty -> pytest skips everything.
+      OROPT_DOCKER_IMAGE: ${{ inputs.docker_image || vars.OROPT_DOCKER_IMAGE }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and test deps
+        run: pip install -e ".[dev]"
+
+      # Pull up front so an unreachable/misnamed image fails loudly here,
+      # not as N identical in-test docker errors.
+      - name: Pull solver image
+        if: env.OROPT_DOCKER_IMAGE != ''
+        run: docker pull "$OROPT_DOCKER_IMAGE"
+
+      - name: Note unarmed run
+        if: env.OROPT_DOCKER_IMAGE == ''
+        run: echo "OROPT_DOCKER_IMAGE not configured — integration tests will skip (green no-op)."
+
+      - name: Run integration tests
+        run: pytest tests/integration -m integration -q -rs
