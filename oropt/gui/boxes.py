@@ -49,12 +49,15 @@ _NUMERIC: list[str] = ["x_min", "x_max", "y_min", "y_max", "z_min", "z_max",
                        "cx", "cy", "cz", "radius",
                        "x1", "y1", "z1", "x2", "y2", "z2"]
 
-# Full column order of the main region data-editor. ``carve`` is the overlap
-# policy checkbox: off (default) = the original part stays alive and only
-# expansion elements (ids > model.growth_original_elem_max) start void; on = a
-# region overlapping the original part voids those elements too
-# (carve-and-regrow).
-BOX_COLUMNS: list[str] = ["name", "shape", "carve", "deck_box_id", *_NUMERIC]
+# Full column order of the main region data-editor. ``forbid`` is the polarity
+# checkbox: off (default) = a POSITIVE add-material region; on = a NEGATIVE
+# (forbidden) region -- an inline keep-out holding overlapping candidates void.
+# ``carve`` is the overlap policy checkbox (positive regions only): off
+# (default) = the original part stays alive and only expansion elements (ids >
+# model.growth_original_elem_max) start void; on = a region overlapping the
+# original part voids those elements too (carve-and-regrow).
+BOX_COLUMNS: list[str] = ["name", "shape", "forbid", "carve", "deck_box_id",
+                          *_NUMERIC]
 
 # Columns of the oriented-frame data-editor: name + origin + local +x + in-plane.
 FRAME_COLUMNS: list[str] = ["name", "ox", "oy", "oz",
@@ -92,17 +95,19 @@ def _vec3(row, keys):
 def records_from_growth_boxes(boxes) -> list[dict]:
     """Editor rows (one dict per region) from configured ``GrowthBox`` objects.
 
-    Each row carries ``name`` + ``shape`` + ``carve`` + ``deck_box_id`` and, for
-    the columns the shape uses, that region's value; columns another shape would
-    use — and all coordinates of a ``deck_box_id`` region (they come from the
-    deck) — are left ``None`` so the editor shows them blank."""
+    Each row carries ``name`` + ``shape`` + ``forbid`` + ``carve`` +
+    ``deck_box_id`` and, for the columns the shape uses, that region's value;
+    columns another shape would use — and all coordinates of a ``deck_box_id``
+    region (they come from the deck) — are left ``None`` so the editor shows them
+    blank."""
     out: list[dict] = []
     for b in boxes:
         kind = _shape_of(b)
         req = set(_REQUIRED[kind])
         deck_ref = b.deck_box_id is not None
-        row: dict = {"name": b.name, "shape": kind, "carve": bool(b.carve),
-                     "deck_box_id": b.deck_box_id}
+        row: dict = {"name": b.name, "shape": kind,
+                     "forbid": bool(getattr(b, "forbid", False)),
+                     "carve": bool(b.carve), "deck_box_id": b.deck_box_id}
         for col in _NUMERIC:
             row[col] = getattr(b, col) if (col in req and not deck_ref) else None
         out.append(row)
@@ -117,7 +122,8 @@ def growth_boxes_from_records(records) -> list[GrowthBox]:
     is dropped too — unless it names a ``deck_box_id``, whose coordinates come from
     the deck at run start. An unrecognised shape is dropped (validation surfaces the
     typo on the coordinates path); a blank shape defaults to ``box``; a blank
-    ``carve`` cell defaults to off (part kept intact — the config default).
+    ``forbid`` cell defaults to off (a positive add-material region) and a blank
+    ``carve`` cell defaults to off (part kept intact — the config defaults).
     The oriented frame is applied separately (:func:`apply_frame_records`)."""
     out: list[GrowthBox] = []
     for row in records:
@@ -127,17 +133,19 @@ def growth_boxes_from_records(records) -> list[GrowthBox]:
         req = _REQUIRED.get(kind)
         if req is None:
             continue
+        raw_forbid = row.get("forbid")
+        forbid = False if _is_blank(raw_forbid) else bool(raw_forbid)
         raw_carve = row.get("carve")
         carve = False if _is_blank(raw_carve) else bool(raw_carve)
         deck_id = row.get("deck_box_id")
         if not _is_blank(deck_id):
-            out.append(GrowthBox(name=name, shape=kind, carve=carve,
-                                 deck_box_id=int(deck_id)))
+            out.append(GrowthBox(name=name, shape=kind, forbid=forbid,
+                                 carve=carve, deck_box_id=int(deck_id)))
             continue
         vals = [row.get(k) for k in req]
         if any(_is_blank(v) for v in vals):
             continue
-        out.append(GrowthBox(name=name, shape=kind, carve=carve,
+        out.append(GrowthBox(name=name, shape=kind, forbid=forbid, carve=carve,
                              **{k: float(v) for k, v in zip(req, vals)}))
     return out
 

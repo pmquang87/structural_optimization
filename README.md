@@ -401,6 +401,20 @@ in progress.
   void, exactly the pre-flag behaviour — with a validation warning and a
   run-log note (so boundary-less phase-1 configs keep running unchanged).
 
+  A region has a **polarity**, the per-region **`forbid`** flag. `forbid: false`
+  (default) is a **positive** ("add-material") region as described above.
+  `forbid: true` makes it a **negative** region instead: forbidden growth
+  space — an inline keep-out drawn as a primitive rather than read from a
+  neighbour deck (§ *Keep-out* below). A negative region adds nothing of its
+  own; any positive-region candidate whose centroid lies inside it is held
+  **void every iteration** (never grown), so the optimiser can never add
+  material there, and the growth-mesh PREPARE step generates no candidate tets
+  inside it. `carve` is ignored for a negative region, and a negative region
+  overlapping no positive candidate is simply a no-op. Use it to sculpt add
+  regions — a generous positive box with a negative box cut out of it — or to
+  forbid a pocket (a bolt hole, a clearance envelope) without authoring a
+  separate keep-out deck.
+
   Each region carries a **`shape`** — `box` (default; two opposite corners),
   `sphere` (centre + `radius`), `cylinder` (two axis end-points + `radius`,
   finite/capped) — mirroring `/BOX/RECTA` · `/BOX/SPHER` · `/BOX/CYLIN` — or
@@ -504,6 +518,10 @@ in progress.
       # deliberate carve-and-regrow: overlapped ORIGINAL elements start void too
       - {name: recut, shape: sphere, cx: 0.0, cy: 0.0, cz: 10.0, radius: 6.0,
          carve: true}
+      # negative (forbid) region: an inline keep-out; no material may be added
+      # inside it (holds any overlapping candidate void every iteration)
+      - {name: bolt_clearance, shape: cylinder, x1: 0.0, y1: 0.0, z1: 0.0,
+         x2: 0.0, y2: 0.0, z2: 20.0, radius: 5.0, forbid: true}
     # original/expansion element-id boundary carve-off (default) regions need to
     # leave the part alive (the growth-mesh step records it automatically when
     # pointing the config at the extended decks; unset -> carve-off degrades to

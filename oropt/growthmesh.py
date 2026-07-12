@@ -557,7 +557,16 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
                          "nothing to generate")
     cases, decks = _load_case_decks(cfg)
     primary = decks[0]
-    boxes = resolve_growth_boxes(primary, m.growth_boxes)
+    resolved = resolve_growth_boxes(primary, m.growth_boxes)
+    # POSITIVE (add-material) regions define where to generate candidate mesh;
+    # NEGATIVE (forbid=True) regions are forbidden space -- an inline keep-out
+    # that only drops generated tets (never meshed themselves, see classify).
+    boxes = [b for b in resolved if not getattr(b, "forbid", False)]
+    forbid_boxes = [b for b in resolved if getattr(b, "forbid", False)]
+    if not boxes:
+        raise ValueError("no POSITIVE growth regions configured "
+                         "(model.growth_boxes) -- every configured region is "
+                         "negative (forbid=true), so there is nothing to mesh")
     labels = [b.name or f"#{i + 1}" for i, b in enumerate(boxes)]
     # Resolve the keep-out geometry (if any) BEFORE the expensive TetGen run so a
     # missing/unparsable deck fails fast; its inside test drops generated
@@ -640,12 +649,24 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
             log(f"[oropt] growth-mesh: keep-out ({Path(keepout.source).name}) "
                 f"removed {n_blocked} generated candidate tet(s) inside the "
                 "neighbour parts")
+    # Negative (forbid=true) regions: forbidden growth space, so no candidate
+    # tets are generated inside them either -- same treatment as the keep-out.
+    if forbid_boxes:
+        forb = np.zeros(len(cent), dtype=bool)
+        for b in forbid_boxes:
+            forb |= primitive_member(cent, b)
+        blocked = keep & forb
+        n_blocked = int(blocked.sum())
+        if n_blocked:
+            keep = keep & ~blocked
+            log(f"[oropt] growth-mesh: negative (forbidden) region(s) removed "
+                f"{n_blocked} generated candidate tet(s)")
     if not keep.any():
         raise ValueError(
             "the generated mesh adds no candidate elements: every tet inside "
             "a growth region duplicates existing part elements (the regions "
-            "appear fully pre-meshed already), lands inside the keep-out, or no "
-            "tet landed in a region")
+            "appear fully pre-meshed already), lands inside the keep-out or a "
+            "negative (forbidden) region, or no tet landed in a region")
     kept = out_tets[keep]
     per_region = [(lbl, int(primitive_member(cent[keep], b).sum()))
                   for lbl, b in zip(labels, boxes)]

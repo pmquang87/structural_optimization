@@ -25,7 +25,8 @@ from oropt.gui.boxes import (apply_frame_records, apply_point_records,
                             growth_boxes_from_records, records_from_frames,
                             records_from_growth_boxes, records_from_points)
 from oropt.levelset import LevelSet
-from oropt.loop import (active_growth_boxes, growth_candidate_mask,
+from oropt.loop import (active_growth_boxes, growth_blocked_mask,
+                        growth_candidate_mask, growth_forbid_mask,
                         preview_growth_boxes, resolve_growth_boxes)
 from oropt.mesh import Mesh, local_frame_basis, overlay_primitives
 from oropt.tobs import Tobs
@@ -856,7 +857,7 @@ def test_gui_polyhedron_main_row_roundtrip():
     [rec] = records_from_growth_boxes([poly])
     assert rec["shape"] == "polyhedron"
     assert all(rec[k] is None for k in rec
-               if k not in ("name", "shape", "carve"))
+               if k not in ("name", "shape", "forbid", "carve"))
     [back] = growth_boxes_from_records([rec])
     assert back.shape_kind() == "polyhedron" and back.name == "w"
     assert back.points is None                     # re-attached by the points table
@@ -1146,3 +1147,155 @@ def test_app_preview_autofills_original_elem_max(tmp_path):
     assert not at.exception
     thr = [n for n in at.number_input if n.key == "growth_orig_elem_max"]
     assert thr[0].value == 60000001
+
+
+# ---- negative (forbid) growth boxes -----------------------------------------
+# A negative region is forbidden growth space (an inline keep-out): it generates
+# no candidates itself and holds any positive-box candidate inside it void every
+# iteration. Same geometry frame as the boxes above (e2 (.5,.5,.5),
+# e3 (1.5,1.75,1.5)).
+NEG_E2 = GrowthBox(name="no_e2", forbid=True, x_min=0.4, x_max=0.6,
+                   y_min=0.4, y_max=0.6, z_min=0.4, z_max=0.6)
+NEG_E3 = GrowthBox(name="no_e3", forbid=True, x_min=1.4, x_max=1.6,
+                   y_min=1.7, y_max=1.8, z_min=1.4, z_max=1.6)
+
+
+def test_forbid_field_default_and_yaml_roundtrip(tmp_path):
+    assert GrowthBox().forbid is False
+    cfg = Config.from_dict({"model": {"growth_boxes": [
+        {"name": "keepclear", "shape": "sphere", "cx": 1.0, "cy": 1.0,
+         "cz": 1.0, "radius": 0.5, "forbid": True}]}})
+    assert cfg.model.growth_boxes[0].forbid is True
+    p = tmp_path / "c.yaml"
+    cfg.to_yaml(p)
+    assert Config.from_yaml(p).model.growth_boxes[0].forbid is True
+
+
+def test_unknown_keys_flags_forbid_typo():
+    data = {"model": {"growth_boxes": [
+        {"name": "b", "forbdi": True, "x_min": 0.0, "x_max": 1.0}]}}
+    assert "model.growth_boxes[0].forbdi" in unknown_keys(data)
+    assert "model.growth_boxes[0].forbid" not in unknown_keys(
+        {"model": {"growth_boxes": [{"forbid": True}]}})
+
+
+def test_forbid_mask_unions_negative_boxes(tmp_path):
+    deck, mesh = _load(tmp_path)
+    block = growth_forbid_mask(deck, mesh, Model(growth_boxes=[NEG_E3]))
+    assert block.tolist() == [False, False, True, False]     # only e3
+    # no keep-out, no negative box -> None (the fast path)
+    assert growth_forbid_mask(deck, mesh, Model(growth_boxes=[BOX_E2])) is None
+
+
+def test_negative_box_holds_positive_candidate_void(tmp_path):
+    """Positive boxes over e2+e3, a negative box over e3: e3 still starts void
+    (returned in the candidate mask) but is held void every iteration; e2 stays
+    growable and the run-start guards pass."""
+    deck, mesh = _load(tmp_path)
+    m = Model(growth_boxes=[BOX_E2, BOX_E3, NEG_E3])
+    lines: list[str] = []
+    mask = growth_candidate_mask(deck, mesh, m, log=lines.append)
+    assert mask.tolist() == [False, True, True, False]        # void-start intact
+    assert growth_blocked_mask(deck, mesh, m).tolist() == [False, False, True,
+                                                           False]
+    assert any("NEGATIVE (forbidden)" in ln for ln in lines)
+    assert any("held void" in ln for ln in lines)
+    assert any("can grow nothing" in ln for ln in lines)
+
+
+def test_negative_box_only_is_noop(tmp_path):
+    """A negative box with no positive box forbids nothing -- no candidates, no
+    guard error."""
+    deck, mesh = _load(tmp_path)
+    m = Model(growth_boxes=[NEG_E2])
+    assert not growth_candidate_mask(deck, mesh, m, log=_silent).any()
+    assert not growth_blocked_mask(deck, mesh, m).any()
+
+
+def test_negative_box_stranding_growable_candidate_raises(tmp_path):
+    """e3 reaches the structure only through e2; a negative box over e2 holds e2
+    void, stranding e3, so the reachability guard aborts at run start."""
+    deck, mesh = _load(tmp_path)
+    m = Model(growth_boxes=[BOX_E2, BOX_E3, NEG_E2])
+    with pytest.raises(ValueError, match="'b3'.*share no nodes"):
+        growth_candidate_mask(deck, mesh, m, log=_silent)
+
+
+def test_negative_box_disabled_with_growth_toggle(tmp_path):
+    """growth_enabled=False ignores negative boxes too (nothing is forbidden)."""
+    deck, mesh = _load(tmp_path)
+    m = Model(growth_boxes=[BOX_E2, NEG_E2], growth_enabled=False)
+    assert growth_forbid_mask(deck, mesh, m) is None
+    assert not growth_blocked_mask(deck, mesh, m).any()
+
+
+def test_preview_negative_box_row_and_held_void(tmp_path):
+    deck, mesh = _load(tmp_path)
+    prev = preview_growth_boxes(deck, mesh, Model(
+        growth_boxes=[BOX_E2, BOX_E3, NEG_E3]))
+    neg = next(r for r in prev.rows if r.name == "no_e3")
+    assert "negative (forbidden)" in neg.note
+    assert "holds 1 candidate" in neg.note
+    b3 = next(r for r in prev.rows if r.name == "b3")
+    assert "held void by keep-out / forbidden region" in b3.note
+    assert prev.guard == ""                    # e2 growable -> run-ready
+
+
+def test_preview_negative_box_noop_note(tmp_path):
+    deck, mesh = _load(tmp_path)
+    prev = preview_growth_boxes(deck, mesh, Model(
+        growth_boxes=[BOX_E2, NEG_E3]))       # negative box overlaps no candidate
+    neg = next(r for r in prev.rows if r.name == "no_e3")
+    assert "no-op" in neg.note
+
+
+# ---- validation -------------------------------------------------------------
+def test_validate_negative_box_carve_warns():
+    probs = [str(p) for p in check_config(_cfg(
+        [GrowthBox(name="n", forbid=True, carve=True, x_min=0, x_max=1,
+                   y_min=0, y_max=1, z_min=0, z_max=1)], optimizer="tobs"))]
+    assert any(p.startswith("warning") and "carve is ignored" in p
+               for p in probs)
+
+
+def test_validate_all_negative_boxes_warns():
+    probs = [str(p) for p in check_config(_cfg([NEG_E2, NEG_E3],
+                                               optimizer="tobs"))]
+    assert any(p.startswith("warning") and "every growth region is negative" in p
+               for p in probs)
+
+
+def test_validate_negative_box_geometry_still_checked():
+    probs = [str(p) for p in check_config(_cfg(
+        [GrowthBox(name="n", shape="sphere", forbid=True, radius=-1.0)],
+        optimizer="tobs"))]
+    assert any(p.startswith("error") and "sphere radius must be > 0" in p
+               for p in probs)
+
+
+def test_validate_negative_box_no_carve_boundary_warning():
+    """A lone negative box (carve=False by default) must NOT trip the carve-off
+    'no original/expansion boundary' warning -- carve is meaningless for it."""
+    probs = [str(p) for p in check_config(_cfg([BOX_E2, NEG_E3],
+                                               optimizer="tobs"))]
+    # the positive box legitimately warns once; the negative one adds no second
+    assert sum("carve off (the default)" in p for p in probs) <= 1
+
+
+# ---- GUI row helpers --------------------------------------------------------
+def test_gui_forbid_column_roundtrip():
+    boxes = [GrowthBox(name="add", x_min=0, x_max=1, y_min=0, y_max=1,
+                       z_min=0, z_max=1),
+             GrowthBox(name="block", forbid=True, x_min=2, x_max=3, y_min=0,
+                       y_max=1, z_min=0, z_max=1)]
+    recs = records_from_growth_boxes(boxes)
+    assert recs[0]["forbid"] is False and recs[1]["forbid"] is True
+    back = growth_boxes_from_records(recs)
+    assert back[0].forbid is False and back[1].forbid is True
+
+
+def test_gui_blank_forbid_defaults_positive():
+    [b] = growth_boxes_from_records([{"name": "b", "shape": "box", "forbid": None,
+                                      "x_min": 0, "x_max": 1, "y_min": 0,
+                                      "y_max": 1, "z_min": 0, "z_max": 1}])
+    assert b.forbid is False
