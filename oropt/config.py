@@ -136,7 +136,20 @@ class GrowthBox:
     elements and is an error at run start. Multiple regions act as a union. Bounds
     are inclusive.
 
-    A region **may overlap the original part**; :attr:`carve` picks what that
+    A region is by default **positive** ("add-material"): the candidates it
+    selects start void and may be grown. Set :attr:`forbid` to make it a
+    **negative** region instead — forbidden growth space, exactly like an
+    inline :mod:`keep-out <oropt.keepout>` drawn as a primitive rather than
+    read from a neighbour deck. A positive-box candidate whose centroid lies
+    inside any negative region starts void like any candidate but is **held
+    void every iteration** (never grown), so the optimiser can never add
+    material there; the auto-mesh PREPARE step honours the same test by not
+    generating candidate tets inside a negative region. A negative region
+    generates no candidates of its own (``carve`` and the original/expansion
+    id boundary don't apply to it), and one that overlaps no positive candidate
+    is simply a no-op.
+
+    A positive region **may overlap the original part**; :attr:`carve` picks what that
     means. ``carve: false`` (default) keeps the original part intact: only
     *expansion* elements in the region start void, where "original" means
     element ids <= :attr:`Model.growth_original_elem_max` (the growth-mesh
@@ -216,6 +229,14 @@ class GrowthBox:
     # stays intact. True -> carve-and-regrow: overlapped originals start void
     # too. With no boundary recorded, False degrades to carving (warned).
     carve: bool = False
+    # --- polarity: positive (add-material, default) or negative (forbidden) ---
+    # False (default) -> a POSITIVE region: its candidates start void and may be
+    # grown. True -> a NEGATIVE region: forbidden growth space (an inline
+    # keep-out). It generates no candidates; any positive-box candidate whose
+    # centroid lies inside it is held void every iteration (never grown), and
+    # the growth-mesh PREPARE step generates no candidate tets there. carve is
+    # ignored for a negative region.
+    forbid: bool = False
 
     def shape_kind(self) -> str:
         """Normalised shape selector: ``"box"``, ``"sphere"``, ``"cylinder"`` or
@@ -261,11 +282,13 @@ class Model:
     # the GUI's "Enable growth regions" checkbox drives it, making the state
     # visible so leftover boxes from an earlier run can't silently drive a run.
     growth_enabled: bool = True
-    # User-defined growth boxes (add-material regions): design elements whose
-    # centroid lies inside any box start VOID and may be grown into by the
-    # optimiser. The box volumes must be pre-meshed into the design part; see
-    # :class:`GrowthBox`. Stored as GrowthBox, but coerced from plain dicts too
-    # so YAML round-trips and the GUI editor (dict rows) both work.
+    # User-defined growth boxes: design elements whose centroid lies inside a
+    # POSITIVE (add-material) box start VOID and may be grown into by the
+    # optimiser; a NEGATIVE (forbid=True) box instead marks forbidden growth
+    # space (an inline keep-out), holding any overlapping candidate void every
+    # iteration. The positive box volumes must be pre-meshed into the design
+    # part; see :class:`GrowthBox`. Stored as GrowthBox, but coerced from plain
+    # dicts too so YAML round-trips and the GUI editor (dict rows) both work.
     growth_boxes: list = field(default_factory=list)
     # Highest element id of the ORIGINAL part — the id boundary between original
     # and expansion (growth) elements, used by growth regions with carve=False to

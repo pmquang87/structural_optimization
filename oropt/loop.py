@@ -319,22 +319,47 @@ def region_candidate_mask(deck: Deck, mesh: Mesh, box, model
     return bm & (deck.elem_ids > int(thr)), int(keep_alive.sum())
 
 
+def growth_forbid_mask(deck: Deck, mesh: Mesh, model, boxes=None
+                       ) -> Optional[np.ndarray]:
+    """Forbidden growth space as an element mask (aligned with ``deck.elem_ids``):
+    the union of the keep-out deck's neighbour parts
+    (``model.growth_keepout_rad``) and every NEGATIVE (``forbid=True``) growth
+    box. A candidate whose centroid lands in this space is held void every
+    iteration — never grown — so the optimiser adds no material there. Returns
+    ``None`` when nothing forbids growth (no keep-out deck and no negative box),
+    the fast path.
+
+    *boxes* may be passed already resolved (:func:`resolve_growth_boxes`) to
+    avoid resolving twice; omitted, the model's active boxes are resolved here.
+    """
+    if boxes is None:
+        boxes = resolve_growth_boxes(deck, active_growth_boxes(model))
+    keepout = resolve_keepout(model, getattr(model, "case_dir", "."))
+    block = keepout.block_mask(mesh.centroids) if keepout is not None else None
+    neg = [b for b in (boxes or []) if getattr(b, "forbid", False)]
+    if neg:
+        nb = mesh.in_boxes_mask(neg)
+        block = nb if block is None else (block | nb)
+    return block
+
+
 def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
                           log: Callable[[str], None] = print) -> np.ndarray:
     """Boolean mask (aligned with ``deck.elem_ids``) of growth-candidate
-    elements: those whose centroid lies inside one of ``model.growth_boxes``
-    (minus, for a region with ``carve`` off, the original part's elements —
-    see :func:`region_candidate_mask`). Candidates start the run *void* and
-    may be grown into by the optimiser's bi-directional update. All-False when
-    no boxes are configured.
+    elements: those whose centroid lies inside a POSITIVE ``model.growth_boxes``
+    region (minus, for a region with ``carve`` off, the original part's
+    elements — see :func:`region_candidate_mask`). Candidates start the run
+    *void* and may be grown into by the optimiser's bi-directional update.
+    NEGATIVE (``forbid=True``) regions generate no candidates. All-False when
+    no positive boxes are configured.
 
-    A configured **keep-out** deck (``model.growth_keepout_rad``) subtracts the
-    candidates inside the neighbour parts from the *growable* set: they still
-    start void (returned in the mask, so the initial deck omits them) but are
-    held void every iteration by the loop (:func:`growth_blocked_mask`), so no
-    material grows into the neighbour parts. The run-start guards below run only
-    on the growable candidates — a held-void candidate needs neither pinnable
-    nodes nor a growth path.
+    A configured **keep-out** deck (``model.growth_keepout_rad``) or any
+    **negative box** subtracts the candidates inside the forbidden space from
+    the *growable* set: they still start void (returned in the mask, so the
+    initial deck omits them) but are held void every iteration by the loop
+    (:func:`growth_blocked_mask`), so no material grows there. The run-start
+    guards below run only on the growable candidates — a held-void candidate
+    needs neither pinnable nodes nor a growth path.
 
     Raises ``ValueError`` at run start — before any ~13-min solve — for the
     setup mistakes that would otherwise waste (or silently no-op) a multi-hour
@@ -353,15 +378,22 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
     boxes = resolve_growth_boxes(deck, active_growth_boxes(model))
     if not boxes:
         return np.zeros(deck.n_design_elements, dtype=bool)
-    keepout = resolve_keepout(model, getattr(model, "case_dir", "."))
-    ko = keepout.block_mask(mesh.centroids) if keepout is not None else None
+    # Forbidden growth space = the keep-out deck's neighbour parts PLUS any
+    # NEGATIVE (forbid=True) growth box (an inline keep-out). A positive-box
+    # candidate landing here starts void like any candidate but is held void
+    # every iteration -- no material is ever added inside it.
+    block = growth_forbid_mask(deck, mesh, model, boxes)
 
     candidate = np.zeros(deck.n_design_elements, dtype=bool)  # void-start set
-    growable = np.zeros(deck.n_design_elements, dtype=bool)   # minus keep-out
-    blocked = np.zeros(deck.n_design_elements, dtype=bool)    # held-void keep-out
+    growable = np.zeros(deck.n_design_elements, dtype=bool)   # minus forbidden
+    blocked = np.zeros(deck.n_design_elements, dtype=bool)    # held-void forbidden
     box_growable = []
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
+        if getattr(b, "forbid", False):
+            log(f"[oropt] growth box {label!r}: NEGATIVE (forbidden) region -- "
+                "no material may be added inside it")
+            continue
         bm, kept_alive = region_candidate_mask(deck, mesh, b, model)
         if not bm.any():
             if kept_alive:
@@ -386,17 +418,19 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
         elif _no_boundary(b, model):
             log(f"[oropt] growth box {label!r}: {_NO_BOUNDARY_NOTE}")
         gm = bm
-        if ko is not None:
-            blk = bm & ko
+        if block is not None:
+            blk = bm & block
             nb = int(blk.sum())
             if nb:
-                gm = bm & ~ko
+                gm = bm & ~block
                 blocked |= blk
-                log(f"[oropt] growth box {label!r}: {nb} candidate(s) inside the "
-                    f"keep-out held void (never grown); {int(gm.sum())} growable")
+                log(f"[oropt] growth box {label!r}: {nb} candidate(s) inside a "
+                    f"keep-out / forbidden region held void (never grown); "
+                    f"{int(gm.sum())} growable")
                 if not gm.any():
                     log(f"[oropt] growth box {label!r}: WARNING every candidate "
-                        "is inside the keep-out -- this region can grow nothing")
+                        "is inside a keep-out / forbidden region -- this region "
+                        "can grow nothing")
         candidate |= bm
         growable |= gm
         box_growable.append((label, gm))
@@ -435,26 +469,28 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
 
 
 def growth_blocked_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
-    """Growth candidates that fall inside the keep-out geometry
-    (``model.growth_keepout_rad``): they start void like any candidate but are
-    **held void every iteration** so the optimiser can never place material
-    inside the neighbour parts. All-False when no growth boxes or no keep-out
-    deck is configured. The loop re-applies this after each optimiser update
-    (and the auto-mesh PREPARE step simply never generates candidate tets here),
-    so pre-meshed and auto-meshed workflows both honour the keep-out."""
+    """Growth candidates that fall inside forbidden growth space — the keep-out
+    geometry (``model.growth_keepout_rad``) or any NEGATIVE (``forbid=True``)
+    growth box: they start void like any candidate but are **held void every
+    iteration** so the optimiser can never place material there. All-False when
+    no positive growth boxes, or nothing forbidding growth, is configured. The
+    loop re-applies this after each optimiser update (and the auto-mesh PREPARE
+    step simply never generates candidate tets here), so pre-meshed and
+    auto-meshed workflows both honour the keep-out and the negative boxes."""
     boxes = resolve_growth_boxes(deck, active_growth_boxes(model))
     empty = np.zeros(deck.n_design_elements, dtype=bool)
     if not boxes:
         return empty
-    keepout = resolve_keepout(model, getattr(model, "case_dir", "."))
-    if keepout is None:
+    block = growth_forbid_mask(deck, mesh, model, boxes)
+    if block is None:
         return empty
-    ko = keepout.block_mask(mesh.centroids)
     void_start = empty.copy()
     for b in boxes:
+        if getattr(b, "forbid", False):
+            continue
         bm, _ = region_candidate_mask(deck, mesh, b, model)
         void_start |= bm
-    return void_start & ko
+    return void_start & block
 
 
 @dataclasses.dataclass
@@ -482,14 +518,15 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
     """Count the design elements each growth region would start *void*, without
     launching a run — the data behind the GUI's "preview regions" button.
 
-    Per region: the would-start-void element count — centroid-in-region, minus
-    the original part elements for a region with ``carve`` off (0 flags a region
-    whose volume was not pre-meshed into the design part), plus a note for a
-    region referencing a ``/BOX/RECTA`` card absent from the deck and for
-    in-region original elements a carve-off region leaves alive. When carve-off
-    regions run without an id boundary (they degrade to carving), the single
-    config-level ``notice`` carries the caveat instead of repeating it on every
-    row. Also runs the real
+    Per POSITIVE region: the would-start-void element count — centroid-in-region,
+    minus the original part elements for a region with ``carve`` off (0 flags a
+    region whose volume was not pre-meshed into the design part), plus a note for
+    a region referencing a ``/BOX/RECTA`` card absent from the deck and for
+    in-region original elements a carve-off region leaves alive. A NEGATIVE
+    (``forbid=True``) region gets a row noting it is forbidden growth space and
+    how many candidates it holds void. When carve-off regions run without an id
+    boundary (they degrade to carving), the single config-level ``notice``
+    carries the caveat instead of repeating it on every row. Also runs the real
     run-start guards (:func:`growth_candidate_mask`) and reports, in ``guard``, the
     first error that would abort a run (an empty region, candidate nodes below
     ``design_node_min``, or an unreachable candidate); ``guard`` is ``""`` when the
@@ -510,14 +547,48 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
             ko_mask = keepout.block_mask(mesh.centroids)
         except (ValueError, OSError) as exc:
             keepout_note = f"keep-out error: {exc}"
+    # Pre-pass: the positive void-start union and the negative (forbidden)
+    # region, so a positive row can report how many of its candidates are held
+    # void and a negative row how many candidates it holds void. Errors here are
+    # swallowed and surfaced per-row in the main pass below.
+    pos_void = np.zeros(deck.n_design_elements, dtype=bool)
+    neg_mask = np.zeros(deck.n_design_elements, dtype=bool)
+    for b in boxes:
+        try:
+            rb = resolve_growth_boxes(deck, [b])[0]
+        except ValueError:
+            continue
+        if getattr(rb, "forbid", False):
+            neg_mask |= mesh.in_boxes_mask([rb])
+        else:
+            try:
+                bm, _ = region_candidate_mask(deck, mesh, rb, model)
+            except ValueError:
+                continue
+            pos_void |= bm
+    forbid_mask = neg_mask if ko_mask is None else (neg_mask | ko_mask)
     rows: list = []
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
         try:
             resolved = resolve_growth_boxes(deck, [b])[0]
-            bm, kept_alive = region_candidate_mask(deck, mesh, resolved, model)
         except ValueError as exc:
             rows.append(BoxPreview(label, b.shape_kind(), 0, str(exc)))
+            continue
+        if getattr(resolved, "forbid", False):
+            inside = mesh.in_boxes_mask([resolved])
+            held = int((inside & pos_void).sum())
+            note = ("negative (forbidden) region -- no material may be added "
+                    "inside it")
+            note += (f"; holds {held} candidate(s) void" if held
+                     else " (no growth region overlaps it -- no-op)")
+            rows.append(BoxPreview(label, resolved.shape_kind(),
+                                   int(inside.sum()), note))
+            continue
+        try:
+            bm, kept_alive = region_candidate_mask(deck, mesh, resolved, model)
+        except ValueError as exc:
+            rows.append(BoxPreview(label, resolved.shape_kind(), 0, str(exc)))
             continue
         count = int(bm.sum())
         if count:
@@ -529,12 +600,13 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
         else:
             note = ("no design elements inside -- the region volume "
                     "is not pre-meshed into the design part")
-        if ko_mask is not None and count:
-            blk = int((bm & ko_mask).sum())
+        if count:
+            blk = int((bm & forbid_mask).sum())
             if blk:
                 held = ("all of them" if blk == count else f"{blk} of {count}")
                 note = (f"{note}; " if note else "") + (
-                    f"{held} held void by keep-out (never grown)")
+                    f"{held} held void by keep-out / forbidden region "
+                    "(never grown)")
         rows.append(BoxPreview(label, resolved.shape_kind(), count, note))
     total, guard = 0, ""
     if boxes:
@@ -544,14 +616,15 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
         except ValueError as exc:
             guard = str(exc)
     notice = (_NO_BOUNDARY_NOTE
-              if any(_no_boundary(b, model) for b in boxes) else "")
+              if any(_no_boundary(b, model) for b in boxes
+                     if not getattr(b, "forbid", False)) else "")
     group_guard = ""
     try:
         validate_group_ids(deck, model)
     except ValueError as exc:
         group_guard = str(exc)
     if keepout is not None and not keepout_note:
-        held = int(growth_blocked_mask(deck, mesh, model).sum())
+        held = int((pos_void & ko_mask).sum()) if ko_mask is not None else 0
         parts = ", ".join(str(p) for p in keepout.part_ids) or "all"
         clr = (f", clearance {keepout.clearance:g}" if keepout.clearance > 0
                else f", allowed penetration {-keepout.clearance:g}"
@@ -1070,10 +1143,10 @@ def run_optimization(cfg: Config, resume: bool = False,
     # so the anchor mask above keeps its own view.)
     candidate = growth_candidate_mask(deck, mesh, m, log=log)
     n_candidate = int(candidate.sum())
-    # Keep-out: growth candidates inside the neighbour parts start void like any
-    # candidate but are held void every iteration (never grown), so the optimiser
-    # can never place material inside the neighbour parts. Re-applied after every
-    # optimiser update below via ``keep_growable``.
+    # Forbidden growth space (keep-out neighbour parts and/or negative "forbid"
+    # boxes): candidates inside it start void like any candidate but are held
+    # void every iteration (never grown), so the optimiser can never place
+    # material there. Re-applied after every optimiser update via ``keep_growable``.
     blocked = growth_blocked_mask(deck, mesh, m)
     keep_growable = ~blocked
     hold_void = bool(blocked.any())
@@ -1087,9 +1160,9 @@ def run_optimization(cfg: Config, resume: bool = False,
             f"({100 * candidate.mean():.1f}% of the design space) start void; "
             "volume fractions are relative to the enlarged (part + boxes) space")
         if hold_void:
-            log(f"[oropt] growth: {int(blocked.sum())} candidate(s) inside the "
-                "keep-out held void every iteration (never grown) -> no material "
-                "enters the neighbour parts")
+            log(f"[oropt] growth: {int(blocked.sum())} candidate(s) inside a "
+                "keep-out / forbidden region held void every iteration (never "
+                "grown) -> no material is added there")
     opt = build_optimizer(cfg, mesh, protected, anchor=anchor)
     # Multipoint back-off (backoff_mode: multipoint): the volume target comes
     # from a controller fitted to the run's own (vf, violation) history instead

@@ -562,9 +562,12 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "attaches with no gap (needs the original-part element-id boundary, "
         "recorded by the ⚙️ growth-mesh step; without it the region voids "
         "everything inside). Check it for deliberate carve-and-regrow: the "
-        "overlapped original elements start void too. A row may reference a "
-        "`/BOX/{RECTA,SPHER,CYLIN}` card in the deck by **Deck /BOX id** instead of "
-        "coordinates; oriented (local-frame) boxes are set below.")
+        "overlapped original elements start void too. Tick **Forbid (negative)** "
+        "to flip a region's polarity instead: a negative region is forbidden "
+        "growth space (an inline keep-out) — it adds nothing itself and holds any "
+        "positive-region candidate inside it void every iteration. A row may "
+        "reference a `/BOX/{RECTA,SPHER,CYLIN}` card in the deck by **Deck /BOX "
+        "id** instead of coordinates; oriented (local-frame) boxes are set below.")
     if cfg.model.growth_enabled:
         # Capture the oriented-frame and polyhedron-point rows BEFORE the main table
         # below overwrites cfg.model.growth_boxes (which carries the loaded frames/
@@ -574,7 +577,8 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         frame_records = records_from_frames(cfg.model.growth_boxes)
         point_records = records_from_points(cfg.model.growth_boxes)
         _num_cols = [c for c in BOX_COLUMNS
-                     if c not in ("name", "shape", "carve", "deck_box_id")]
+                     if c not in ("name", "shape", "forbid", "carve",
+                                  "deck_box_id")]
         gb_df = pd.DataFrame(records_from_growth_boxes(cfg.model.growth_boxes),
                              columns=BOX_COLUMNS)
         gb_edited = st.data_editor(
@@ -589,13 +593,21 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                     help="box = two corners; sphere = centre+radius; "
                          "cylinder = two axis end-points + radius; polyhedron = "
                          "convex hull of the node list in the points table below."),
+                "forbid": st.column_config.CheckboxColumn(
+                    "Forbid (negative)", default=False,
+                    help="Unchecked (default): a POSITIVE add-material region — "
+                         "its candidates start void and may be grown. Checked: a "
+                         "NEGATIVE (forbidden) region — an inline keep-out that "
+                         "holds any overlapping candidate void every iteration "
+                         "(no material is ever added inside it). Carve is ignored "
+                         "for a negative region."),
                 "carve": st.column_config.CheckboxColumn(
                     "Carve part", default=False,
                     help="Unchecked (default): the original part stays alive; "
                          "only expansion elements (ids above the original-part "
                          "boundary below) start void. Checked: original-part "
                          "elements inside the region start void too — deliberate "
-                         "carve-and-regrow."),
+                         "carve-and-regrow. (Positive regions only.)"),
                 "deck_box_id": st.column_config.NumberColumn(
                     "Deck /BOX id", format="%d", step=1,
                     help="Reference a /BOX/{RECTA,SPHER,CYLIN} card in the deck by id "
@@ -659,7 +671,8 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                         })
                     cfg.model.growth_boxes = apply_point_records(
                         cfg.model.growth_boxes, pt_edited.to_dict("records"))
-            if any(not b.carve for b in cfg.model.growth_boxes):
+            if any(not b.carve and not getattr(b, "forbid", False)
+                   for b in cfg.model.growth_boxes):
                 # Carve-off regions need the original/expansion element-id boundary;
                 # the ⚙️ growth-mesh "use these decks" button records it, the 🔍
                 # preview button auto-fills it from the deck, and this input covers
@@ -1170,7 +1183,8 @@ def _render_growth_preview(cfg: Config) -> None:
              "auto-filled with the CURRENT deck's highest design element id — "
              "so run this on the ORIGINAL folder, not an extended growth_mesh "
              "deck (see the note below).")
-    if any(not b.carve for b in cfg.model.growth_boxes):
+    if any(not b.carve and not getattr(b, "forbid", False)
+           for b in cfg.model.growth_boxes):
         st.caption(
             "⚠️ **Getting *Original part: highest element id* right (carve-off "
             "regions).** It must be the **original** deck's highest element id, "

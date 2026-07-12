@@ -920,3 +920,45 @@ def test_app_growth_mesh_done_panel_and_point_button(tmp_path):
     # widget, which would otherwise re-save over it)
     thr = [n for n in at.number_input if n.key == "growth_orig_elem_max"]
     assert thr and thr[0].value == 60000002
+
+
+# ---- negative (forbid) growth regions in the PREPARE step -------------------
+# A negative region is forbidden space: it is never meshed, and it drops any
+# generated candidate tet inside it (same treatment as the keep-out deck).
+def test_prepare_negative_region_excludes_generated_candidates(tmp_path,
+                                                               mini_engine_path):
+    """A negative box over the x < -0.2 slab drops the WING tet centred at
+    x=-0.25 but not the one at x=-0.125, so one of the two survives."""
+    _write_mini(tmp_path)
+    neg = GrowthBox(name="no", forbid=True, x_min=-1.0, x_max=-0.2,
+                    y_min=-2.0, y_max=2.0, z_min=-2.0, z_max=2.0)
+    lines: list[str] = []
+    rep = prepare_growth_mesh(_mini_cfg(tmp_path, [WING, neg]),
+                              backend=_fake_backend, log=lines.append)
+    assert rep.n_new_elems == 1                      # one of two WING tets removed
+    assert rep.per_region == [("wing", 1)]           # negative box not a region row
+    assert any("negative (forbidden)" in ln and "removed 1" in ln for ln in lines)
+    assert (tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad").is_file()
+
+
+def test_prepare_negative_region_covering_all_raises(tmp_path, mini_engine_path):
+    """A negative box over the whole WING leaves nothing to add -> abort,
+    writing nothing."""
+    _write_mini(tmp_path)
+    neg = GrowthBox(name="no", forbid=True, x_min=-1.0, x_max=0.05,
+                    y_min=-2.0, y_max=2.0, z_min=-2.0, z_max=2.0)
+    with pytest.raises(ValueError, match="no candidate elements"):
+        prepare_growth_mesh(_mini_cfg(tmp_path, [WING, neg]),
+                            backend=_fake_backend, log=_silent)
+    assert not (tmp_path / GROWTH_MESH_DIRNAME).exists()
+
+
+def test_prepare_only_negative_regions_raises(tmp_path):
+    """No positive region to mesh -> abort before the backend runs."""
+    _write_mini(tmp_path)
+    neg = GrowthBox(name="no", forbid=True, x_min=-1.0, x_max=-0.001,
+                    y_min=-0.5, y_max=1.5, z_min=-0.5, z_max=1.5)
+    with pytest.raises(ValueError, match="no POSITIVE growth regions"):
+        prepare_growth_mesh(_mini_cfg(tmp_path, [neg]), backend=_fake_backend,
+                            log=_silent)
+    assert not (tmp_path / GROWTH_MESH_DIRNAME).exists()

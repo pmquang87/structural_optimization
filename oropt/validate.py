@@ -454,6 +454,16 @@ def _check_growth(cfg: Config) -> list[Problem]:
         if kind != "polyhedron" and b.points:
             warn(f"growth box {label!r}: 'points' is only used by shape "
                  f"'polyhedron' -- ignored for shape {kind!r}")
+        if getattr(b, "forbid", False) and b.carve:
+            warn(f"growth box {label!r}: carve is ignored for a negative "
+                 "(forbid=true) region -- a negative region only forbids "
+                 "growth, it never carves the part")
+    pos_boxes = [b for b in boxes if not getattr(b, "forbid", False)]
+    neg_boxes = [b for b in boxes if getattr(b, "forbid", False)]
+    if neg_boxes and not pos_boxes:
+        warn("every growth region is negative (forbid=true) -- there are no "
+             "positive add-material regions, so growth adds nothing and the "
+             "negative regions have no candidates to forbid (no-op)")
     thr = m.growth_original_elem_max
     if thr is not None and (isinstance(thr, bool)
                             or not isinstance(thr, int) or thr <= 0):
@@ -464,7 +474,7 @@ def _check_growth(cfg: Config) -> list[Problem]:
     # config-level warning -- not per region, and not an error, so a plain
     # phase-1 config (regions over hand-pre-meshed expansion volume, no
     # boundary, no part overlap) keeps validating clean enough to run.
-    if thr is None and any(not b.carve for b in boxes):
+    if thr is None and any(not b.carve for b in pos_boxes):
         warn("growth regions with carve off (the default) but no "
              "model.growth_original_elem_max -- no original/expansion "
              "element-id boundary is known, so every in-region element starts "
@@ -473,7 +483,7 @@ def _check_growth(cfg: Config) -> list[Problem]:
              "when pointing the config at the extended decks; set it manually "
              "for a hand-pre-meshed deck, or set carve: true to make carving "
              "explicit")
-    if boxes and cfg.optimizer_name() == "beso" \
+    if pos_boxes and cfg.optimizer_name() == "beso" \
             and cfg.beso.max_add_ratio < cfg.beso.evolution_rate:
         warn(f"growth boxes with beso.max_add_ratio={cfg.beso.max_add_ratio} < "
              f"evolution_rate={cfg.beso.evolution_rate}: per-iteration growth "
@@ -503,9 +513,10 @@ def _check_growth_keepout(cfg: Config) -> list[Problem]:
                  f"growth may deliberately penetrate up to {-clr:g} into the "
                  "neighbour parts (an interference/overlap band). If a gap was "
                  "intended, use a positive value")
-        if not boxes:
-            warn("model.growth_keepout_rad is set but no growth regions are "
-                 "configured -- the keep-out has no candidates to remove (no-op)")
+        if not any(not getattr(b, "forbid", False) for b in boxes):
+            warn("model.growth_keepout_rad is set but no positive growth regions "
+                 "are configured -- the keep-out has no candidates to remove "
+                 "(no-op)")
         ko_path = Path(m.growth_keepout_rad)
         if not ko_path.is_absolute():
             ko_path = case_dir / m.growth_keepout_rad
