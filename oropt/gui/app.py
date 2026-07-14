@@ -549,7 +549,10 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         "uses `cx,cy,cz` + `radius`, `cylinder` uses the two axis end-points "
         "`x1,y1,z1`–`x2,y2,z2` + `radius`, `polyhedron` takes an arbitrary node "
         "list (all coordinates explicit) in the *Polyhedron points* table below — "
-        "its region is the points' convex hull. The region volume must contain "
+        "its region is the points' convex hull; `deck` takes a separate Radioss "
+        "deck (`region_rad`) whose parts' geometry is the region — the **positive "
+        "mirror of the keep-out deck** (an arbitrary shape drawn in a pre-processor "
+        "rather than approximated by primitives). The region volume must contain "
         "candidate elements: **pre-mesh** it into the design part (same "
         "`/TETRA4` block, node-conformal interface, node ids ≥ design_node_min) "
         "— or **generate** it with the ⚙️ *Generate growth mesh* button below; "
@@ -576,9 +579,13 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
         # round-trip instead of being silently dropped.
         frame_records = records_from_frames(cfg.model.growth_boxes)
         point_records = records_from_points(cfg.model.growth_boxes)
-        _num_cols = [c for c in BOX_COLUMNS
-                     if c not in ("name", "shape", "forbid", "carve",
-                                  "deck_box_id")]
+        # Columns configured explicitly above; everything else is a plain numeric
+        # coordinate. region_clearance_mm is numeric but has its own config, so it
+        # is excluded here too (the generic comprehension would otherwise override
+        # its label/help).
+        _explicit_cols = ("name", "shape", "forbid", "carve", "deck_box_id",
+                          "region_rad", "region_part_ids", "region_clearance_mm")
+        _num_cols = [c for c in BOX_COLUMNS if c not in _explicit_cols]
         gb_df = pd.DataFrame(records_from_growth_boxes(cfg.model.growth_boxes),
                              columns=BOX_COLUMNS)
         gb_edited = st.data_editor(
@@ -588,11 +595,14 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                     "Name", help="Label for run-log / validation messages, and how a "
                                  "frame below is matched to a box."),
                 "shape": st.column_config.SelectboxColumn(
-                    "Shape", options=["box", "sphere", "cylinder", "polyhedron"],
+                    "Shape",
+                    options=["box", "sphere", "cylinder", "polyhedron", "deck"],
                     default="box",
                     help="box = two corners; sphere = centre+radius; "
                          "cylinder = two axis end-points + radius; polyhedron = "
-                         "convex hull of the node list in the points table below."),
+                         "convex hull of the node list in the points table below; "
+                         "deck = the volume of parts in a separate Radioss deck "
+                         "(region_rad), the positive mirror of the keep-out deck."),
                 "forbid": st.column_config.CheckboxColumn(
                     "Forbid (negative)", default=False,
                     help="Unchecked (default): a POSITIVE add-material region — "
@@ -613,6 +623,19 @@ def render_constraints_tab(cfg: Config, cfg_path: Path) -> None:
                     help="Reference a /BOX/{RECTA,SPHER,CYLIN} card in the deck by id "
                          "instead of coordinates; resolved at run start. Leave blank "
                          "to use the coordinates in this row."),
+                "region_rad": st.column_config.TextColumn(
+                    "Deck region (.rad)",
+                    help="shape 'deck' only: a Radioss deck (relative to case_dir) "
+                         "whose parts' geometry is the growth region. Only geometry "
+                         "is read; it is never solved."),
+                "region_part_ids": st.column_config.TextColumn(
+                    "Deck region parts",
+                    help="shape 'deck' only: comma-separated /TETRA4 or /BRICK part "
+                         "ids forming the region. Blank = all solid parts in the deck."),
+                "region_clearance_mm": st.column_config.NumberColumn(
+                    "Deck region clearance", format="%.3f",
+                    help="shape 'deck' only: grow the region outward by this gap "
+                         "(model units). 0 = the parts' volume exactly."),
                 **{k: st.column_config.NumberColumn(
                     k, format="%.3f",
                     help="Coordinate in model units (e.g. mm); fill the columns "

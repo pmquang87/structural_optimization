@@ -203,7 +203,7 @@ def build_plc(surf_points: np.ndarray, surf_tris: np.ndarray,
 def region_aabb(box) -> tuple[np.ndarray, np.ndarray]:
     """Loose AABB ``(lo, hi)`` of ONE resolved growth region (all shapes;
     oriented boxes via their world-space corners, polyhedra via their explicit
-    node set)."""
+    node set, deck regions via the referenced parts' node bounds)."""
     kind = box.shape_kind()
     if kind == "sphere":
         c = np.array([box.cx, box.cy, box.cz], dtype=float)
@@ -215,6 +215,17 @@ def region_aabb(box) -> tuple[np.ndarray, np.ndarray]:
     if kind == "polyhedron":
         p = np.asarray(box.points, dtype=float)
         return p.min(axis=0), p.max(axis=0)
+    if kind == "deck":
+        # the region's part geometry was attached by resolve_growth_boxes; the
+        # clearance band grows the AABB outward the same way _deck_member does.
+        nodes = np.asarray(getattr(box, "_region_nodes", np.empty((0, 3))),
+                           dtype=float)
+        if not len(nodes):
+            tets = np.asarray(getattr(box, "_region_tets", np.empty((0, 4, 3))),
+                              dtype=float)
+            nodes = tets.reshape(-1, 3) if len(tets) else nodes
+        clr = float(getattr(box, "_region_clearance", 0.0) or 0.0)
+        return nodes.min(axis=0) - clr, nodes.max(axis=0) + clr
     c = box_corners(box)
     return c.min(axis=0), c.max(axis=0)
 
@@ -557,7 +568,7 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
                          "nothing to generate")
     cases, decks = _load_case_decks(cfg)
     primary = decks[0]
-    resolved = resolve_growth_boxes(primary, m.growth_boxes)
+    resolved = resolve_growth_boxes(primary, m.growth_boxes, m.case_dir)
     # POSITIVE (add-material) regions define where to generate candidate mesh;
     # NEGATIVE (forbid=True) regions are forbidden space -- an inline keep-out
     # that only drops generated tets (never meshed themselves, see classify).

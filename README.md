@@ -431,6 +431,22 @@ in progress.
   `/SKEW/FIX` on a `/BOX/RECTA` is read as the local frame); it is resolved to
   concrete geometry at run start.
 
+  A region may also take **`shape: deck`** — its shape is the actual occupied
+  volume of parts in a **separate Radioss deck** (`region_rad`, relative to
+  `model.case_dir`), the **positive mirror of the keep-out deck**
+  (`growth_keepout_rad`): the same geometry, used to say *material may be added
+  here* instead of *forbidden here*. Membership is centroid inside those parts'
+  solid elements (exact point-in-tetrahedron, `/BRICK` split into 6 tets), so an
+  arbitrarily shaped region can be drawn in a pre-processor rather than
+  approximated by primitives. `region_part_ids` selects which part ids form the
+  region (empty = all solid parts) and `region_clearance_mm` grows it outward by
+  that gap (0 = the parts' volume exactly). The deck is **never solved** — only
+  its geometry is read — so it needn't be a runnable model. Like every region it
+  still selects **design elements** that must be pre-meshed there (or generated
+  by the ⚙️ growth-mesh step, which meshes the deck region's volume); a deck
+  region has no primitive outline, so it isn't drawn in the 3D overlay (the 🔍
+  preview reports its element count).
+
   Editable as a table on the GUI's *Optimizer / Output* tab (shape selector,
   per-shape coordinate columns, a Deck /BOX id column, an *Oriented box
   frames* editor, and a *Polyhedron points* editor — one x/y/z row per node,
@@ -507,6 +523,11 @@ in progress.
         shape: polyhedron
         points: [[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [30.0, 10.0, 0.0], [0.0, 10.0, 0.0],
                  [5.0, 2.0, 12.0], [25.0, 2.0, 12.0], [25.0, 8.0, 12.0], [5.0, 8.0, 12.0]]
+      # deck: the region is the volume of parts in a SEPARATE Radioss deck (never
+      # solved) -> the positive mirror of growth_keepout_rad. region_part_ids empty
+      # = all solid parts; region_clearance_mm grows the region outward by that gap.
+      - {name: from_part, shape: deck, region_rad: extra_envelope_0000.rad,
+         region_part_ids: [80000000], region_clearance_mm: 0.0}
       # oriented box: bounds measured in the local frame (origin + x-axis + xy-plane vector)
       - {name: skew_rib, shape: box, x_min: 0.0, x_max: 30.0, y_min: -4.0, y_max: 4.0, z_min: -4.0, z_max: 4.0,
          origin: [10.0, 0.0, 0.0], x_axis: [1.0, 1.0, 0.0], xy_axis: [-1.0, 1.0, 0.0]}

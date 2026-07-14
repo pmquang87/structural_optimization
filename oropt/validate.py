@@ -29,7 +29,7 @@ ERROR = "error"
 WARNING = "warning"
 
 VALID_OPTIMIZERS = ("beso", "levelset", "tobs", "hca", "saip")
-VALID_GROWTH_SHAPES = ("box", "cylinder", "sphere", "polyhedron")
+VALID_GROWTH_SHAPES = ("box", "cylinder", "sphere", "polyhedron", "deck")
 VALID_SENSITIVITIES = ("energy", "vonmises", "blend", "tdsa")
 
 
@@ -75,6 +75,40 @@ def _check_polyhedron_points(b, label, err) -> None:
         err(f"growth box {label!r}: the polyhedron points are degenerate "
             "(coplanar or duplicated) -- their convex hull encloses no volume, "
             "so the region would select no elements")
+
+
+def _check_deck_region(b, label, case_dir, err, warn) -> None:
+    """Validate a ``shape="deck"`` region: a ``region_rad`` deck that exists
+    (relative to ``case_dir``), parses to solid geometry, actually contains the
+    selected part ids, and a non-negative clearance. Mirrors the keep-out deck
+    checks (:func:`oropt.deck.read_solid_geometry`) — the two are geometric mirrors
+    (a positive region vs a forbidden one)."""
+    rad = (b.region_rad or "").strip()
+    if not rad:
+        err(f"growth box {label!r}: shape 'deck' needs region_rad -- a Radioss "
+            "deck whose parts' geometry defines the growth region")
+        return
+    clr = b.region_clearance_mm
+    if isinstance(clr, bool) or not isinstance(clr, (int, float)) or clr < 0:
+        err(f"growth box {label!r}: region_clearance_mm must be >= 0: got {clr!r}")
+    path = Path(rad)
+    if not path.is_absolute():
+        path = case_dir / rad
+    if not path.exists():
+        err(f"growth box {label!r}: region deck not found: {path}")
+        return
+    try:
+        _tets, _nodes, _surf, found = read_solid_geometry(
+            path, b.region_part_ids or None)
+    except Exception as exc:  # noqa: BLE001
+        err(f"growth box {label!r}: region deck could not be parsed ({path}): {exc}")
+        return
+    want = [int(p) for p in (b.region_part_ids or [])]
+    missing = [p for p in want if p not in found]
+    if missing:
+        warn(f"growth box {label!r}: region deck has no solid elements for part "
+             f"id(s) {missing} (found {found}); those parts contribute nothing "
+             "to the region")
 
 
 def _check_local_frame(b, label, err, warn) -> None:
@@ -416,6 +450,7 @@ def _check_growth(cfg: Config) -> list[Problem]:
     problems, err, warn = _collector()
     m = cfg.model
     boxes = _growth_boxes(cfg)
+    case_dir = Path(m.case_dir).resolve()   # deck regions resolve relative to it
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
         kind = b.shape_kind()
@@ -451,6 +486,8 @@ def _check_growth(cfg: Config) -> list[Problem]:
                     "identical (zero-length axis)")
         elif kind == "polyhedron":
             _check_polyhedron_points(b, label, err)
+        elif kind == "deck":
+            _check_deck_region(b, label, case_dir, err, warn)
         if kind != "polyhedron" and b.points:
             warn(f"growth box {label!r}: 'points' is only used by shape "
                  f"'polyhedron' -- ignored for shape {kind!r}")

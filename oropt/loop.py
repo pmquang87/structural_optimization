@@ -11,6 +11,7 @@ import filecmp
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -20,7 +21,7 @@ from . import status as st
 from .beso import Beso, combine_sensitivity, id_positions
 from .config import Config, ResolvedCase
 from .d3plot import convert_final
-from .deck import Deck, prepare_engine
+from .deck import Deck, prepare_engine, read_solid_geometry
 from .fastmode import FastModeTie, build_fast_case, discover_tie
 from .hca import Hca
 from .keepout import resolve_keepout
@@ -252,24 +253,70 @@ def active_growth_boxes(model) -> list:
     return getattr(model, "growth_boxes", []) or []
 
 
-def resolve_growth_boxes(deck: Deck, boxes) -> list:
-    """Return *boxes* with every ``deck_box_id`` reference resolved to concrete
-    geometry read from the starter deck's ``/BOX/{RECTA,SPHER,CYLIN}`` cards.
+@lru_cache(maxsize=32)
+def _load_region_solid(path_str: str, part_ids_key: tuple, _mtime: float):
+    """Solid geometry ``(tet_xyz, node_xyz)`` of the parts in a ``shape="deck"``
+    region's deck, memoised so the same deck isn't re-parsed for each of the
+    candidate / blocked / preview passes within one run. Keyed on the resolved
+    path, the selected part ids and the file mtime, so an edited deck is re-read.
+    """
+    tet_xyz, node_xyz, _surf, _found = read_solid_geometry(
+        Path(path_str), list(part_ids_key) or None)
+    return tet_xyz, node_xyz
+
+
+def _resolve_deck_region(box, case_dir, label: str):
+    """A ``shape="deck"`` region with its parts' solid geometry loaded and attached
+    (runtime attributes ``_region_tets`` / ``_region_nodes`` / ``_region_clearance``
+    consumed by :func:`oropt.mesh._deck_member`). The deck path
+    (``region_rad``) resolves relative to *case_dir* like the load-case decks.
+    Raises ``ValueError`` for a blank/missing/unparsable deck (surfaced at run
+    start / in the preview, before any solve)."""
+    rad = (getattr(box, "region_rad", None) or "").strip()
+    if not rad:
+        raise ValueError(
+            f"growth box {label!r}: shape 'deck' needs region_rad -- a Radioss "
+            "deck whose parts' geometry defines the growth region")
+    path = Path(rad)
+    if not path.is_absolute():
+        path = Path(case_dir if case_dir is not None else ".") / rad
+    if not path.exists():
+        raise ValueError(f"growth box {label!r}: region deck not found: {path}")
+    part_ids = tuple(int(p) for p in (getattr(box, "region_part_ids", None) or []))
+    tet_xyz, node_xyz = _load_region_solid(
+        str(path.resolve()), part_ids, path.stat().st_mtime)
+    rb = dataclasses.replace(box)
+    rb._region_tets = tet_xyz
+    rb._region_nodes = node_xyz
+    rb._region_clearance = float(getattr(box, "region_clearance_mm", 0.0) or 0.0)
+    return rb
+
+
+def resolve_growth_boxes(deck: Deck, boxes, case_dir=None) -> list:
+    """Return *boxes* with every deferred region reference resolved to concrete
+    geometry: a ``deck_box_id`` filled from the starter deck's
+    ``/BOX/{RECTA,SPHER,CYLIN}`` cards, and a ``shape="deck"`` region's parts'
+    solid volume loaded from its own ``region_rad`` deck (relative to *case_dir*).
 
     A growth region may name a ``/BOX/...`` card authored in the pre-processor
     (``deck_box_id``) instead of literal coordinates; here that region's ``shape``
     and coordinates (and, for a ``/BOX/RECTA`` with a ``/SKEW/FIX`` skew, its local
     frame) are filled from :meth:`oropt.deck.Deck.box`, so everything downstream —
     selection, guards, the overlay — treats it exactly like a coordinate region.
-    Regions without a ``deck_box_id`` are returned unchanged. Raises ``ValueError``
-    when the referenced card is absent from the deck."""
+    A ``shape="deck"`` region is resolved by :func:`_resolve_deck_region` (its part
+    geometry attached for the centroid-in-part membership test). Plain coordinate
+    regions are returned unchanged. Raises ``ValueError`` when a referenced ``/BOX``
+    card is absent, or a deck region's deck is blank/missing/unparsable."""
     out = []
     for i, b in enumerate(boxes or []):
+        label = b.name or f"#{i + 1}"
+        if b.shape_kind() == "deck":
+            out.append(_resolve_deck_region(b, case_dir, label))
+            continue
         if getattr(b, "deck_box_id", None) is None:
             out.append(b)
             continue
         spec = deck.box(b.deck_box_id)
-        label = b.name or f"#{i + 1}"
         if spec is None:
             raise ValueError(
                 f"growth box {label!r} references box id {b.deck_box_id} but no "
@@ -333,7 +380,8 @@ def growth_forbid_mask(deck: Deck, mesh: Mesh, model, boxes=None
     avoid resolving twice; omitted, the model's active boxes are resolved here.
     """
     if boxes is None:
-        boxes = resolve_growth_boxes(deck, active_growth_boxes(model))
+        boxes = resolve_growth_boxes(deck, active_growth_boxes(model),
+                                     getattr(model, "case_dir", "."))
     keepout = resolve_keepout(model, getattr(model, "case_dir", "."))
     block = keepout.block_mask(mesh.centroids) if keepout is not None else None
     neg = [b for b in (boxes or []) if getattr(b, "forbid", False)]
@@ -375,7 +423,8 @@ def growth_candidate_mask(deck: Deck, mesh: Mesh, model,
       even through other candidates): a non-conformal interface —
       ``keep_connected`` would drop anything grown there as a floating island.
     """
-    boxes = resolve_growth_boxes(deck, active_growth_boxes(model))
+    boxes = resolve_growth_boxes(deck, active_growth_boxes(model),
+                                 getattr(model, "case_dir", "."))
     if not boxes:
         return np.zeros(deck.n_design_elements, dtype=bool)
     # Forbidden growth space = the keep-out deck's neighbour parts PLUS any
@@ -477,7 +526,8 @@ def growth_blocked_mask(deck: Deck, mesh: Mesh, model) -> np.ndarray:
     loop re-applies this after each optimiser update (and the auto-mesh PREPARE
     step simply never generates candidate tets here), so pre-meshed and
     auto-meshed workflows both honour the keep-out and the negative boxes."""
-    boxes = resolve_growth_boxes(deck, active_growth_boxes(model))
+    boxes = resolve_growth_boxes(deck, active_growth_boxes(model),
+                                 getattr(model, "case_dir", "."))
     empty = np.zeros(deck.n_design_elements, dtype=bool)
     if not boxes:
         return empty
@@ -555,7 +605,7 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
     neg_mask = np.zeros(deck.n_design_elements, dtype=bool)
     for b in boxes:
         try:
-            rb = resolve_growth_boxes(deck, [b])[0]
+            rb = resolve_growth_boxes(deck, [b], getattr(model, "case_dir", "."))[0]
         except ValueError:
             continue
         if getattr(rb, "forbid", False):
@@ -571,7 +621,8 @@ def preview_growth_boxes(deck: Deck, mesh: Mesh, model) -> GrowthPreview:
     for i, b in enumerate(boxes):
         label = b.name or f"#{i + 1}"
         try:
-            resolved = resolve_growth_boxes(deck, [b])[0]
+            resolved = resolve_growth_boxes(
+                deck, [b], getattr(model, "case_dir", "."))[0]
         except ValueError as exc:
             rows.append(BoxPreview(label, b.shape_kind(), 0, str(exc)))
             continue

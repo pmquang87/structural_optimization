@@ -117,15 +117,37 @@ def _polyhedron_member(c: np.ndarray, box) -> np.ndarray:
     return hull.find_simplex(c) >= 0
 
 
+def _deck_member(c: np.ndarray, box) -> np.ndarray:
+    """Membership for a ``shape="deck"`` region: centroids inside the referenced
+    parts' solid volume (exact point-in-tetrahedron), or within the region's
+    clearance band of them. The deck geometry is loaded once by
+    :func:`oropt.loop.resolve_growth_boxes` and attached to *box* as the runtime
+    attributes ``_region_tets`` (V,4,3) / ``_region_nodes`` (P,3) /
+    ``_region_clearance``; an unresolved deck box (no geometry attached) selects
+    nothing, mirroring how an unresolved ``deck_box_id`` draws no overlay."""
+    tets = getattr(box, "_region_tets", None)
+    if tets is None or len(tets) == 0:
+        return np.zeros(c.shape[0], dtype=bool)
+    inside = points_in_tets(c, tets)
+    clr = float(getattr(box, "_region_clearance", 0.0) or 0.0)
+    nodes = getattr(box, "_region_nodes", None)
+    if clr > 0.0 and nodes is not None and len(nodes):
+        dist, _ = cKDTree(nodes).query(c)
+        inside = inside | (dist <= clr)
+    return inside
+
+
 def primitive_member(centroids: np.ndarray, box) -> np.ndarray:
     """Boolean mask of *centroids* inside a single growth region *box*.
 
     Dispatches on ``box.shape_kind()``: a rectangular box (axis-aligned, or in the
     box's local frame when one is set), a sphere (centre + radius), a finite
-    cylinder (two axis end-points + radius) or a polyhedron (the convex hull of an
-    arbitrary explicit node set — a non-convex point set is treated as its hull).
-    Bounds are inclusive; a degenerate region (zero-length cylinder axis,
-    zero-volume hull) selects nothing."""
+    cylinder (two axis end-points + radius), a polyhedron (the convex hull of an
+    arbitrary explicit node set — a non-convex point set is treated as its hull),
+    or a deck (the occupied volume of parts in a separate Radioss deck, resolved
+    and attached by :func:`oropt.loop.resolve_growth_boxes`). Bounds are inclusive;
+    a degenerate region (zero-length cylinder axis, zero-volume hull, unresolved
+    deck) selects nothing."""
     kind = box.shape_kind()
     if kind == "sphere":
         return _sphere_member(centroids, box)
@@ -133,6 +155,8 @@ def primitive_member(centroids: np.ndarray, box) -> np.ndarray:
         return _cylinder_member(centroids, box)
     if kind == "polyhedron":
         return _polyhedron_member(centroids, box)
+    if kind == "deck":
+        return _deck_member(centroids, box)
     return _box_member(centroids, box)
 
 
@@ -185,11 +209,15 @@ def overlay_primitives(boxes) -> list[dict]:
 
     Regions with no drawable geometry are skipped: a zero-radius sphere/cylinder,
     a zero-length cylinder axis, a zero-size box, a polyhedron with a missing/
-    degenerate (zero-volume-hull) point set, and a box still referencing a
-    ``deck_box_id`` (its corners are only known once the deck is loaded)."""
+    degenerate (zero-volume-hull) point set, a ``shape="deck"`` region (its outline
+    would be the whole referenced part surface — the 🔍 preview reports its element
+    count instead), and a box still referencing a ``deck_box_id`` (its corners are
+    only known once the deck is loaded)."""
     out: list[dict] = []
     for b in boxes or []:
         kind = b.shape_kind()
+        if kind == "deck":
+            continue                                     # no simple wireframe
         if kind == "sphere":
             if float(b.radius) > 0.0:
                 out.append({"kind": "sphere", "name": b.name,
