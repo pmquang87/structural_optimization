@@ -28,9 +28,10 @@ point-in-tetrahedron. The clearance shifts the forbidden boundary:
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -132,3 +133,74 @@ def resolve_keepout(model, case_dir=None) -> Optional[KeepOut]:
                  part_ids=found, clearance=clearance, source=str(path))
     _RESOLVE_MEMO["keepout"] = (key, ko)
     return ko
+
+
+# --------------------------------------------------------------------------- #
+# positive deck growth region (GrowthBox shape="deck") -- the mirror of KeepOut
+#
+# A growth box may take its shape from a separate deck's parts (``region_rad``)
+# instead of a primitive: material may be ADDED where those parts sit (or, with
+# ``forbid=True``, forbidden there). The geometry read is identical to the
+# keep-out's, so it lives here; it is attached to the box for the pure membership
+# test (:func:`oropt.mesh._deck_member`) and the 3D overlay
+# (:func:`oropt.mesh.overlay_primitives`). Kept here (not in loop.py) so the
+# post-run overlay builders (report / animate) can resolve it without importing
+# loop (which imports them -- a cycle).
+# --------------------------------------------------------------------------- #
+
+@lru_cache(maxsize=32)
+def _load_region_solid(path_str: str, part_ids_key: tuple, _mtime: int):
+    """Solid geometry ``(tet_xyz, node_xyz)`` of the parts in a ``shape="deck"``
+    region's deck, memoised so the same deck isn't re-parsed for each of the
+    candidate / blocked / preview / overlay passes. Keyed on the resolved path,
+    the selected part ids and the file mtime, so an edited deck is re-read."""
+    tet_xyz, node_xyz, _surf, _found = read_solid_geometry(
+        Path(path_str), list(part_ids_key) or None)
+    return tet_xyz, node_xyz
+
+
+def resolve_deck_region(box, case_dir=None, label: Optional[str] = None):
+    """A ``shape="deck"`` :class:`~oropt.config.GrowthBox` with its parts' solid
+    geometry loaded and attached -- the runtime attributes ``_region_tets``
+    (V,4,3) / ``_region_nodes`` (P,3) / ``_region_clearance`` consumed by
+    :func:`oropt.mesh._deck_member` (membership) and
+    :func:`oropt.mesh.overlay_primitives` (outline). The deck path (``region_rad``)
+    resolves relative to *case_dir* like the load-case decks. Raises ``ValueError``
+    for a blank/missing/unparsable deck (surfaced at run start / in the preview,
+    before any solve). The positive mirror of :func:`resolve_keepout`."""
+    label = label or box.name or "deck region"
+    rad = (getattr(box, "region_rad", None) or "").strip()
+    if not rad:
+        raise ValueError(
+            f"growth box {label!r}: shape 'deck' needs region_rad -- a Radioss "
+            "deck whose parts' geometry defines the growth region")
+    path = Path(rad)
+    if not path.is_absolute():
+        path = Path(case_dir if case_dir is not None else ".") / rad
+    if not path.exists():
+        raise ValueError(f"growth box {label!r}: region deck not found: {path}")
+    part_ids = tuple(int(p) for p in (getattr(box, "region_part_ids", None) or []))
+    tet_xyz, node_xyz = _load_region_solid(
+        str(path.resolve()), part_ids, path.stat().st_mtime_ns)
+    rb = dataclasses.replace(box)
+    rb._region_tets = tet_xyz
+    rb._region_nodes = node_xyz
+    rb._region_clearance = float(getattr(box, "region_clearance_mm", 0.0) or 0.0)
+    return rb
+
+
+def resolve_overlay_boxes(boxes, case_dir=None) -> list:
+    """Best-effort attach deck-region geometry so the 3D overlay can outline each
+    ``shape="deck"`` region. A region whose deck is blank/missing/unparsable is
+    returned unchanged (the overlay then skips it) -- the overlay is cosmetic and
+    must never raise. Non-deck regions pass through unchanged."""
+    out = []
+    for b in (boxes or []):
+        if getattr(b, "shape_kind", lambda: "")() == "deck":
+            try:
+                out.append(resolve_deck_region(b, case_dir))
+                continue
+            except (ValueError, OSError):
+                pass
+        out.append(b)
+    return out

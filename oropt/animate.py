@@ -36,6 +36,7 @@ from typing import Callable, Optional
 
 from ._render import run_render
 from .config import AnimateOpts, Config
+from .keepout import resolve_overlay_boxes
 from .mesh import overlay_primitives
 
 ANIM_GIF = "topology_evolution.gif"
@@ -358,7 +359,9 @@ def make_animation(cfg: Config, work: Path,
                 f"(found {len(frames)}) - skipped")
             return None
         dest = work / out_name
-        boxes = overlay_primitives(getattr(cfg.model, "growth_boxes", None))
+        boxes = overlay_primitives(resolve_overlay_boxes(
+            getattr(cfg.model, "growth_boxes", None),
+            getattr(cfg.model, "case_dir", ".")))
         with tempfile.TemporaryDirectory(prefix="oropt_anim_", dir=work) as td:
             pngs = _render_frames(frames, opts, Path(td), log, boxes=boxes)
             if not pngs:

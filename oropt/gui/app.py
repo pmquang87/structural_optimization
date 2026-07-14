@@ -42,6 +42,7 @@ from oropt.gui import growthprep
 from oropt.gui import history as run_history
 from oropt.gui.runstate import find_active_run
 from oropt.growthmesh import GROWTH_MESH_DIRNAME, point_config_at
+from oropt.keepout import resolve_overlay_boxes
 from oropt.loop import copy_iter0, preview_growth_boxes
 from oropt.mesh import Mesh, overlay_primitives
 from oropt.report import write_report
@@ -1436,11 +1437,13 @@ def _add_growth_overlay(pl, pv, boxes) -> int:
     """Add a red wireframe outline of each growth region to plotter *pl*.
 
     Draws the same :func:`~oropt.mesh.overlay_primitives` outlines the report
-    render uses — a box (12 edges), sphere, finite cylinder or polyhedron
-    (convex-hull edges) — so a user can place region coordinates against the
-    live topology instead of blind. Returns the number of regions drawn (0 when
-    none have drawable geometry, e.g. a deck-referenced box whose corners
-    aren't resolved without the deck)."""
+    render uses — a box (12 edges), sphere, finite cylinder, polyhedron
+    (convex-hull edges) or a ``shape="deck"`` region (the convex hull of its
+    parts' nodes, once :func:`~oropt.keepout.resolve_overlay_boxes` has attached
+    the geometry) — so a user can place region coordinates against the live
+    topology instead of blind. Returns the number of regions drawn (0 when none
+    have drawable geometry, e.g. a deck-referenced box whose corners aren't
+    resolved without the deck)."""
     import numpy as np
     drawn = 0
     for pr in overlay_primitives(boxes):
@@ -1666,6 +1669,10 @@ def render_monitor_tab(cfg: Config, work: Path, refresh_s: int) -> None:
             # the regions are dormant, so outlining them would misrepresent the run.
             overlay_boxes = (cfg.model.growth_boxes
                              if cfg.model.growth_enabled else [])
+            # Attach deck-region geometry so shape="deck" regions are outlined
+            # too (best-effort; a missing region deck just isn't drawn).
+            overlay_boxes = resolve_overlay_boxes(
+                overlay_boxes, cfg.model.case_dir)
             n_overlay = _add_growth_overlay(pl, pv, overlay_boxes)
             pl.view_isometric(); pl.background_color = "white"
             # backend="panel" renders in-process. The default "trame" backend

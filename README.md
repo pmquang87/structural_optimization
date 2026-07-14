@@ -443,9 +443,10 @@ in progress.
   that gap (0 = the parts' volume exactly). The deck is **never solved** — only
   its geometry is read — so it needn't be a runnable model. Like every region it
   still selects **design elements** that must be pre-meshed there (or generated
-  by the ⚙️ growth-mesh step, which meshes the deck region's volume); a deck
-  region has no primitive outline, so it isn't drawn in the 3D overlay (the 🔍
-  preview reports its element count).
+  by the ⚙️ growth-mesh step, which meshes the deck region's volume). In the 3D
+  overlay a deck region is outlined by the **convex hull** of its parts' nodes (an
+  approximate extent, since its true surface can be arbitrarily complex); the 🔍
+  preview reports its exact element count.
 
   Editable as a table on the GUI's *Optimizer / Output* tab (shape selector,
   per-shape coordinate columns, a Deck /BOX id column, an *Oriented box
