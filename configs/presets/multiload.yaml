@@ -29,6 +29,16 @@ run:
   # On a strong PC, solve the load cases concurrently (each still uses `nt`
   # threads, so solver_concurrency * nt threads must fit the machine).
   solver_concurrency: 1
+  # Per-slot CPU allocation (optional). When non-empty this OVERRIDES
+  # solver_concurrency: the number of slots is the concurrency and each slot
+  # carries its own np/nt, so load case i runs on slot (i mod N) and a slot never
+  # runs two solves at once -- the peak load is the SUM over slots. Sizes each
+  # concurrent solver individually (e.g. two nt=8 slots on a 16-thread box, or a
+  # big + a small slot for uneven load cases). Native runs still need np=1; only
+  # the Docker backend varies np. Leave empty/omit for uniform run.np/run.nt.
+  # solver_slots:
+  #   - {np: 1, nt: 8}
+  #   - {np: 1, nt: 8}
   kmp_stacksize: 400m
   anim_dt: 1.0
 

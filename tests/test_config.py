@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from oropt.config import Config, LoadCase, unknown_keys
+from oropt.config import Config, LoadCase, SolverSlot, unknown_keys
 
 
 def test_run_folder_defaults_to_case_dir():
@@ -82,6 +82,22 @@ def test_solver_concurrency_default_one_and_roundtrips(tmp_path):
     p = tmp_path / "cfg.yaml"
     cfg.to_yaml(p)
     assert Config.from_yaml(p).run.solver_concurrency == 4
+
+
+def test_solver_slots_default_empty_and_roundtrips(tmp_path):
+    assert Config().run.solver_slots == []               # off by default
+    cfg = Config.from_dict({"run": {"solver_slots": [
+        {"np": 1, "nt": 8}, {"np": 2, "nt": 4}]}})        # coerced from dicts
+    assert [(s.np, s.nt) for s in cfg.run.solver_slots] == [(1, 8), (2, 4)]
+    p = tmp_path / "cfg.yaml"
+    cfg.to_yaml(p)
+    back = Config.from_yaml(p).run.solver_slots
+    assert [(s.np, s.nt) for s in back] == [(1, 8), (2, 4)]
+
+
+def test_solver_slots_unknown_key_flagged():
+    keys = unknown_keys({"run": {"solver_slots": [{"np": 1, "nt": 8, "bogus": 1}]}})
+    assert any("run.solver_slots[0].bogus" in k for k in keys)
 
 
 def test_archive_iterations_flag_default_on_and_roundtrips(tmp_path):

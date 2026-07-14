@@ -748,15 +748,19 @@ def worst_violation(cases, case_results) -> float:
     return max(ratios, default=0.0)
 
 
-def _solve_activity(it: int, case: ResolvedCase, i: int, n_cases: int) -> str:
+def _solve_activity(it: int, case: ResolvedCase, i: int, n_cases: int,
+                    slot=None) -> str:
     """One-line "what is solving right now" for the live ``Status.activity``.
 
     Names the iteration, the load case and — the point of the fast-mode monitor —
     whether this solve is the fast tied-linear screen or the full nonlinear solve,
-    so the GUI shows what is running during the minutes a solve takes."""
+    so the GUI shows what is running during the minutes a solve takes. When *slot*
+    (a :class:`~oropt.config.SolverSlot`) is given the solver's own np/nt is
+    appended, so a per-slot concurrent run shows each solve's CPU allocation."""
     mode = "fast linear (tied)" if case.fast_mode else "full nonlinear"
     where = f" [case {i + 1}/{n_cases}]" if n_cases > 1 else ""
-    return f"iter {it}: solving {case.name!r} — {mode}{where}"
+    cpu = f" (np={int(slot.np)} nt={int(slot.nt)})" if slot is not None else ""
+    return f"iter {it}: solving {case.name!r} — {mode}{where}{cpu}"
 
 
 def iter0_archive_dir(work: Path, stem: str, n_cases: int) -> Path:
@@ -908,31 +912,67 @@ def _sequential_contract(results: list) -> tuple[list, list]:
     return run_results, case_results
 
 
+def _slot_cfg(cfg: Config, slot) -> Config:
+    """A shallow :class:`~oropt.config.Config` copy whose ``run`` and ``docker``
+    np/nt are *slot*'s, so :func:`oropt.runner.run_solver` uses this concurrent
+    solver's own CPU allocation (native reads ``run.np``/``run.nt``, Docker reads
+    ``docker.np``/``docker.nt`` — both overridden). Every other setting is shared
+    by reference (read-only during the solve)."""
+    npv, ntv = int(slot.np), int(slot.nt)
+    return dataclasses.replace(
+        cfg, run=dataclasses.replace(cfg.run, np=npv, nt=ntv),
+        docker=dataclasses.replace(cfg.docker, np=npv, nt=ntv))
+
+
+def _slot_plan(cfg: Config, n_cases: int) -> tuple[int, list]:
+    """``(concurrency, per_case_slot)`` for this iteration's solves.
+
+    With ``run.solver_slots`` configured, the concurrency is the number of slots
+    (clamped to *n_cases*) and case *i* is assigned slot ``i % concurrency``;
+    ``per_case_slot`` is the list of those slots (``SolverSlot`` or ``None``) per
+    case, so a caller can read each solve's CPU allocation. With no slots the
+    concurrency is ``run.solver_concurrency`` and every entry is ``None`` (the
+    global ``run.np``/``run.nt`` apply, unchanged behaviour)."""
+    slots = list(getattr(cfg.run, "solver_slots", []) or [])
+    if slots:
+        conc = max(1, min(len(slots), n_cases))
+        return conc, [slots[i % conc] for i in range(n_cases)]
+    conc = max(1, min(int(getattr(cfg.run, "solver_concurrency", 1)), n_cases))
+    return conc, [None] * n_cases
+
+
 def _solve_cases(cfg: Config, cases, case_decks, alive, no_pin, solve_root,
                  n_cases, exclude_elem_ids, fast_ties, reuse_dirs, status, work,
                  it, log) -> tuple[list, list]:
     """Solve every load case for iteration *it* and return the sequential-contract
     ``(run_results, case_results)``.
 
-    ``run.solver_concurrency`` (clamped to ``[1, n_cases]``) sets how many of the
-    iteration's independent per-case solves run at once. Each case solves in its
-    own ``solve/case_<i>/`` dir (see :func:`_case_solve_dir`) into its own
-    subprocess, so they are independent; ``concurrency == 1`` keeps the exact
-    sequential path (per-case live activity, stop at the first failure). >1 uses a
-    thread pool (the work is subprocess-bound) and reconstructs the same contract,
-    so downstream handling is identical."""
+    Concurrency comes from ``run.solver_slots`` (each slot its own np/nt) if set,
+    else ``run.solver_concurrency`` (uniform ``run.np``/``run.nt``), clamped to
+    ``[1, n_cases]``. Each case solves in its own ``solve/case_<i>/`` dir (see
+    :func:`_case_solve_dir`) as an independent subprocess; ``concurrency == 1``
+    keeps the exact sequential path (per-case live activity, stop at the first
+    failure). >1 without slots uses a thread pool over the cases (dynamic load
+    balancing). >1 **with** slots runs one worker per slot, each solving its
+    round-robin subset of cases SERIALLY, so a slot's np/nt is never used by two
+    solves at once — the machine load stays capped at the sum over slots. Every
+    path reconstructs the same contract, so downstream handling is identical."""
+    conc, per_slot = _slot_plan(cfg, n_cases)
+    slotted = any(s is not None for s in per_slot)
+
     def solve_one(i: int):
-        return _solve_case(cfg, cases[i], case_decks[i], alive, no_pin,
-                           _case_solve_dir(solve_root, n_cases, i), cfg.run.anim_dt,
+        slot = per_slot[i]
+        c = cfg if slot is None else _slot_cfg(cfg, slot)
+        return _solve_case(c, cases[i], case_decks[i], alive, no_pin,
+                           _case_solve_dir(solve_root, n_cases, i), c.run.anim_dt,
                            exclude_elem_ids, fast_tie=fast_ties[i],
                            reuse_dir=reuse_dirs[i], log=log)
 
-    conc = max(1, min(int(getattr(cfg.run, "solver_concurrency", 1)), n_cases))
     if conc == 1:
         results: list = []
         for i in range(n_cases):
             status.state = "running"; status.iteration = it
-            status.activity = _solve_activity(it, cases[i], i, n_cases)
+            status.activity = _solve_activity(it, cases[i], i, n_cases, per_slot[i])
             st.write_status(work, status)
             res, r = solve_one(i)
             results.append((res, r))
@@ -941,12 +981,31 @@ def _solve_cases(cfg: Config, cases, case_decks, alive, no_pin, solve_root,
         return _sequential_contract(results)
 
     status.state = "running"; status.iteration = it
-    status.activity = (f"iter {it}: solving {n_cases} load cases, "
-                       f"{conc} concurrently")
+    if slotted:
+        alloc = ", ".join(f"slot{k}: np={int(per_slot[k].np)} nt={int(per_slot[k].nt)}"
+                          for k in range(conc))
+        status.activity = (f"iter {it}: solving {n_cases} load cases across "
+                           f"{conc} solver slots ({alloc})")
+    else:
+        status.activity = (f"iter {it}: solving {n_cases} load cases, "
+                           f"{conc} concurrently")
     st.write_status(work, status)
     with ThreadPoolExecutor(max_workers=conc) as ex:
-        futs = {i: ex.submit(solve_one, i) for i in range(n_cases)}
-        results = [futs[i].result() for i in range(n_cases)]   # index order; re-raises
+        if slotted:
+            # One worker per slot, each solving its cases serially -> a slot's
+            # np/nt is never doubled up (total load = sum over active slots).
+            def slot_worker(slot_idx: int) -> dict:
+                out: dict = {}
+                for i in range(slot_idx, n_cases, conc):
+                    out[i] = solve_one(i)
+                return out
+            merged: dict = {}
+            for fut in [ex.submit(slot_worker, k) for k in range(conc)]:
+                merged.update(fut.result())        # re-raises worker exceptions
+            results = [merged[i] for i in range(n_cases)]
+        else:
+            futs = {i: ex.submit(solve_one, i) for i in range(n_cases)}
+            results = [futs[i].result() for i in range(n_cases)]  # order; re-raises
     return _sequential_contract(results)
 
 

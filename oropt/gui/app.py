@@ -38,6 +38,7 @@ from oropt.gui.boxes import (BOX_COLUMNS, FRAME_COLUMNS, POINT_COLUMNS,
 from oropt.gui.cases import (CASE_COLUMNS, load_cases_from_records,
                              records_from_load_cases)
 from oropt.gui.colors import COMMON_COLORS, OTHER, is_valid_color
+from oropt.gui.slots import SLOT_COLUMNS, records_from_slots, slots_from_records
 from oropt.gui import growthprep
 from oropt.gui import history as run_history
 from oropt.gui.runstate import find_active_run
@@ -223,6 +224,37 @@ def render_input_tab(cfg: Config) -> None:
     if n_cases <= 1:
         st.caption("Only one load case — concurrency has nothing to parallelise. "
                    "Add load cases on the 🔀 tab to solve several at once.")
+
+    with st.expander("⚙️ Per-slot CPU allocation (advanced)"):
+        st.caption(
+            "Give each concurrent solver its own **np × nt** instead of the global "
+            "np / nt above. When this table has rows it **overrides Concurrent "
+            "solvers**: the number of slots is the concurrency, and load case *i* "
+            "runs on slot *i mod N*. A slot never runs two solves at once, so the "
+            "peak load is capped at the **sum** of the slots' np × nt regardless of "
+            "which cases pair up (e.g. two slots `nt=8` on a 16-thread box, or a "
+            "big + a small slot). Leave empty to use the uniform setting above. "
+            "Native runs need np=1 (only the Docker backend varies np).")
+        sl_df = pd.DataFrame(records_from_slots(cfg.run.solver_slots),
+                             columns=SLOT_COLUMNS)
+        sl_edited = st.data_editor(
+            sl_df, num_rows="dynamic", width="stretch",
+            key="solver_slots_editor", column_config={
+                "np": st.column_config.NumberColumn(
+                    "MPI np", min_value=1, step=1, default=1,
+                    help="MPI domains for this slot (native must be 1; Docker "
+                         "may use more)."),
+                "nt": st.column_config.NumberColumn(
+                    "Threads nt", min_value=1, step=1, default=12,
+                    help="OpenMP threads for this slot."),
+            })
+        cfg.run.solver_slots = slots_from_records(sl_edited.to_dict("records"))
+        if cfg.run.solver_slots:
+            eff = min(len(cfg.run.solver_slots), max(1, n_cases))
+            peak = sum(int(s.np) * int(s.nt) for s in cfg.run.solver_slots[:eff])
+            st.caption(f"{len(cfg.run.solver_slots)} slot(s) → concurrency {eff} "
+                       f"(capped at {n_cases} load case(s)); peak np×nt across the "
+                       f"active slots ≈ {peak}. Keep it ≤ CPU cores and watch RAM.")
 
     _seed_widget("run_wall_budget", float(cfg.run.max_wall_hours))
     cfg.run.max_wall_hours = float(st.number_input(
