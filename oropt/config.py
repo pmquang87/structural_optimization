@@ -41,6 +41,25 @@ class ORPaths:
 
 
 @dataclass
+class SolverSlot:
+    """CPU allocation for one slot of the concurrent-solver pool.
+
+    When :attr:`RunOpts.solver_slots` is non-empty it defines how many load-case
+    solves run at once (= the number of slots) and gives each its own ``np`` / ``nt``
+    (MPI domains × OpenMP threads), instead of every concurrent solver sharing the
+    global ``run.np`` / ``run.nt``. Load case *i* is assigned slot ``i % n_slots``,
+    and a slot never runs two solves at once (see :func:`oropt.loop._solve_cases`),
+    so the machine load is capped at the **sum over slots** of ``np × nt`` no matter
+    which cases happen to run together — the point of sizing slots individually
+    (e.g. two slots ``nt=8`` on a 16-thread box, or a big + a small slot). The
+    values feed the solver exactly like ``run.np`` / ``run.nt``: native runs still
+    need ``np = 1`` (SPMD implicit + solid contact segfaults), so only the Docker
+    backend meaningfully varies ``np``."""
+    np: int = 1
+    nt: int = 12
+
+
+@dataclass
 class RunOpts:
     """How to invoke the solver and how patient to be."""
     np: int = 1                # MUST be 1: SPMD implicit + solid contact segfaults (documented)
@@ -77,6 +96,21 @@ class RunOpts:
     # ADVISORY: it only logs warnings (never aborts), and is negligible next to a
     # solve. Set false to skip it.
     sanity_checks: bool = True
+    # Per-slot CPU allocation for the concurrent-solver pool. Empty (default) ->
+    # every concurrent solver uses the global run.np / run.nt, and the count is
+    # solver_concurrency (unchanged behaviour). Non-empty -> OVERRIDES
+    # solver_concurrency: the number of slots is the concurrency and each slot
+    # carries its own np/nt (see :class:`SolverSlot`), so the total load is
+    # capped at the sum over slots. Stored as SolverSlot, coerced from plain
+    # dicts too so YAML round-trips and the GUI editor (dict rows) both work.
+    solver_slots: list = field(default_factory=list)
+
+    def __post_init__(self):
+        fields = {f.name for f in dataclasses.fields(SolverSlot)}
+        self.solver_slots = [
+            s if isinstance(s, SolverSlot)
+            else SolverSlot(**{k: v for k, v in dict(s).items() if k in fields})
+            for s in (self.solver_slots or [])]
 
 
 @dataclass
@@ -1197,5 +1231,8 @@ def unknown_keys(data: dict) -> list[str]:
     mdl = data.get("model")
     if isinstance(mdl, dict):
         _list_of("model.growth_boxes", mdl.get("growth_boxes"), GrowthBox)
+    run = data.get("run")
+    if isinstance(run, dict):
+        _list_of("run.solver_slots", run.get("solver_slots"), SolverSlot)
 
     return out

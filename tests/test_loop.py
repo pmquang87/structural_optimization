@@ -4,10 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import oropt.loop as loop
-from oropt.config import Config
+from oropt.config import Config, SolverSlot
 from oropt.loop import (_archive_iteration, _clean_solve_dir, _sequential_contract,
-                        _solve_cases, copy_iter0, iter0_archive_dir,
-                        resume_warnings, reuse_iter0_solve, snapshot_config_used)
+                        _slot_cfg, _slot_plan, _solve_cases, copy_iter0,
+                        iter0_archive_dir, resume_warnings, reuse_iter0_solve,
+                        snapshot_config_used)
 from oropt.runner import RunResult
 from oropt.status import Status
 
@@ -350,6 +351,69 @@ def test_solve_cases_concurrent_failure_truncates(tmp_path, monkeypatch):
         reuse_dirs=[None] * 3, status=Status(), work=tmp_path, it=0, log=lambda *_: None)
     assert case_results == ["res-c0"]                       # prefix before failure
     assert not run_results[-1].ok                           # ends at the failure
+
+
+# ---- per-slot CPU allocation (run.solver_slots) -----------------------------
+def test_slot_plan_no_slots_uses_concurrency():
+    cfg = Config(); cfg.run.solver_concurrency = 2
+    conc, per_slot = _slot_plan(cfg, n_cases=3)
+    assert conc == 2 and per_slot == [None, None, None]     # uniform run.np/nt
+
+
+def test_slot_plan_slots_set_concurrency_and_assignment():
+    cfg = Config()
+    cfg.run.solver_slots = [SolverSlot(np=1, nt=8), SolverSlot(np=1, nt=4)]
+    cfg.run.solver_concurrency = 1                          # overridden by slots
+    conc, per_slot = _slot_plan(cfg, n_cases=5)
+    assert conc == 2                                        # = number of slots
+    assert [s.nt for s in per_slot] == [8, 4, 8, 4, 8]      # case i -> slot i % 2
+
+
+def test_slot_plan_slots_clamped_to_cases():
+    cfg = Config()
+    cfg.run.solver_slots = [SolverSlot(nt=8), SolverSlot(nt=4), SolverSlot(nt=2)]
+    conc, per_slot = _slot_plan(cfg, n_cases=2)
+    assert conc == 2 and [s.nt for s in per_slot] == [8, 4]  # 3rd slot unused
+
+
+def test_slot_cfg_overrides_run_and_docker_np_nt():
+    cfg = Config()
+    slotted = _slot_cfg(cfg, SolverSlot(np=2, nt=5))
+    assert slotted.run.np == 2 and slotted.run.nt == 5
+    assert slotted.docker.np == 2 and slotted.docker.nt == 5
+    assert cfg.run.nt != 5                                   # original untouched
+
+
+def test_solve_cases_slotted_uses_per_slot_nt(tmp_path, monkeypatch):
+    cfg = Config()
+    cfg.run.solver_slots = [SolverSlot(np=1, nt=8), SolverSlot(np=1, nt=4)]
+    cases = _fake_cases(4)
+    seen: dict = {}
+
+    def fake_solve(cfg, case, cdeck, alive, no_pin, solve_dir, anim_dt,
+                   exclude, fast_tie=None, reuse_dir=None, log=print):
+        seen[case.stem] = cfg.run.nt                        # the slot's nt
+        return RunResult(ok=True, stage="ok", message=""), f"res-{case.stem}"
+    monkeypatch.setattr(loop, "_solve_case", fake_solve)
+
+    run_results, case_results = _solve_cases(
+        cfg, cases, [None] * 4, alive=None, no_pin=set(), solve_root=tmp_path,
+        n_cases=4, exclude_elem_ids=None, fast_ties=[None] * 4,
+        reuse_dirs=[None] * 4, status=Status(), work=tmp_path, it=0,
+        log=lambda *_: None)
+    assert case_results == [f"res-c{i}" for i in range(4)]   # all solved, in order
+    # case i solved with slot (i % 2)'s nt: 8, 4, 8, 4
+    assert [seen[f"c{i}"] for i in range(4)] == [8, 4, 8, 4]
+
+
+def test_solve_activity_appends_slot_cpu():
+    from oropt.loop import _solve_activity
+    from types import SimpleNamespace
+    case = SimpleNamespace(name="pull", fast_mode=False)
+    a = _solve_activity(2, case, 0, 2, SolverSlot(np=1, nt=8))
+    assert "np=1 nt=8" in a
+    # without a slot the string is unchanged (no CPU suffix)
+    assert "np=" not in _solve_activity(2, case, 0, 2)
 
 
 # --- d3plot animation source = last feasible iteration's archive ------------ #

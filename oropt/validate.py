@@ -285,6 +285,35 @@ def _check_backend(cfg: Config, probe_docker_image: bool) -> list[Problem]:
     return problems
 
 
+def _check_solver_slots(cfg: Config) -> list[Problem]:
+    """Per-slot concurrent-solver CPU allocation (``run.solver_slots``): each
+    slot's np/nt must be a number >= 1, the native backend still needs np=1, and
+    non-empty slots override ``solver_concurrency`` / cap at the load-case count."""
+    problems, err, warn = _collector()
+    slots = getattr(cfg.run, "solver_slots", []) or []
+    if not slots:
+        return problems
+    for i, s in enumerate(slots):
+        for name, v in (("np", s.np), ("nt", s.nt)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 1:
+                err(f"run.solver_slots[{i}].{name} must be a number >= 1: "
+                    f"got {v!r}")
+        if not cfg.docker.enabled and isinstance(s.np, (int, float)) \
+                and not isinstance(s.np, bool) and s.np != 1:
+            warn(f"run.solver_slots[{i}].np={s.np}: the native implicit + solid-"
+                 "contact solver requires np=1 (it segfaults otherwise)")
+    if int(getattr(cfg.run, "solver_concurrency", 1)) > 1:
+        warn(f"run.solver_slots is set ({len(slots)} slot(s)), so it OVERRIDES "
+             f"run.solver_concurrency={cfg.run.solver_concurrency}: the "
+             "concurrency is the number of slots")
+    n_cases = len(cfg.load_cases)
+    if n_cases and len(slots) > n_cases:
+        warn(f"run.solver_slots has {len(slots)} slot(s) but only {n_cases} load "
+             "case(s) -- the extra slot(s) are unused (concurrency is capped at "
+             "the number of load cases)")
+    return problems
+
+
 def _check_run_limits(cfg: Config) -> list[Problem]:
     """Run-level watchdog/budget knobs: the engine soft-vs-hard timeout ordering,
     the wall-clock budget, and the divergence-abort counters."""
@@ -599,6 +628,7 @@ def check_config(cfg: Config, *, raw: dict | None = None,
         *_check_model_and_decks(cfg),
         *_check_run_folder(cfg),
         *_check_backend(cfg, probe_docker_image),
+        *_check_solver_slots(cfg),
         *_check_run_limits(cfg),
         *_check_optimizer_knobs(cfg),
         *_check_load_cases(cfg),

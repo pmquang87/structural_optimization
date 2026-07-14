@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from oropt.config import Config, DispConstraint, LoadCase
+from oropt.config import Config, DispConstraint, LoadCase, SolverSlot
 from oropt.runner import backend_problems, run_solver
 from oropt.validate import (ERROR, WARNING, Problem, check_config, has_errors,
                             validate_config)
@@ -371,3 +371,36 @@ def test_negative_wall_budget_is_error(tmp_path):
     cfg = _good_cfg(tmp_path)
     cfg.run.max_wall_hours = -2.0
     assert any("max_wall_hours" in e for e in _errors(cfg))
+
+
+# ---- per-slot concurrent-solver CPU allocation (run.solver_slots) -----------
+def test_solver_slots_bad_nt_is_error(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.run.solver_slots = [SolverSlot(np=1, nt=0)]
+    assert any("solver_slots[0].nt must be a number >= 1" in e for e in _errors(cfg))
+
+
+def test_solver_slots_native_np_not_one_warns(tmp_path):
+    cfg = _good_cfg(tmp_path)                     # native backend
+    cfg.run.solver_slots = [SolverSlot(np=2, nt=4)]
+    assert any("solver_slots[0].np=2" in w and "segfaults" in w
+               for w in _warnings(cfg))
+
+
+def test_solver_slots_override_concurrency_warns(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.run.solver_concurrency = 3
+    cfg.run.solver_slots = [SolverSlot(nt=8), SolverSlot(nt=4)]
+    assert any("OVERRIDES" in w and "solver_concurrency" in w for w in _warnings(cfg))
+
+
+def test_solver_slots_more_than_cases_warns(tmp_path):
+    cfg = _good_cfg(tmp_path)                     # one load case
+    cfg.run.solver_slots = [SolverSlot(nt=8), SolverSlot(nt=4)]
+    assert any("extra slot" in w for w in _warnings(cfg))
+
+
+def test_solver_slots_valid_single_is_clean(tmp_path):
+    cfg = _good_cfg(tmp_path)
+    cfg.run.solver_slots = [SolverSlot(np=1, nt=8)]   # one slot, one case, np=1
+    assert not [m for m in _errors(cfg) + _warnings(cfg) if "solver_slots" in m]
