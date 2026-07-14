@@ -194,6 +194,32 @@ def polyhedron_hull_edges(points: np.ndarray) -> list[list[int]] | None:
     return [[int(i), int(j)] for i, j in sorted(edges)]
 
 
+def hull_wireframe(points: np.ndarray):
+    """``(corners (K,3) float array, edges [[i,j]])`` of the convex hull of
+    *points*, reduced to the hull's **extreme vertices** so a large node cloud
+    (a deck region's whole part) yields a light outline; ``None`` for fewer than
+    4 points or a degenerate (zero-volume) hull. Edges index into the returned
+    corners. Unlike :func:`polyhedron_hull_edges` (which keeps every input point
+    as a corner — fine for a handful of explicit polyhedron nodes) this drops the
+    interior nodes, so it suits a deck region's thousands of nodes."""
+    pts = np.asarray(points, dtype=float)
+    if len(pts) < 4:
+        return None
+    try:
+        hull = ConvexHull(pts)
+    except QhullError:
+        return None
+    verts = [int(v) for v in hull.vertices]          # extreme points only
+    remap = {v: k for k, v in enumerate(verts)}
+    edges = set()
+    for s in hull.simplices:
+        tri = [int(x) for x in s]
+        for k in range(3):
+            i, j = remap[tri[k]], remap[tri[(k + 1) % 3]]
+            edges.add((i, j) if i < j else (j, i))
+    return pts[verts], [[int(i), int(j)] for i, j in sorted(edges)]
+
+
 def overlay_primitives(boxes) -> list[dict]:
     """JSON-serialisable wireframe-outline descriptors for the growth regions.
 
@@ -206,18 +232,34 @@ def overlay_primitives(boxes) -> list[dict]:
     * polyhedron -> ``{"kind": "polyhedron", "name", "corners": [[x,y,z]*P], "edges": [[i,j]*E]}``
       (the same corners+edges structure as a box, with the edges of the points'
       convex hull, so every consumer draws it with the box code path)
+    * deck       -> ``{"kind": "polyhedron", "name", "corners", "edges"}`` — the
+      **convex hull** of the referenced parts' nodes (an approximate outline of
+      the region's extent, drawn by the polyhedron code path). Only emitted when
+      the region's geometry has been attached by
+      :func:`oropt.keepout.resolve_deck_region` (the caller wraps its boxes in
+      :func:`oropt.keepout.resolve_overlay_boxes`); an unresolved deck region is
+      skipped.
 
     Regions with no drawable geometry are skipped: a zero-radius sphere/cylinder,
     a zero-length cylinder axis, a zero-size box, a polyhedron with a missing/
-    degenerate (zero-volume-hull) point set, a ``shape="deck"`` region (its outline
-    would be the whole referenced part surface — the 🔍 preview reports its element
-    count instead), and a box still referencing a ``deck_box_id`` (its corners are
-    only known once the deck is loaded)."""
+    degenerate (zero-volume-hull) point set, a ``shape="deck"`` region whose
+    geometry has not been attached (or whose hull is degenerate), and a box still
+    referencing a ``deck_box_id`` (its corners are only known once the deck is
+    loaded)."""
     out: list[dict] = []
     for b in boxes or []:
         kind = b.shape_kind()
         if kind == "deck":
-            continue                                     # no simple wireframe
+            # Outline the region as the convex hull of the referenced parts'
+            # nodes -- but only if the geometry was attached (resolve_overlay_
+            # boxes); an unresolved deck region has no drawable outline.
+            nodes = getattr(b, "_region_nodes", None)
+            hull = hull_wireframe(nodes) if nodes is not None else None
+            if hull is not None:
+                corners, edges = hull
+                out.append({"kind": "polyhedron", "name": b.name,
+                            "corners": corners.tolist(), "edges": edges})
+            continue
         if kind == "sphere":
             if float(b.radius) > 0.0:
                 out.append({"kind": "sphere", "name": b.name,

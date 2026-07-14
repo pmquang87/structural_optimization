@@ -48,6 +48,7 @@ from . import status as st
 from ._render import run_render
 from .animate import ANIM_GIF
 from .config import Config
+from .keepout import resolve_overlay_boxes
 from .mesh import overlay_primitives
 
 REPORT_HTML = "report.html"
@@ -733,7 +734,11 @@ def _write_overlay_spec(work: Path, cfg: Config,
     ``None`` when there are no drawable regions (so a normal run passes no overlay
     and its render stays byte-identical). Best-effort: never raises."""
     try:
-        boxes = getattr(getattr(cfg, "model", None), "growth_boxes", None) or []
+        model = getattr(cfg, "model", None)
+        boxes = getattr(model, "growth_boxes", None) or []
+        # Attach deck-region geometry so shape="deck" regions get outlined too
+        # (best-effort; a missing region deck just isn't drawn).
+        boxes = resolve_overlay_boxes(boxes, getattr(model, "case_dir", "."))
         prims = overlay_primitives(boxes)
         if not prims:
             return None

@@ -206,10 +206,53 @@ def test_region_aabb_deck(tmp_path):
 
 
 # ---- overlay ----------------------------------------------------------------
-def test_overlay_skips_deck_region():
-    # a deck region has no simple wireframe -> emitted by nothing
+def test_overlay_skips_unresolved_deck_region():
+    # an unresolved deck region (no geometry attached) has no drawable outline
     assert overlay_primitives([GrowthBox(name="r", shape="deck",
                                          region_rad="x.rad")]) == []
+
+
+def test_overlay_outlines_resolved_deck_region(tmp_path):
+    import json
+    deck, _mesh = _load(tmp_path)
+    _write_region(tmp_path)                          # a single tet region
+    [rb] = resolve_growth_boxes(deck, [_deck_box()], str(tmp_path))
+    [pr] = overlay_primitives([rb])
+    assert pr["kind"] == "polyhedron" and pr["name"] == "reg"
+    # tetrahedron hull: 4 extreme vertices, 6 edges
+    assert len(pr["corners"]) == 4 and len(pr["edges"]) == 6
+    json.dumps(pr)                                   # JSON-serialisable (subprocess)
+
+
+def test_resolve_overlay_boxes_best_effort(tmp_path):
+    from oropt.keepout import resolve_overlay_boxes
+    _load(tmp_path)
+    _write_region(tmp_path)
+    good = _deck_box(name="ok")
+    missing = GrowthBox(name="gone", shape="deck", region_rad="nope.rad")
+    plain = GrowthBox(name="box", x_min=0.0, x_max=1.0, y_min=0.0, y_max=1.0,
+                      z_min=0.0, z_max=1.0)
+    resolved = resolve_overlay_boxes([good, missing, plain], str(tmp_path))
+    assert getattr(resolved[0], "_region_nodes", None) is not None   # attached
+    assert getattr(resolved[1], "_region_nodes", None) is None       # missing deck
+    assert resolved[2] is plain                                      # non-deck passthrough
+    # overlay draws the resolved deck region and the plain box, not the missing one
+    assert sorted(p["name"] for p in overlay_primitives(resolved)) == ["box", "ok"]
+
+
+def test_hull_wireframe_reduces_to_extreme_vertices():
+    from oropt.mesh import hull_wireframe
+    import numpy as np
+    # a cube's 8 corners + an interior point -> the interior point is dropped, so
+    # the outline has 8 corners (edges are the triangulated hull's, incl. face
+    # diagonals, like the polyhedron overlay). All edge indices are valid corners.
+    cube = np.array([[x, y, z] for x in (0, 1) for y in (0, 1) for z in (0, 1)]
+                    + [[0.5, 0.5, 0.5]], dtype=float)
+    corners, edges = hull_wireframe(cube)
+    assert len(corners) == 8                                 # interior point dropped
+    assert edges and all(0 <= i < 8 and 0 <= j < 8 for i, j in edges)
+    assert hull_wireframe(np.zeros((3, 3))) is None          # < 4 points
+    assert hull_wireframe(np.zeros((5, 3))) is None          # degenerate hull
 
 
 # ---- config round-trip ------------------------------------------------------
