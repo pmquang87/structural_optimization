@@ -12,7 +12,11 @@ EXTENDED starter decks the user can inspect and diff before running:
   every load case the extended ``<stem>_0000.rad`` (the same file, with the new
   ``/NODE`` and ``/TETRA4/<design_part_id>`` cards appended inside their blocks
   and everything else byte-identical) plus a verbatim copy of the case's
-  ``<stem>_0001.rad`` engine deck. Point ``model.case_dir`` at that folder (the
+  ``<stem>_0001.rad`` engine deck, **and** a copy of every auxiliary geometry
+  deck the config references relative to ``case_dir`` — each ``shape="deck"``
+  growth region's ``region_rad`` and the ``growth_keepout_rad`` deck — so the
+  folder is a self-contained case dir (those decks are re-read at run time
+  relative to ``case_dir``, which now points here). Point ``model.case_dir`` at that folder (the
   CLI prints the line to change; the GUI offers a button) and run — the run
   itself stays byte-identical phase-1 behaviour: the generated elements start
   void because their centroids lie inside the regions, and the existing
@@ -505,6 +509,10 @@ class GrowthMeshReport:
     # carve-off regions need (model.growth_original_elem_max); recorded into the
     # config by point_config_at alongside case_dir.
     original_elem_max: int = 0
+    # Auxiliary geometry decks copied into out_dir so the folder is a
+    # self-contained case dir: each shape="deck" region's region_rad and the
+    # keep-out deck (both resolved relative to case_dir at run time). Str paths.
+    region_decks: list = dataclasses.field(default_factory=list)
 
 
 def report_from_dict(data: dict) -> GrowthMeshReport:
@@ -767,6 +775,35 @@ def prepare_growth_mesh(cfg: Config, size_factor: float = 1.0,
         else:
             log(f"[oropt] growth-mesh: engine deck missing, not copied: "
                 f"{case.engine}")
+    # Copy the auxiliary geometry decks the config references RELATIVE to case_dir
+    # -- every shape="deck" growth region's region_rad and the keep-out deck --
+    # into the output folder too, so pointing model.case_dir here yields a
+    # SELF-CONTAINED, runnable deck set. Without this, the run (whose case_dir is
+    # now this folder) resolves those relative paths under it and fails with
+    # "region deck not found" / "keep-out deck not found". Absolute paths already
+    # resolve regardless of case_dir, so they are left untouched.
+    aux_rel: list[str] = []
+    for b in resolved:
+        if b.shape_kind() == "deck" and (getattr(b, "region_rad", "") or "").strip():
+            aux_rel.append(b.region_rad.strip())
+    if getattr(m, "growth_keepout_rad", None):
+        aux_rel.append(str(m.growth_keepout_rad).strip())
+    seen: set = set()
+    for rel in aux_rel:
+        if rel in seen or Path(rel).is_absolute():
+            continue                                 # dup, or resolves without a copy
+        seen.add(rel)
+        src = Path(m.case_dir) / rel
+        out = dest / rel
+        if not src.is_file():
+            log(f"[oropt] growth-mesh: referenced deck missing, not copied: {src}")
+            continue
+        if src.resolve() == out.resolve():
+            continue                                 # in-place run: same file
+        out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, out)
+        report.region_decks.append(str(out))
+        log(f"[oropt] growth-mesh: copied referenced deck {rel!r} -> {out}")
     log(f"[oropt] growth-mesh: extended deck set written to {dest} -- point "
         f"model.case_dir there to use it")
     return report

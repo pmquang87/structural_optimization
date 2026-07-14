@@ -617,6 +617,60 @@ def test_prepare_keepout_removing_all_raises(tmp_path, mini_engine_path):
     assert not (tmp_path / GROWTH_MESH_DIRNAME).exists()
 
 
+def test_prepare_copies_keepout_deck(tmp_path, mini_engine_path):
+    """The keep-out deck (referenced relative to case_dir) is copied into the
+    growth_mesh output, so pointing case_dir there yields a self-contained deck
+    set -- the run resolves growth_keepout_rad relative to the new case_dir."""
+    _write_mini(tmp_path)
+    name = _neighbour_brick(tmp_path, (-1.0, -2.0, -2.0), (-0.2, 2.0, 2.0))
+    cfg = _mini_cfg(tmp_path, [WING])
+    cfg.model.growth_keepout_rad = name
+    rep = prepare_growth_mesh(cfg, backend=_fake_backend, log=_silent)
+    copied = tmp_path / GROWTH_MESH_DIRNAME / name
+    assert copied.is_file()                          # keep-out deck copied along
+    assert str(copied) in rep.region_decks
+
+
+def test_prepare_copies_deck_region(tmp_path, mini_engine_path):
+    """A shape="deck" region's region_rad deck is copied into growth_mesh too, so
+    the run (case_dir now = growth_mesh) can still resolve it. Regression for the
+    'region deck not found' bug when pointing case_dir at growth_mesh."""
+    _write_mini(tmp_path)
+    # a region deck spanning the WING volume (x<0): its point-in-tet membership
+    # selects the same generated candidates WING would.
+    rname = _neighbour_brick(tmp_path, (-1.0, -0.5, -0.5), (-0.001, 1.5, 1.5),
+                             name="region_0000.rad")
+    cfg = _mini_cfg(tmp_path, [GrowthBox(name="wingdeck", shape="deck",
+                                         region_rad=rname)])
+    rep = prepare_growth_mesh(cfg, backend=_fake_backend, log=_silent)
+    assert rep.n_new_elems == 2                      # both WING-volume tets kept
+    copied = tmp_path / GROWTH_MESH_DIRNAME / rname
+    assert copied.is_file() and str(copied) in rep.region_decks
+    # and the pointed-at run resolves the region deck under the new case_dir
+    ptd = _mini_cfg(tmp_path / GROWTH_MESH_DIRNAME,
+                    [GrowthBox(name="wingdeck", shape="deck", region_rad=rname)])
+    ext = Deck.load(tmp_path / GROWTH_MESH_DIRNAME / "mini_0000.rad",
+                    ptd.model.design_part_id, ptd.model.design_node_min)
+    # no "region deck not found" -- resolves and selects the 2 grown candidates
+    assert int(growth_candidate_mask(
+        ext, Mesh.from_deck(ext), ptd.model, log=_silent).sum()) == 2
+
+
+def test_prepare_absolute_region_deck_not_copied(tmp_path, mini_engine_path):
+    """An ABSOLUTE region_rad resolves regardless of case_dir, so it is left in
+    place (not copied) -- only relative references need the copy."""
+    _write_mini(tmp_path)
+    rname = _neighbour_brick(tmp_path, (-1.0, -0.5, -0.5), (-0.001, 1.5, 1.5),
+                             name="region_abs_0000.rad")
+    abs_path = str((tmp_path / rname).resolve())
+    cfg = _mini_cfg(tmp_path, [GrowthBox(name="wd", shape="deck",
+                                         region_rad=abs_path)])
+    rep = prepare_growth_mesh(cfg, backend=_fake_backend, log=_silent)
+    assert rep.n_new_elems == 2
+    assert rep.region_decks == []                    # absolute -> nothing copied
+    assert not (tmp_path / GROWTH_MESH_DIRNAME / rname).exists()
+
+
 def test_prepare_mismatched_case_mesh_raises(tmp_path):
     _write_mini(tmp_path, stem="ma")
     p = tmp_path / "mb_0000.rad"
