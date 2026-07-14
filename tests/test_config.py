@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from oropt.config import Config, LoadCase, SolverSlot, unknown_keys
+from oropt.config import Config, LoadCase, unknown_keys
 
 
 def test_run_folder_defaults_to_case_dir():
