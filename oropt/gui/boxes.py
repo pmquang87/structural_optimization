@@ -13,7 +13,10 @@ columns); a row whose shape is missing any of *its* required coordinates is
 dropped — a partially-specified region is meaningless (and would otherwise silently
 default a coordinate to 0.0 and select the wrong elements). A row that names a
 ``deck_box_id`` needs no coordinates (they are read from the deck's ``/BOX`` card at
-run start), so it is kept regardless.
+run start), so it is kept regardless. A ``deck``-shaped row likewise needs no
+coordinates — its shape is a separate Radioss deck named in ``region_rad`` (with an
+optional ``region_part_ids`` filter and ``region_clearance_mm`` band) — so it is kept
+whenever ``region_rad`` is filled.
 
 The **oriented-box frame** (origin / local +x axis / in-plane vector) is edited in
 a separate, narrower table keyed by region name (:func:`records_from_frames` /
@@ -36,18 +39,27 @@ from oropt.config import GrowthBox
 # Coordinate fields required to fully specify each shape (all must be present for
 # the row to become a region). ``name``/``shape``/``deck_box_id`` are handled
 # apart. A polyhedron needs no main-table coordinates: its node list lives in the
-# separate points table.
+# separate points table. A deck region needs no coordinates either: its shape is a
+# separate deck (``region_rad``), handled apart like ``deck_box_id``.
 _REQUIRED: dict[str, list[str]] = {
     "box": ["x_min", "x_max", "y_min", "y_max", "z_min", "z_max"],
     "sphere": ["cx", "cy", "cz", "radius"],
     "cylinder": ["x1", "y1", "z1", "x2", "y2", "z2", "radius"],
     "polyhedron": [],
+    "deck": [],
 }
 
 # Every numeric column the main table shows (union across shapes), in display order.
+# ``region_clearance_mm`` is numeric but shape-specific (deck) so it sits with the
+# other deck columns below, not in the coordinate block.
 _NUMERIC: list[str] = ["x_min", "x_max", "y_min", "y_max", "z_min", "z_max",
                        "cx", "cy", "cz", "radius",
                        "x1", "y1", "z1", "x2", "y2", "z2"]
+
+# Text columns of a deck region (its shape comes from a separate deck): the deck
+# path, the part-id filter (comma-separated, blank = all solid parts) and an
+# outward clearance band.
+DECK_COLUMNS: list[str] = ["region_rad", "region_part_ids", "region_clearance_mm"]
 
 # Full column order of the main region data-editor. ``forbid`` is the polarity
 # checkbox: off (default) = a POSITIVE add-material region; on = a NEGATIVE
@@ -57,7 +69,20 @@ _NUMERIC: list[str] = ["x_min", "x_max", "y_min", "y_max", "z_min", "z_max",
 # model.growth_original_elem_max) start void; on = a region overlapping the
 # original part voids those elements too (carve-and-regrow).
 BOX_COLUMNS: list[str] = ["name", "shape", "forbid", "carve", "deck_box_id",
-                          *_NUMERIC]
+                          *DECK_COLUMNS, *_NUMERIC]
+
+
+def _parse_int_ids(v) -> list[int]:
+    """Part-id list from a comma/space-separated editor cell (blank -> [])."""
+    if _is_blank(v):
+        return []
+    out: list[int] = []
+    for tok in str(v).replace(",", " ").split():
+        try:
+            out.append(int(float(tok)))
+        except ValueError:
+            continue
+    return out
 
 # Columns of the oriented-frame data-editor: name + origin + local +x + in-plane.
 FRAME_COLUMNS: list[str] = ["name", "ox", "oy", "oz",
@@ -99,15 +124,23 @@ def records_from_growth_boxes(boxes) -> list[dict]:
     ``deck_box_id`` and, for the columns the shape uses, that region's value;
     columns another shape would use — and all coordinates of a ``deck_box_id``
     region (they come from the deck) — are left ``None`` so the editor shows them
-    blank."""
+    blank. A ``deck`` region fills the deck columns (``region_rad`` /
+    ``region_part_ids`` / ``region_clearance_mm``) and no coordinates."""
     out: list[dict] = []
     for b in boxes:
         kind = _shape_of(b)
         req = set(_REQUIRED[kind])
         deck_ref = b.deck_box_id is not None
+        is_deck = kind == "deck"
         row: dict = {"name": b.name, "shape": kind,
                      "forbid": bool(getattr(b, "forbid", False)),
-                     "carve": bool(b.carve), "deck_box_id": b.deck_box_id}
+                     "carve": bool(b.carve), "deck_box_id": b.deck_box_id,
+                     "region_rad": b.region_rad if is_deck else None,
+                     "region_part_ids": (
+                         ",".join(str(p) for p in (b.region_part_ids or []))
+                         if is_deck else None),
+                     "region_clearance_mm": (
+                         b.region_clearance_mm if is_deck else None)}
         for col in _NUMERIC:
             row[col] = getattr(b, col) if (col in req and not deck_ref) else None
         out.append(row)
@@ -120,11 +153,13 @@ def growth_boxes_from_records(records) -> list[GrowthBox]:
     Fully-empty rows are dropped, so the trailing blank row the dynamic editor
     offers never becomes a region; a row missing *any* coordinate its shape needs
     is dropped too — unless it names a ``deck_box_id``, whose coordinates come from
-    the deck at run start. An unrecognised shape is dropped (validation surfaces the
-    typo on the coordinates path); a blank shape defaults to ``box``; a blank
-    ``forbid`` cell defaults to off (a positive add-material region) and a blank
-    ``carve`` cell defaults to off (part kept intact — the config defaults).
-    The oriented frame is applied separately (:func:`apply_frame_records`)."""
+    the deck at run start, or is a ``deck`` region, whose shape is the
+    ``region_rad`` deck (a deck row with a blank ``region_rad`` is dropped). An
+    unrecognised shape is dropped (validation surfaces the typo on the coordinates
+    path); a blank shape defaults to ``box``; a blank ``forbid`` cell defaults to
+    off (a positive add-material region) and a blank ``carve`` cell defaults to off
+    (part kept intact — the config defaults). The oriented frame is applied
+    separately (:func:`apply_frame_records`)."""
     out: list[GrowthBox] = []
     for row in records:
         name = "" if _is_blank(row.get("name")) else str(row.get("name")).strip()
@@ -137,6 +172,17 @@ def growth_boxes_from_records(records) -> list[GrowthBox]:
         forbid = False if _is_blank(raw_forbid) else bool(raw_forbid)
         raw_carve = row.get("carve")
         carve = False if _is_blank(raw_carve) else bool(raw_carve)
+        if kind == "deck":
+            region_rad = row.get("region_rad")
+            if _is_blank(region_rad):
+                continue                 # a deck region needs its deck
+            clr = row.get("region_clearance_mm")
+            out.append(GrowthBox(
+                name=name, shape="deck", forbid=forbid, carve=carve,
+                region_rad=str(region_rad).strip(),
+                region_part_ids=_parse_int_ids(row.get("region_part_ids")),
+                region_clearance_mm=0.0 if _is_blank(clr) else float(clr)))
+            continue
         deck_id = row.get("deck_box_id")
         if not _is_blank(deck_id):
             out.append(GrowthBox(name=name, shape=kind, forbid=forbid,
